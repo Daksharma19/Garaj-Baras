@@ -4,34 +4,53 @@ import numpy as np
 import cv2
 from PIL import Image
 
+# The 10 legend colors from the IMD dBZ scale (matches fuzzy.py's COLOR_TABLE).
+# Rain is detected by matching these directly, not by excluding background.
+RAIN_PALETTE = np.array([
+    (0,   25,  176),  # ~20 dBZ
+    (0,   58,  200),  # ~25
+    (0,   71,  255),  # ~30
+    (26,  163, 255),  # ~35
+    (135, 241, 255),  # ~38
+    (0,   200, 0),    # ~41
+    (255, 255, 0),    # ~44
+    (255, 165, 0),    # ~50
+    (255, 0,   0),    # ~55
+    (255, 255, 255),  # ~60
+], dtype=np.int16)
 
-def isolate_rain(frame_path, clutter_mask=None):
+
+def isolate_rain(frame_path, clutter_mask=None, tolerance=65):
     """
-    Opens a radar frame and returns a mask of rain pixels.
-    Background (terrain, border, sidebar) is removed.
-    If clutter_mask is provided, permanent ground clutter pixels are also removed.
+    Returns a mask of rain pixels by matching each pixel to the known dBZ
+    legend palette (RAIN_PALETTE). A pixel is rain only if it lies within
+    `tolerance` RGB-distance of a real legend color.
+
+    tolerance: lower = stricter. Try 55–75 to tune.
     Returns: numpy array (uint8), 0=no rain, 255=rain
     """
-    img = np.array(Image.open(frame_path).convert('RGB'))
-    r, g, b = img[:, :, 0], img[:, :, 1], img[:, :, 2]
+    img = np.array(Image.open(frame_path).convert('RGB')).astype(np.int16)
+    h, w, _ = img.shape
+    flat = img.reshape(-1, 3)  # (H*W, 3)
 
-    # Background masks to REMOVE
-    green = (r >= 70) & (r <= 180) & (g >= 100) & (g <= 200) & (b >= 40)  & (b <= 100)
-    brown = (r >= 150) & (r <= 220) & (g >= 120) & (g <= 180) & (b >= 60)  & (b <= 120)
-    black = (r <= 20)  & (g <= 20)  & (b <= 20)
-    gray  = (r >= 150) & (r <= 220) & (g >= 150) & (g <= 220) & (b >= 150) & (b <= 220)
+    diff = flat[:, None, :] - RAIN_PALETTE[None, :, :]       # (N, P, 3)
+    dist2 = np.sum(diff.astype(np.int32) ** 2, axis=2)       # (N, P)
+    is_rain = dist2.min(axis=1) <= (tolerance ** 2)           # (N,)
 
-    background = green | brown | black | gray
-    rain_mask = np.where(background, 0, 255).astype(np.uint8)
+    rain_mask = np.where(is_rain, 255, 0).astype(np.uint8).reshape(h, w)
 
-    # Remove permanent ground clutter pixels if mask provided
+    # Remove thin map furniture (range rings, text, station labels) that share
+    # colors with the dBZ palette. Real rain is blobby and survives a small open.
+    _k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    rain_mask = cv2.morphologyEx(rain_mask, cv2.MORPH_OPEN, _k, iterations=1)
+
     if clutter_mask is not None:
         rain_mask = np.where(clutter_mask > 0, 0, rain_mask).astype(np.uint8)
 
     return rain_mask
 
 
-def build_clutter_mask(frames_list, threshold=0.95):
+def build_clutter_mask(frames_list, threshold=0.6):
     """
     Identifies permanent ground clutter pixels by analyzing all radar frames.
 
@@ -47,11 +66,16 @@ def build_clutter_mask(frames_list, threshold=0.95):
     if not frames_list:
         return None
 
-    # Stack rain masks — without clutter correction (raw masks)
+    # Stack rain masks — without clutter correction (raw masks).
+    # Dilate each frame's mask by 1 px before stacking so that a stationary
+    # label that wobbles ±1 px between scans still registers as "present" in
+    # every frame and crosses the 0.6 threshold.
+    _k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     masks = []
     for path in frames_list:
-        mask = isolate_rain(path, clutter_mask=None)
-        masks.append(mask > 0)
+        m = (isolate_rain(path, clutter_mask=None) > 0).astype(np.uint8)
+        m = cv2.dilate(m, _k, iterations=1)
+        masks.append(m > 0)
 
     stacked = np.stack(masks, axis=0)  # shape: (N, H, W)
     rain_fraction = stacked.mean(axis=0)  # 0.0–1.0 per pixel

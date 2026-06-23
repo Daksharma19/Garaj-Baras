@@ -25,6 +25,11 @@ from prediction import (generate_waypoints, check_route_rain,   # type: ignore
                         haversine_km)
 from georef import latlon_to_pixel, is_within_radar  # type: ignore
 from fuzzy import enrich_results  # type: ignore
+from patches import (  # type: ignore
+    compute_patch_motion,
+    score_patches_for_route,
+    build_ncr_roi_mask,
+)
 from datetime import timezone as _timezone
 
 from datetime import datetime as _dt, timedelta as _td
@@ -122,6 +127,30 @@ class WaypointInput(BaseModel):
 class PredictWaypointsRequest(BaseModel):
     waypoints: List[WaypointInput]
 
+
+def _patch_to_public(p: dict) -> dict:
+    """Strip numpy masks / cast numpy types to a JSON-safe patch summary."""
+    cx, cy = p.get("centroid_px", (None, None))
+    latlon = p.get("centroid_latlon", (None, None))
+    ipx = p.get("intercept_px")
+    eta = p.get("intercept_eta")
+    return {
+        "id": int(p.get("id", -1)),
+        "area_px": int(p.get("area_px", 0)),
+        "centroid_px": [float(cx), float(cy)] if cx is not None else None,
+        "centroid_latlon": [float(latlon[0]), float(latlon[1])] if latlon and latlon[0] is not None else None,
+        "speed_kmh": round(float(p.get("speed_kmh", 0.0)), 1),
+        "direction_from": p.get("direction_from", "Unknown"),
+        "direction_to": p.get("direction_to", "Unknown"),
+        "max_dbz": int(p.get("max_dbz", 0)),
+        "in_ncr": bool(p.get("in_ncr", False)),
+        "will_hit_route": bool(p.get("will_hit_route", False)),
+        "intercept_eta": (None if eta is None else round(float(eta), 1)),
+        "intercept_px": ([float(ipx[0]), float(ipx[1])] if ipx else None),
+        "relevance": float(p.get("relevance", 0.0)),
+    }
+
+
 # Global state - loaded once at startup
 # Lazy-cache refreshed by TTL
 radar_cache = {
@@ -203,6 +232,32 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
         latest_ts = recent_frame_data[-1][1] if recent_frame_data else None
         lag_info = get_radar_lag_mins(latest_ts)
 
+        # --- Per-patch motion (NCR-focused) ---
+        # Walk recent pairs newest-first; use the first pair where at least one
+        # blob-sized rain pixel exists in the earlier frame (same skip logic as
+        # get_movement_vector). Avoids all-zero flow when the last pair is rain-free.
+        patches_motion = []
+        roi_mask = None
+        try:
+            roi_mask = build_ncr_roi_mask(radius_km=150.0)
+            pairs = list(zip(recent_frame_data[:-1], recent_frame_data[1:]))
+            for (p_prev, ts_prev), (p_last, ts_last) in reversed(pairs):
+                from optical_flow import isolate_rain as _ir  # type: ignore
+                if _ir(p_prev, clutter_mask=clutter_mask).max() == 0:
+                    continue
+                gap = 10.0
+                if ts_prev and ts_last:
+                    gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+                patches_motion = compute_patch_motion(
+                    p_prev, p_last, gap_mins=gap,
+                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                )
+                print(f"  Per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m)")
+                break
+        except Exception as _pe:
+            print(f"  Per-patch motion failed (non-fatal): {_pe}")
+            patches_motion, roi_mask = [], None
+
         radar_cache.update({
             "frame_data": all_frame_data,
             "recent_frame_data": recent_frame_data,
@@ -211,6 +266,8 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
             "latest_frame": latest_frame,
             "latest_ts": latest_ts,
             "lag_info": lag_info,
+            "patches": patches_motion,
+            "roi_mask": roi_mask,
             "last_loaded": time.time(),
             "gif_mtime": os.path.getmtime(GIF_SAVE_PATH) if os.path.exists(GIF_SAVE_PATH) else None,
         })
@@ -393,6 +450,27 @@ def predict_waypoints(payload: PredictWaypointsRequest):
 
         max_eta = max((eta for (_la, _lo, eta) in waypoints_latlon), default=0.0)
 
+        # --- Per-patch route intercept ---
+        patch_analysis = None
+        try:
+            patches_motion = state.get("patches", []) or []
+            if patches_motion:
+                scored = score_patches_for_route(
+                    patches_motion,
+                    waypoints_pixels,
+                    lag_mins=lag_info["lag_mins"],
+                    horizon_mins=max_eta if max_eta > 0 else 120.0,
+                )
+                first = scored["first"]
+                patch_analysis = {
+                    "first_patch": _patch_to_public(first) if first else None,
+                    "relevant_count": len(scored["relevant"]),
+                    "relevant_patches": [_patch_to_public(p) for p in scored["relevant"]],
+                    "all_patches": [_patch_to_public(p) for p in scored["patches"]],
+                }
+        except Exception as _pe:
+            patch_analysis = {"error": str(_pe)}
+
         results = check_route_rain(
             waypoints_pixels,
             dx,
@@ -435,6 +513,7 @@ def predict_waypoints(payload: PredictWaypointsRequest):
             "radar_freshness": lag_info["freshness"],
             "radar_message": lag_info["message"],
             "waypoints": enriched,
+            "patch_analysis": patch_analysis,
         }
     except HTTPException:
         raise
