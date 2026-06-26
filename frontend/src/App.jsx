@@ -101,18 +101,25 @@ function computeRainTimeline(waypoints) {
   const patches = []
   let start = null
   let last = null
+  let patchWps = []
   for (const wp of sorted) {
     const eta = Number(wp.eta_mins)
     if (wp.rain_expected) {
-      if (start === null) start = eta
+      if (start === null) { start = eta; patchWps = [] }
       last = eta
+      patchWps.push(wp)
     } else if (start !== null) {
-      patches.push({ startMin: start, endMin: last })
-      start = null
-      last = null
+      const labels = patchWps.map((w) => getRainGroupLabel(w.label))
+      const dominant = labels.includes('Heavy') ? 'Heavy' : labels.includes('Medium') ? 'Medium' : 'Light'
+      patches.push({ startMin: start, endMin: last, intensity: dominant })
+      start = null; last = null; patchWps = []
     }
   }
-  if (start !== null) patches.push({ startMin: start, endMin: last })
+  if (start !== null) {
+    const labels = patchWps.map((w) => getRainGroupLabel(w.label))
+    const dominant = labels.includes('Heavy') ? 'Heavy' : labels.includes('Medium') ? 'Medium' : 'Light'
+    patches.push({ startMin: start, endMin: last, intensity: dominant })
+  }
 
   const lastEta = Number(sorted[sorted.length - 1].eta_mins) || 0
   const firstEta = Number(sorted[0].eta_mins) || 0
@@ -159,10 +166,6 @@ function computeRainTimeline(waypoints) {
       headline = `Rain starts in ${fmt(closest.startMin)}, clearing in ${fmt(closest.endMin)}`
       secondary = `Rainy stretch ~${duration} min.`
     }
-  }
-
-  if (remaining > 0) {
-    secondary += ` (${remaining} more patch${remaining > 1 ? 'es' : ''} further along your route.)`
   }
 
   return { tone: 'rain', headline, secondary, patches, closest, lastEta }
@@ -417,15 +420,14 @@ function toIST(etaMins) {
   return `${h}:${m}`
 }
 
-function RainTimelineBar({ patches, lastEta }) {
+function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown }) {
   if (!patches?.length || !lastEta || lastEta <= 0) return null
   const first = patches[0]
   const startIST = toIST(first.startMin)
   const endIST = toIST(first.endMin)
   const duration = Math.round(first.endMin - first.startMin)
-  const patchLabel = duration <= 1
-    ? `Rain at ${startIST}`
-    : `Rain ${startIST}–${endIST}`
+  const firstLabel = duration <= 1 ? `Rain at ${startIST}` : `${startIST} – ${endIST}`
+
   return (
     <div className="routeTimeline">
       <div className="routeTimelineTrack">
@@ -445,11 +447,27 @@ function RainTimelineBar({ patches, lastEta }) {
       </div>
       <div className="routeTimelineMeta">
         <span>{toIST(0)}</span>
-        <span className="routeTimelineNote">
-          {patchLabel}{patches.length > 1 ? ` +${patches.length - 1} more` : ''}
-        </span>
+        <span className="routeTimelineNote">{firstLabel}</span>
         <span>{toIST(lastEta)}</span>
       </div>
+
+      <button className="breakdownToggle" type="button" onClick={onToggleBreakdown}>
+        {showBreakdown ? 'Hide breakdown' : `See full breakdown (${patches.length} rain ${patches.length === 1 ? 'zone' : 'zones'})`}
+      </button>
+
+      {showBreakdown && (
+        <div className="rainBreakdown">
+          {patches.map((p, i) => (
+            <div key={i} className="rainBreakdownRow">
+              <span className={`breakdownDot breakdownDot--${(p.intensity || 'Light').toLowerCase()}`} />
+              <span className="breakdownTime">
+                {toIST(p.startMin)} – {toIST(p.endMin)}
+              </span>
+              <span className="breakdownIntensity">{p.intensity || 'Light'} Rain</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -480,6 +498,7 @@ export default function App() {
   const [routeSegments, setRouteSegments] = useState([]) // colored line segments
   const [activeSeg, setActiveSeg] = useState(null) // {lat,lon,label,dbz,eta_mins,rain_expected,inBounds,locationName}
   const [routeDistanceKm, setRouteDistanceKm] = useState(null)
+  const [showBreakdown, setShowBreakdown] = useState(false)
   const [error, setError] = useState(null)
 
   const reverseAbortRef = useRef(null)
@@ -810,6 +829,7 @@ export default function App() {
     setRouteCoords([])
     setRouteSegments([])
     setRouteDistanceKm(null)
+    setShowBreakdown(false)
   }
 
   return (
@@ -1017,7 +1037,12 @@ export default function App() {
               )}
 
               {rainTimeline?.tone === 'rain' && !result._pending && (
-                <RainTimelineBar patches={rainTimeline.patches} lastEta={rainTimeline.lastEta} />
+                <RainTimelineBar
+                  patches={rainTimeline.patches}
+                  lastEta={rainTimeline.lastEta}
+                  showBreakdown={showBreakdown}
+                  onToggleBreakdown={() => setShowBreakdown((s) => !s)}
+                />
               )}
 
               <div className="statsRow">
