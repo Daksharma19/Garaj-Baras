@@ -1,7 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import './App.css'
-import NetworkLayers from './NetworkLayers.jsx'
 
 const API_BASE =
   import.meta.env.VITE_API_BASE || 'https://garaj-baras-api.onrender.com'
@@ -406,9 +405,81 @@ function joinApiUrl(maybePath) {
   return `${API_BASE}/${p}`
 }
 
+function RainTimelineBar({ patches, lastEta }) {
+  if (!patches?.length || !lastEta || lastEta <= 0) return null
+  const first = patches[0]
+  return (
+    <div className="routeTimeline">
+      <div className="routeTimelineLabel">Rain map</div>
+      <div className="routeTimelineTrack">
+        <div className="routeStartDot" />
+        {patches.map((p, i) => {
+          const left = Math.max(0, (p.startMin / lastEta) * 100)
+          const width = Math.max(3, Math.min(100 - left, ((p.endMin - p.startMin) / lastEta) * 100))
+          return (
+            <div
+              key={i}
+              className="routeRainPatch"
+              style={{ left: `${left}%`, width: `${width}%` }}
+            />
+          )
+        })}
+        <div className="routeEndDot" />
+      </div>
+      <div className="routeTimelineMeta">
+        <span>Depart</span>
+        <span className="routeTimelineNote">
+          Rain {Math.round(first.startMin)}–{Math.round(first.endMin)} min
+          {patches.length > 1 ? ` +${patches.length - 1} more` : ''}
+        </span>
+        <span>{Math.round(lastEta)} min</span>
+      </div>
+    </div>
+  )
+}
+
+function StormIntel({ from, to, speedKmh, freshness, lagMins, pending }) {
+  const dotColor = pending
+    ? 'rgba(136,150,179,0.5)'
+    : freshness === 'fresh'
+      ? '#22C55E'
+      : freshness === 'very_stale'
+        ? '#EF4444'
+        : '#F59E0B'
+  const freshLabel = pending
+    ? 'Scanning…'
+    : freshness === 'fresh'
+      ? 'Live'
+      : freshness === 'very_stale'
+        ? 'Very stale'
+        : 'Stale'
+  return (
+    <div className="stormIntel">
+      <div className="stormIntelLeft">
+        <div className="stormIntelTopLabel">Storm track</div>
+        <div className="stormIntelDir">
+          <span>{pending ? '—' : (from || '—')}</span>
+          <span className="stormDirArrow">→</span>
+          <span>{pending ? '—' : (to || '—')}</span>
+        </div>
+        {!pending && Number(speedKmh) > 0 && (
+          <div className="stormIntelSpeed">{Math.min(Number(speedKmh), 150).toFixed(0)} km/h</div>
+        )}
+      </div>
+      <div className="stormIntelRight">
+        <span className="stormFreshDot" style={{ background: dotColor, boxShadow: `0 0 10px ${dotColor}` }} />
+        <div>
+          <div className="stormFreshLabel">{freshLabel}</div>
+          {!pending && lagMins != null && (
+            <div className="stormFreshSub">{Math.round(lagMins)} min old</div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
-  const [showWelcomePopup, setShowWelcomePopup] = useState(true)
-  const [screen, setScreen] = useState('rain') // rain | network
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
   const [avgSpeedKmh, setAvgSpeedKmh] = useState('')
@@ -767,47 +838,14 @@ export default function App() {
 
   return (
     <div className="app">
-      {showWelcomePopup && (
-        <div className="welcomeOverlay" role="dialog" aria-modal="true" aria-label="Service area notice">
-          <div className="welcomeCard">
-            <div className="welcomeStorm" aria-hidden="true">
-              <span className="welcomeBolt">⚡</span>
-            </div>
-            <div className="welcomeTitle">Garaj Baras</div>
-            <div className="welcomeText">
-              Currently serving in Delhi-NCR and nearby locations.
-            </div>
-            <div className="welcomeDisclaimer">
-              Sorry for inconvenience — it might take 2–3 attempts to properly load the website.
-            </div>
-            <button
-              type="button"
-              className="welcomeBtn"
-              onClick={() => setShowWelcomePopup(false)}
-            >
-              Continue
-            </button>
-          </div>
-        </div>
-      )}
       <header className="topbar">
-        <button
-          type="button"
-          className="topTabBtn"
-          onClick={() => setScreen((s) => (s === 'rain' ? 'network' : 'rain'))}
-          aria-label={screen === 'rain' ? 'Open Network Layers' : 'Back to Rain Route'}
-        >
-          {screen === 'rain' ? 'Network' : 'Rain'}
-        </button>
+        <div style={{ width: 36 }} />
         <div className="brandTitle">GARAJ BARAS</div>
         <div style={{ width: 36 }} />
       </header>
 
       <div className="screen">
-        {screen === 'network' ? (
-          <NetworkLayers />
-        ) : (
-          <>
+        <>
         {/* Hero + Inputs */}
         {!loading && !result && (
           <>
@@ -975,7 +1013,7 @@ export default function App() {
                 >
                   {result._pending ? 'Scanning…' : hasRain ? 'Rain' : 'Clear'}
                 </div>
-
+                <div className="resultsRouteName" title={routeName}>{routeName}</div>
                 <button
                   type="button"
                   className="backBtn"
@@ -1000,6 +1038,10 @@ export default function App() {
                     <div className="rainBannerSub">{rainTimeline.secondary}</div>
                   )}
                 </div>
+              )}
+
+              {rainTimeline?.tone === 'rain' && !result._pending && (
+                <RainTimelineBar patches={rainTimeline.patches} lastEta={rainTimeline.lastEta} />
               )}
 
               <div className="statsRow">
@@ -1067,17 +1109,14 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="directionRow">
-                <div>
-                  <div className="directionText">
-                    Rain direction: {result.rain_direction_from} -&gt;{' '}
-                    {result.rain_direction_to}
-                  </div>
-                  <div className="directionSub">
-                    {result._pending ? 'Scanning radar…' : result.radar_freshness}
-                  </div>
-                </div>
-              </div>
+              <StormIntel
+                from={result.rain_direction_from}
+                to={result.rain_direction_to}
+                speedKmh={result.rain_speed_kmh}
+                freshness={result.radar_freshness}
+                lagMins={result.radar_lag_mins}
+                pending={!!result._pending}
+              />
 
               {/* Map (rendered as soon as the route polyline is ready,
                   even before the rain predict response lands) */}
@@ -1178,8 +1217,7 @@ export default function App() {
             </section>
           </section>
         )}
-          </>
-        )}
+        </>
       </div>
     </div>
   )
