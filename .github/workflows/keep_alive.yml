@@ -9,8 +9,16 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping health endpoint
+      - name: Ping health endpoint (with retry)
         run: |
-          curl -fsS --max-time 30 https://garaj-baras-api.onrender.com/health \
-            && echo "Server is alive" \
-            || echo "Ping failed (server may be waking up)"
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            if curl -fsS --max-time 90 https://garaj-baras-api.onrender.com/health; then
+              echo "Server is alive"
+              exit 0
+            fi
+            echo "No response yet, waiting 30s before retry..."
+            sleep 30
+          done
+          echo "Server did not respond after 3 attempts — may still be cold starting"
+          exit 0
