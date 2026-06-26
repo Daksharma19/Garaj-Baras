@@ -70,9 +70,11 @@ function computeViewboxAround(lat, lon, radiusKm = 180) {
 function getRainColor(label) {
   const l = String(label || '')
   if (l === 'No Rain') return '#FFFFFF'
-  if (l.includes('Very Light') || l.includes('Light')) return '#7DD3FC'
-  if (l.includes('Moderate')) return '#38BDF8'
-  if (l.includes('Heavy')) return '#EF4444'
+  if (l.includes('Very Light')) return '#7DD3FC'
+  if (l.includes('Light')) return '#38BDF8'
+  if (l.includes('Moderate')) return '#0EA5E9'
+  if (l.includes('Very Heavy')) return '#EF4444'
+  if (l.includes('Heavy')) return '#F59E0B'
   return '#FFFFFF'
 }
 
@@ -1170,11 +1172,13 @@ export default function App() {
                 <div className="legendTitle">Route colors</div>
                 <div className="legendChips">
                   {[
-                    { cls: 'heavy',   label: 'Heavy Rain' },
-                    { cls: 'medium',  label: 'Medium Rain' },
-                    { cls: 'light',   label: 'Light Rain' },
-                    { cls: 'norain',  label: 'No Rain' },
-                    { cls: 'unknown', label: 'Out of radar' },
+                    { cls: 'veryheavy', label: 'Very Heavy' },
+                    { cls: 'heavy',     label: 'Heavy' },
+                    { cls: 'moderate',  label: 'Moderate' },
+                    { cls: 'light',     label: 'Light' },
+                    { cls: 'verylight', label: 'Very Light' },
+                    { cls: 'norain',    label: 'No Rain' },
+                    { cls: 'unknown',   label: 'Out of radar' },
                   ].map(({ cls, label }) => (
                     <div key={cls} className="legendChip">
                       <span className={`legendSwatch legendSwatch--${cls}`} />

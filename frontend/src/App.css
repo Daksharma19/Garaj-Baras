@@ -1171,11 +1171,13 @@
   color: rgba(255, 255, 255, 0.80);
 }
 
-.legendSwatch--heavy   { background: #EF4444; }
-.legendSwatch--medium  { background: #38BDF8; }
-.legendSwatch--light   { background: #7DD3FC; }
-.legendSwatch--norain  { background: rgba(255,255,255,0.55); border-color: rgba(255,255,255,0.25); }
-.legendSwatch--unknown { background: #64748B; opacity: 0.9; }
+.legendSwatch--veryheavy { background: #EF4444; }
+.legendSwatch--heavy     { background: #F59E0B; }
+.legendSwatch--moderate  { background: #0EA5E9; }
+.legendSwatch--light     { background: #38BDF8; }
+.legendSwatch--verylight { background: #7DD3FC; }
+.legendSwatch--norain    { background: rgba(255,255,255,0.55); border-color: rgba(255,255,255,0.25); }
+.legendSwatch--unknown   { background: #64748B; opacity: 0.9; }
 
 /* ------------------------------ */
 /* Network layers (second screen) */
