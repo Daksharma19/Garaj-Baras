@@ -127,118 +127,118 @@ def extract_frames(gif_path, output_folder):
         except Exception:
             ocr_available = False
 
-        # Perf: OCR is expensive (~hundreds of ms per frame). We only need the
-        # LAST frame's timestamp — the post-processing loop below extrapolates
-        # the rest at ~10-min cadence. So collect the frame count first, then
-        # OCR only on index == total-1.
-        with Image.open(gif_path) as im_count:
-            try:
-                total_frames = getattr(im_count, "n_frames", None)
-            except Exception:
-                total_frames = None
-            if not total_frames:
-                total_frames = sum(1 for _ in ImageSequence.Iterator(im_count))
+        # Pass 1: decode every GIF frame and drop byte-identical consecutive duplicates.
+        # IMD regularly pads the GIF with repeated frames; feeding them to optical flow
+        # produces zero-motion vectors and wastes OCR time.
+        unique_frames = []   # list of (full_rgb, radar_crop_image)
+        last_crop_bytes = None
+        skipped = 0
 
         with Image.open(gif_path) as im:
-            for i, frame in enumerate(ImageSequence.Iterator(im)):
+            for frame in ImageSequence.Iterator(im):
                 full = frame.convert('RGB')
+                radar_crop = full.crop((0, CROP_TOP, CROP_RIGHT, CROP_BOTTOM))
+                crop_bytes = radar_crop.tobytes()
+                if crop_bytes == last_crop_bytes:
+                    skipped += 1
+                    continue
+                last_crop_bytes = crop_bytes
+                unique_frames.append((full, radar_crop))
 
-                # OCR timestamp only on the LAST frame; earlier timestamps are
-                # filled in by the 10-min cadence repair loop below.
-                timestamp = None
-                is_last_frame = (i == total_frames - 1)
-                if is_last_frame and ocr_available and pytesseract is not None:
-                    try:
-                        from PIL import ImageEnhance
+        if skipped:
+            print(f"Dropped {skipped} byte-identical duplicate frame(s) ({len(unique_frames)} unique)")
 
-                        ts_crop = full.crop((614, 230, 820, 310))
-                        w, h = ts_crop.size
-                        ts_large = ts_crop.resize((w * 3, h * 3), Image.LANCZOS)
-                        ts_gray = ts_large.convert('L')
-                        enhancer = ImageEnhance.Contrast(ts_gray)
-                        ts_ready = enhancer.enhance(2.0)
+        # Pass 2: OCR last unique frame, save all unique frames as PNGs.
+        # Perf: OCR is expensive (~hundreds of ms). We only need the last frame's
+        # timestamp; the repair loop below back-fills the rest at cadence.
+        def valid_hms(hh, mm, ss):
+            return 0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60
 
-                        text = pytesseract.image_to_string(
-                            ts_ready,
-                            config='--psm 6 -c tessedit_char_whitelist=0123456789:ZIST'
-                        ).strip()
+        for idx, (full, frame_cropped) in enumerate(unique_frames):
+            timestamp = None
+            is_last = (idx == len(unique_frames) - 1)
 
-                        upper = text.upper()
+            if is_last and ocr_available and pytesseract is not None:
+                try:
+                    from PIL import ImageEnhance
 
-                        # Prefer UTC time if it is read with a trailing 'Z'.
-                        utc_match = re.search(
-                            r'(\d{1,2}):(\d{2}):(\d{2})\s*Z',
-                            upper
-                        )
-                        # IST line is usually read as "... HH:MM:SS IST" or "... HH:MM:SS Is"
-                        ist_match = re.search(
-                            r'(\d{1,2}):(\d{2}):(\d{2})\s*(?:IST|IS)',
-                            upper
-                        )
+                    ts_crop = full.crop((614, 230, 820, 310))
+                    w, h = ts_crop.size
+                    ts_large = ts_crop.resize((w * 3, h * 3), Image.LANCZOS)
+                    ts_gray = ts_large.convert('L')
+                    enhancer = ImageEnhance.Contrast(ts_gray)
+                    ts_ready = enhancer.enhance(2.0)
 
-                        def valid_hms(hh, mm, ss):
-                            return 0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60
+                    text = pytesseract.image_to_string(
+                        ts_ready,
+                        config='--psm 6 -c tessedit_char_whitelist=0123456789:ZIST'
+                    ).strip()
 
-                        if utc_match:
-                            h_t, m_t, s_t = map(int, utc_match.groups())
+                    upper = text.upper()
+
+                    # Prefer UTC time if it is read with a trailing 'Z'.
+                    utc_match = re.search(
+                        r'(\d{1,2}):(\d{2}):(\d{2})\s*Z',
+                        upper
+                    )
+                    # IST line is usually read as "... HH:MM:SS IST" or "... HH:MM:SS Is"
+                    ist_match = re.search(
+                        r'(\d{1,2}):(\d{2}):(\d{2})\s*(?:IST|IS)',
+                        upper
+                    )
+
+                    if utc_match:
+                        h_t, m_t, s_t = map(int, utc_match.groups())
+                        if valid_hms(h_t, m_t, s_t):
+                            today = datetime.now(timezone.utc).date()
+                            dt_utc = datetime(
+                                today.year, today.month, today.day,
+                                h_t, m_t, s_t,
+                                tzinfo=timezone.utc
+                            )
+                            timestamp = dt_utc.astimezone(IST)
+                    elif ist_match:
+                        h_t, m_t, s_t = map(int, ist_match.groups())
+                        if valid_hms(h_t, m_t, s_t):
+                            today = datetime.now(IST).date()
+                            timestamp = datetime(
+                                today.year, today.month, today.day,
+                                h_t, m_t, s_t,
+                                tzinfo=IST
+                            )
+                    else:
+                        # Fallback: parse the first HH:MM:SS token.
+                        # Decide timezone by presence of the 'UTC' word.
+                        t_match = re.search(r'(\d{1,2}):(\d{2}):(\d{2})', upper)
+                        if t_match:
+                            h_t, m_t, s_t = map(int, t_match.groups())
                             if valid_hms(h_t, m_t, s_t):
-                                today = datetime.now(timezone.utc).date()
-                                dt_utc = datetime(
-                                    today.year, today.month, today.day,
-                                    h_t, m_t, s_t,
-                                    tzinfo=timezone.utc
-                                )
-                                timestamp = dt_utc.astimezone(IST)
-                        elif ist_match:
-                            h_t, m_t, s_t = map(int, ist_match.groups())
-                            if valid_hms(h_t, m_t, s_t):
-                                today = datetime.now(IST).date()
-                                timestamp = datetime(
-                                    today.year, today.month, today.day,
-                                    h_t, m_t, s_t,
-                                    tzinfo=IST
-                                )
-                        else:
-                            # Fallback: parse the first HH:MM:SS token.
-                            # Decide timezone by presence of the 'UTC' word.
-                            t_match = re.search(r'(\d{1,2}):(\d{2}):(\d{2})', upper)
-                            if t_match:
-                                h_t, m_t, s_t = map(int, t_match.groups())
-                                if valid_hms(h_t, m_t, s_t):
-                                    today_utc = datetime.now(timezone.utc).date()
-                                    today_ist = datetime.now(IST).date()
-                                    if 'UTC' in upper:
-                                        dt_utc = datetime(
-                                            today_utc.year, today_utc.month, today_utc.day,
-                                            h_t, m_t, s_t,
-                                            tzinfo=timezone.utc
-                                        )
-                                        timestamp = dt_utc.astimezone(IST)
-                                    else:
-                                        timestamp = datetime(
-                                            today_ist.year, today_ist.month, today_ist.day,
-                                            h_t, m_t, s_t,
-                                            tzinfo=IST
-                                        )
-                    except Exception:
-                        timestamp = None
+                                today_utc = datetime.now(timezone.utc).date()
+                                today_ist = datetime.now(IST).date()
+                                if 'UTC' in upper:
+                                    dt_utc = datetime(
+                                        today_utc.year, today_utc.month, today_utc.day,
+                                        h_t, m_t, s_t,
+                                        tzinfo=timezone.utc
+                                    )
+                                    timestamp = dt_utc.astimezone(IST)
+                                else:
+                                    timestamp = datetime(
+                                        today_ist.year, today_ist.month, today_ist.day,
+                                        h_t, m_t, s_t,
+                                        tzinfo=IST
+                                    )
+                except Exception:
+                    timestamp = None
 
-                # Crop to radar circle only (keep calibrated 527x525 output)
-                frame_cropped = full.crop((
-                    0,           # left
-                    CROP_TOP,    # top  (remove brown panel)
-                    CROP_RIGHT,  # right (remove info panel)
-                    CROP_BOTTOM  # bottom (trim)
-                ))
+            frame_filename = f"frame_{idx:02d}.png"
+            frame_path = os.path.join(output_folder, frame_filename)
+            frame_cropped.save(frame_path)
 
-                frame_filename = f"frame_{i:02d}.png"
-                frame_path = os.path.join(output_folder, frame_filename)
-                frame_cropped.save(frame_path)
+            frame_data.append((frame_path, timestamp))
 
-                frame_data.append((frame_path, timestamp))
-
-                if i == 0:
-                    print("Delhi crop frame size: %s" % (frame_cropped.size,))
+            if idx == 0:
+                print("Delhi crop frame size: %s" % (frame_cropped.size,))
     except Exception as e:
         print(f"Error extracting frames: {e}")
 
