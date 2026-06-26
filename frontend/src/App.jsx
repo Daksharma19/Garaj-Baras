@@ -70,21 +70,19 @@ function computeViewboxAround(lat, lon, radiusKm = 180) {
 function getRainColor(label) {
   const l = String(label || '')
   if (l === 'No Rain') return '#FFFFFF'
-  if (l.includes('Very Light')) return '#7DD3FC'
-  if (l.includes('Light')) return '#38BDF8'
-  if (l.includes('Moderate')) return '#0EA5E9'
-  if (l.includes('Heavy') && !l.includes('Very Heavy')) return '#F59E0B'
-  if (l.includes('Very Heavy')) return '#EF4444'
+  if (l.includes('Very Light') || l.includes('Light')) return '#7DD3FC'
+  if (l.includes('Moderate')) return '#38BDF8'
+  if (l.includes('Heavy')) return '#EF4444'
   return '#FFFFFF'
 }
 
 function getRainGroupLabel(label) {
   const l = String(label || '')
-  if (l === 'No Rain') return 'Clear'
+  if (l === 'No Rain') return 'No Rain'
   if (l.includes('Very Light') || l.includes('Light')) return 'Light'
-  if (l.includes('Moderate')) return 'Moderate'
-  if (l.includes('Heavy') || l.includes('Very Heavy')) return 'Heavy'
-  return 'Clear'
+  if (l.includes('Moderate')) return 'Medium'
+  if (l.includes('Heavy')) return 'Heavy'
+  return 'No Rain'
 }
 
 // Collapse a sorted list of waypoints into contiguous rain patches and
@@ -182,9 +180,15 @@ function haversine(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.asin(Math.sqrt(a))
 }
 
+function toShortCityName(name) {
+  const s = (name ?? '').trim()
+  if (!s) return ''
+  return s.split(',')[0].trim()
+}
+
 function toCityRouteName(a, b) {
-  const left = (a ?? '').trim() || 'Source'
-  const right = (b ?? '').trim() || 'Destination'
+  const left = toShortCityName(a) || 'Source'
+  const right = toShortCityName(b) || 'Destination'
   return `${left} → ${right}`
 }
 
@@ -405,12 +409,25 @@ function joinApiUrl(maybePath) {
   return `${API_BASE}/${p}`
 }
 
+function toIST(etaMins) {
+  const ms = Date.now() + etaMins * 60 * 1000
+  const ist = new Date(ms + 5.5 * 60 * 60 * 1000)
+  const h = String(ist.getUTCHours()).padStart(2, '0')
+  const m = String(ist.getUTCMinutes()).padStart(2, '0')
+  return `${h}:${m}`
+}
+
 function RainTimelineBar({ patches, lastEta }) {
   if (!patches?.length || !lastEta || lastEta <= 0) return null
   const first = patches[0]
+  const startIST = toIST(first.startMin)
+  const endIST = toIST(first.endMin)
+  const duration = Math.round(first.endMin - first.startMin)
+  const patchLabel = duration <= 1
+    ? `Rain at ${startIST}`
+    : `Rain ${startIST}–${endIST}`
   return (
     <div className="routeTimeline">
-      <div className="routeTimelineLabel">Rain map</div>
       <div className="routeTimelineTrack">
         <div className="routeStartDot" />
         {patches.map((p, i) => {
@@ -427,57 +444,16 @@ function RainTimelineBar({ patches, lastEta }) {
         <div className="routeEndDot" />
       </div>
       <div className="routeTimelineMeta">
-        <span>Depart</span>
+        <span>{toIST(0)}</span>
         <span className="routeTimelineNote">
-          Rain {Math.round(first.startMin)}–{Math.round(first.endMin)} min
-          {patches.length > 1 ? ` +${patches.length - 1} more` : ''}
+          {patchLabel}{patches.length > 1 ? ` +${patches.length - 1} more` : ''}
         </span>
-        <span>{Math.round(lastEta)} min</span>
+        <span>{toIST(lastEta)}</span>
       </div>
     </div>
   )
 }
 
-function StormIntel({ from, to, speedKmh, freshness, lagMins, pending }) {
-  const dotColor = pending
-    ? 'rgba(136,150,179,0.5)'
-    : freshness === 'fresh'
-      ? '#22C55E'
-      : freshness === 'very_stale'
-        ? '#EF4444'
-        : '#F59E0B'
-  const freshLabel = pending
-    ? 'Scanning…'
-    : freshness === 'fresh'
-      ? 'Live'
-      : freshness === 'very_stale'
-        ? 'Very stale'
-        : 'Stale'
-  return (
-    <div className="stormIntel">
-      <div className="stormIntelLeft">
-        <div className="stormIntelTopLabel">Storm track</div>
-        <div className="stormIntelDir">
-          <span>{pending ? '—' : (from || '—')}</span>
-          <span className="stormDirArrow">→</span>
-          <span>{pending ? '—' : (to || '—')}</span>
-        </div>
-        {!pending && Number(speedKmh) > 0 && (
-          <div className="stormIntelSpeed">{Math.min(Number(speedKmh), 150).toFixed(0)} km/h</div>
-        )}
-      </div>
-      <div className="stormIntelRight">
-        <span className="stormFreshDot" style={{ background: dotColor, boxShadow: `0 0 10px ${dotColor}` }} />
-        <div>
-          <div className="stormFreshLabel">{freshLabel}</div>
-          {!pending && lagMins != null && (
-            <div className="stormFreshSub">{Math.round(lagMins)} min old</div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 export default function App() {
   const [source, setSource] = useState('')
@@ -1001,19 +977,7 @@ export default function App() {
         {result && (
           <section className="resultsWrap">
             <section className="card resultsCard">
-              <div className="summaryTop">
-                <div
-                  className={`rainBadge ${
-                    result._pending
-                      ? 'rainBadge--clear'
-                      : hasRain
-                        ? 'rainBadge--rain'
-                        : 'rainBadge--clear'
-                  }`}
-                >
-                  {result._pending ? 'Scanning…' : hasRain ? 'Rain' : 'Clear'}
-                </div>
-                <div className="resultsRouteName" title={routeName}>{routeName}</div>
+              <div className="resultsHeader">
                 <button
                   type="button"
                   className="backBtn"
@@ -1021,7 +985,19 @@ export default function App() {
                 >
                   ← Back
                 </button>
+                <div
+                  className={`statusPill ${
+                    result._pending
+                      ? 'statusPill--pending'
+                      : hasRain
+                        ? 'statusPill--rain'
+                        : 'statusPill--clear'
+                  }`}
+                >
+                  {result._pending ? 'Scanning…' : hasRain ? 'Rain ahead' : 'Clear skies'}
+                </div>
               </div>
+              <div className="resultsRouteTitle">{routeName}</div>
 
               {/* Rain timeline banner: primary narrative focused on the
                   rain patch closest to the user. Appears as soon as the
@@ -1109,16 +1085,7 @@ export default function App() {
                 </div>
               </div>
 
-              <StormIntel
-                from={result.rain_direction_from}
-                to={result.rain_direction_to}
-                speedKmh={result.rain_speed_kmh}
-                freshness={result.radar_freshness}
-                lagMins={result.radar_lag_mins}
-                pending={!!result._pending}
-              />
-
-              {/* Map (rendered as soon as the route polyline is ready,
+{/* Map (rendered as soon as the route polyline is ready,
                   even before the rain predict response lands) */}
               <div style={{ position: 'relative' }}>
                 <Suspense
@@ -1175,43 +1142,20 @@ export default function App() {
               </div>
 
               <div className="legendWrap">
-                <div className="legendTitle">Reflectivity (dBZ)</div>
-                <div className="legendGrid">
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--veryheavy" />
-                    <span className="legendText">Very Heavy</span>
-                    <span className="legendDbz">&gt; 60</span>
-                  </div>
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--heavy" />
-                    <span className="legendText">Heavy</span>
-                    <span className="legendDbz">49–60</span>
-                  </div>
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--moderate" />
-                    <span className="legendText">Moderate</span>
-                    <span className="legendDbz">36–49</span>
-                  </div>
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--light" />
-                    <span className="legendText">Light</span>
-                    <span className="legendDbz">25–36</span>
-                  </div>
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--verylight" />
-                    <span className="legendText">Very Light</span>
-                    <span className="legendDbz">20–25</span>
-                  </div>
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--clear" />
-                    <span className="legendText">Clear</span>
-                    <span className="legendDbz">&lt; 20</span>
-                  </div>
-                  <div className="legendRow">
-                    <span className="legendSwatch legendSwatch--unknown" />
-                    <span className="legendText">Unknown</span>
-                    <span className="legendDbz">Out of radar</span>
-                  </div>
+                <div className="legendTitle">Route colors</div>
+                <div className="legendChips">
+                  {[
+                    { cls: 'heavy',   label: 'Heavy Rain' },
+                    { cls: 'medium',  label: 'Medium Rain' },
+                    { cls: 'light',   label: 'Light Rain' },
+                    { cls: 'norain',  label: 'No Rain' },
+                    { cls: 'unknown', label: 'Out of radar' },
+                  ].map(({ cls, label }) => (
+                    <div key={cls} className="legendChip">
+                      <span className={`legendSwatch legendSwatch--${cls}`} />
+                      <span className="legendText">{label}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             </section>

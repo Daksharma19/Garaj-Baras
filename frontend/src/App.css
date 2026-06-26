@@ -818,17 +818,48 @@
   gap: 8px;
 }
 
-.resultsRouteName {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.resultsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.resultsRouteTitle {
+  font-family: 'Syne', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text-primary);
   letter-spacing: 0.2px;
+  margin-top: 12px;
+  line-height: 1.2;
+}
+
+.statusPill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
+.statusPill--rain {
+  background: rgba(79, 195, 247, 0.14);
+  border: 1px solid rgba(79, 195, 247, 0.35);
+  color: rgba(79, 195, 247, 0.95);
+}
+
+.statusPill--clear {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.30);
+  color: rgba(34, 197, 94, 0.95);
+}
+
+.statusPill--pending {
+  background: rgba(136, 150, 179, 0.10);
+  border: 1px solid rgba(136, 150, 179, 0.20);
+  color: rgba(136, 150, 179, 0.90);
 }
 
 .backBtn {
@@ -849,25 +880,6 @@
   box-shadow: 0 0 0 4px rgba(79, 195, 247, 0.08);
 }
 
-.rainBadge {
-  flex: 0 0 auto;
-  border-radius: 999px;
-  padding: 8px 10px;
-  font-size: 12px;
-  font-weight: 900;
-  letter-spacing: 0.5px;
-  border: 1px solid rgba(79, 195, 247, 0.25);
-}
-
-.rainBadge--rain {
-  background: rgba(79, 195, 247, 0.12);
-  box-shadow: 0 0 0 4px rgba(79, 195, 247, 0.08);
-}
-
-.rainBadge--clear {
-  background: rgba(79, 195, 247, 0.06);
-  opacity: 0.95;
-}
 
 .statsRow {
   margin-top: 14px;
@@ -1125,51 +1137,44 @@
 }
 
 .legendTitle {
-  font-weight: 900;
-  color: rgba(255, 255, 255, 0.95);
-  font-size: 13px;
-  letter-spacing: 0.3px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
 }
 
-.legendGrid {
+.legendChips {
   margin-top: 10px;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
 }
 
-.legendRow {
-  display: grid;
-  grid-template-columns: 16px 1fr auto;
-  gap: 10px;
+.legendChip {
+  display: flex;
   align-items: center;
+  gap: 6px;
 }
 
 .legendSwatch {
-  width: 14px;
-  height: 14px;
-  border-radius: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.10);
 }
 
 .legendText {
   font-size: 12px;
-  font-weight: 800;
-  color: rgba(255, 255, 255, 0.9);
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.80);
 }
 
-.legendDbz {
-  font-size: 11px;
-  font-weight: 750;
-  color: var(--text-secondary);
-}
-
-.legendSwatch--veryheavy { background: #EF4444; }
-.legendSwatch--heavy { background: #F59E0B; }
-.legendSwatch--moderate { background: #0EA5E9; }
-.legendSwatch--light { background: #38BDF8; }
-.legendSwatch--verylight { background: #7DD3FC; }
-.legendSwatch--clear { background: #FFFFFF; opacity: 0.9; }
+.legendSwatch--heavy   { background: #EF4444; }
+.legendSwatch--medium  { background: #38BDF8; }
+.legendSwatch--light   { background: #7DD3FC; }
+.legendSwatch--norain  { background: rgba(255,255,255,0.55); border-color: rgba(255,255,255,0.25); }
 .legendSwatch--unknown { background: #64748B; opacity: 0.9; }
 
 /* ------------------------------ */
@@ -1511,15 +1516,6 @@
   animation: fadeUp 400ms ease both;
 }
 
-.routeTimelineLabel {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-}
-
 .routeTimelineTrack {
   position: relative;
   height: 10px;
@@ -1590,89 +1586,3 @@
 /* Storm Intel Card                */
 /* ------------------------------ */
 
-.stormIntel {
-  margin-top: 14px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 14px;
-  border-radius: 16px;
-  background: rgba(13, 20, 36, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  animation: fadeUp 300ms ease both;
-}
-
-.stormIntelLeft {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.stormIntelTopLabel {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.8px;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-}
-
-.stormIntelDir {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: 'Syne', -apple-system, BlinkMacSystemFont, sans-serif;
-  font-size: 18px;
-  font-weight: 900;
-  color: var(--text-primary);
-  letter-spacing: 0.3px;
-}
-
-.stormDirArrow {
-  color: var(--accent-1);
-  font-size: 20px;
-  animation: arrowPulse 1.6s ease-in-out infinite;
-}
-
-@keyframes arrowPulse {
-  0%   { opacity: 0.6; transform: translateX(0); }
-  50%  { opacity: 1;   transform: translateX(3px); }
-  100% { opacity: 0.6; transform: translateX(0); }
-}
-
-.stormIntelSpeed {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-weight: 700;
-  margin-top: 1px;
-}
-
-.stormIntelRight {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.stormFreshDot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  animation: radarDotPulse 1.4s ease-in-out infinite;
-}
-
-.stormFreshLabel {
-  font-size: 13px;
-  font-weight: 800;
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-
-.stormFreshSub {
-  font-size: 11px;
-  color: var(--text-secondary);
-  font-weight: 600;
-  margin-top: 2px;
-}
