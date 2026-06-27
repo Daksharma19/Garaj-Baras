@@ -113,14 +113,24 @@ function computeRainTimeline(waypoints) {
     } else if (start !== null) {
       const labels = patchWps.map((w) => getRainGroupLabel(w.label))
       const dominant = labels.includes('Heavy') ? 'Heavy' : labels.includes('Medium') ? 'Medium' : 'Light'
-      patches.push({ startMin: start, endMin: last, intensity: dominant })
+      const decayStatuses = patchWps.map((w) => w.decay_status).filter(Boolean)
+      const patchDecay = decayStatuses.includes('dead') ? 'dead'
+        : decayStatuses.includes('dying') ? 'dying'
+        : decayStatuses.includes('weakening') ? 'weakening'
+        : 'stable'
+      patches.push({ startMin: start, endMin: last, intensity: dominant, decayStatus: patchDecay })
       start = null; last = null; patchWps = []
     }
   }
   if (start !== null) {
     const labels = patchWps.map((w) => getRainGroupLabel(w.label))
     const dominant = labels.includes('Heavy') ? 'Heavy' : labels.includes('Medium') ? 'Medium' : 'Light'
-    patches.push({ startMin: start, endMin: last, intensity: dominant })
+    const decayStatuses = patchWps.map((w) => w.decay_status).filter(Boolean)
+    const patchDecay = decayStatuses.includes('dead') ? 'dead'
+      : decayStatuses.includes('dying') ? 'dying'
+      : decayStatuses.includes('weakening') ? 'weakening'
+      : 'stable'
+    patches.push({ startMin: start, endMin: last, intensity: dominant, decayStatus: patchDecay })
   }
 
   const lastEta = Number(sorted[sorted.length - 1].eta_mins) || 0
@@ -137,40 +147,61 @@ function computeRainTimeline(waypoints) {
     }
   }
 
-  // "Closest to the user" = earliest rain patch on the route (since ETAs
-  // measure time from NOW at the starting point).
   const closest = patches[0]
-  const NOW_THRESHOLD_MIN = 2     // patch starting within 2 min ≈ "now"
-  const END_THRESHOLD_MIN = 2.5   // patch ending within 2.5 min of route end ≈ "continues to end"
+  const NOW_THRESHOLD_MIN = 2
+  const END_THRESHOLD_MIN = 2.5
 
   const isNow = closest.startMin <= firstEta + NOW_THRESHOLD_MIN
   const continuesToEnd = closest.endMin >= lastEta - END_THRESHOLD_MIN
-  const remaining = patches.length - 1
 
   const fmt = (m) => `${Math.max(0, Math.round(Number(m) || 0))} min`
 
+  const closestDecay = closest.decayStatus || 'stable'
+  const isDying = closestDecay === 'dying' || closestDecay === 'dead'
+  const isWeakening = closestDecay === 'weakening'
+
   let headline
   let secondary
-  if (isNow) {
-    if (continuesToEnd) {
-      headline = 'Rain right now — continues to destination'
-      secondary = `Expect rain for the full ${fmt(lastEta)} trip.`
+  let decayNote = null  // shown as a sub-note when patch is fading
+
+  if (isDying) {
+    headline = isNow
+      ? 'Rain nearby — but it\'s fading fast'
+      : `Rain detected in ${fmt(closest.startMin)} — likely to clear`
+    secondary = 'This patch is losing intensity. By the time you reach it, skies may already be clearing.'
+    decayNote = 'dying'
+  } else if (isWeakening) {
+    if (isNow) {
+      headline = 'Light rain right now — weakening as you travel'
+      secondary = 'Rain is losing strength. Expect it to get lighter along your route.'
     } else {
-      headline = `Rain right now — clearing in ${fmt(closest.endMin)}`
-      secondary = 'After that, skies clear for the rest of the route.'
+      headline = `Rain in ${fmt(closest.startMin)} — and it\'s weakening`
+      secondary = 'This patch is losing intensity. Rain will likely be lighter than current radar shows.'
     }
+    decayNote = 'weakening'
   } else {
-    if (continuesToEnd) {
-      headline = `Rain starts in ${fmt(closest.startMin)}`
-      secondary = 'Once it starts, rain continues to your destination.'
+    // stable / growing — normal messaging
+    if (isNow) {
+      if (continuesToEnd) {
+        headline = 'Rain right now — continues to destination'
+        secondary = `Expect rain for the full ${fmt(lastEta)} trip.`
+      } else {
+        headline = `Rain right now — clearing in ${fmt(closest.endMin)}`
+        secondary = 'After that, skies clear for the rest of the route.'
+      }
     } else {
-      const duration = Math.max(1, Math.round(closest.endMin - closest.startMin))
-      headline = `Rain starts in ${fmt(closest.startMin)}, clearing in ${fmt(closest.endMin)}`
-      secondary = `Rainy stretch ~${duration} min.`
+      if (continuesToEnd) {
+        headline = `Rain starts in ${fmt(closest.startMin)}`
+        secondary = 'Once it starts, rain continues to your destination.'
+      } else {
+        const duration = Math.max(1, Math.round(closest.endMin - closest.startMin))
+        headline = `Rain starts in ${fmt(closest.startMin)}, clearing in ${fmt(closest.endMin)}`
+        secondary = `Rainy stretch ~${duration} min.`
+      }
     }
   }
 
-  return { tone: 'rain', headline, secondary, patches, closest, lastEta }
+  return { tone: 'rain', headline, secondary, decayNote, patches, closest, lastEta }
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -459,15 +490,25 @@ function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown })
 
       {showBreakdown && (
         <div className="rainBreakdown">
-          {patches.map((p, i) => (
-            <div key={i} className="rainBreakdownRow">
-              <span className={`breakdownDot breakdownDot--${(p.intensity || 'Light').toLowerCase()}`} />
-              <span className="breakdownTime">
-                {toIST(p.startMin)} – {toIST(p.endMin)}
-              </span>
-              <span className="breakdownIntensity">{p.intensity || 'Light'} Rain</span>
-            </div>
-          ))}
+          {patches.map((p, i) => {
+            const decay = p.decayStatus || 'stable'
+            const decayLabel = decay === 'dead' ? 'Likely clear'
+              : decay === 'dying' ? 'Fading fast'
+              : decay === 'weakening' ? 'Weakening'
+              : null
+            return (
+              <div key={i} className={`rainBreakdownRow ${decay !== 'stable' ? 'rainBreakdownRow--fading' : ''}`}>
+                <span className={`breakdownDot breakdownDot--${(p.intensity || 'Light').toLowerCase()}`} />
+                <div className="breakdownMain">
+                  <span className="breakdownTime">{toIST(p.startMin)} – {toIST(p.endMin)}</span>
+                  <span className="breakdownIntensity">{p.intensity || 'Light'} Rain</span>
+                </div>
+                {decayLabel && (
+                  <span className={`decayChip decayChip--${decay}`}>{decayLabel}</span>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -1027,10 +1068,19 @@ export default function App() {
               {rainTimeline && (
                 <div
                   className={`rainBanner ${
-                    rainTimeline.tone === 'rain' ? 'rainBanner--rain' : 'rainBanner--clear'
+                    rainTimeline.tone === 'rain'
+                      ? rainTimeline.decayNote === 'dying' ? 'rainBanner--dying'
+                        : rainTimeline.decayNote === 'weakening' ? 'rainBanner--weakening'
+                        : 'rainBanner--rain'
+                      : 'rainBanner--clear'
                   }`}
                   role="status"
                 >
+                  {rainTimeline.decayNote && (
+                    <div className={`decayNoteBadge decayNoteBadge--${rainTimeline.decayNote}`}>
+                      {rainTimeline.decayNote === 'dying' ? 'Patch fading' : 'Weakening'}
+                    </div>
+                  )}
                   <div className="rainBannerHead">{rainTimeline.headline}</div>
                   {rainTimeline.secondary && (
                     <div className="rainBannerSub">{rainTimeline.secondary}</div>

@@ -25,6 +25,7 @@ from prediction import (generate_waypoints, check_route_rain,   # type: ignore
                         haversine_km)
 from georef import latlon_to_pixel, is_within_radar  # type: ignore
 from fuzzy import enrich_results  # type: ignore
+from decay import compute_decay_tracks, get_decay_status_at_pixel  # type: ignore
 from patches import (  # type: ignore
     compute_patch_motion,
     score_patches_for_route,
@@ -258,6 +259,14 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
             print(f"  Per-patch motion failed (non-fatal): {_pe}")
             patches_motion, roi_mask = [], None
 
+        # --- Decay track computation ---
+        decay_tracks = []
+        try:
+            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            print(f"  Decay tracks: {len(decay_tracks)} patch(es) tracked across {len(all_frame_data)} frames")
+        except Exception as _de:
+            print(f"  Decay tracking failed (non-fatal): {_de}")
+
         radar_cache.update({
             "frame_data": all_frame_data,
             "recent_frame_data": recent_frame_data,
@@ -268,6 +277,7 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
             "lag_info": lag_info,
             "patches": patches_motion,
             "roi_mask": roi_mask,
+            "decay_tracks": decay_tracks,
             "last_loaded": time.time(),
             "gif_mtime": os.path.getmtime(GIF_SAVE_PATH) if os.path.exists(GIF_SAVE_PATH) else None,
         })
@@ -425,6 +435,7 @@ def predict_waypoints(payload: PredictWaypointsRequest):
         dx, dy, dir_from, dir_to, speed = state["movement"]
         latest_frame = state["latest_frame"]
         lag_info = state["lag_info"]
+        decay_tracks = state.get("decay_tracks") or []
 
         # Per-request shared work: open the latest frame + compute base rain
         # mask exactly ONCE and pass them into both check_route_rain and
@@ -493,8 +504,23 @@ def predict_waypoints(payload: PredictWaypointsRequest):
             frame_rgb=frame_rgb,
         )
 
-        for e in enriched:
+        for e, (px, py, _eta) in zip(enriched, waypoints_pixels):
             e["in_radar_bounds"] = is_within_radar(e["lat"], e["lon"])
+            if e["rain_expected"] and decay_tracks:
+                lag = lag_info["lag_mins"]
+                effective_eta = e["eta_mins"] + lag
+                # Back-project pixel to its position in the latest frame
+                frames_ahead = effective_eta / 10.0
+                src_px = int(px - dx * frames_ahead)
+                src_py = int(py - dy * frames_ahead)
+                decay_info = get_decay_status_at_pixel(src_px, src_py, effective_eta, decay_tracks)
+                e["decay_status"] = decay_info["decay_status"]
+                e["projected_dbz"] = decay_info["projected_dbz"]
+                e["current_dbz_patch"] = decay_info["current_dbz"]
+            else:
+                e["decay_status"] = None
+                e["projected_dbz"] = None
+                e["current_dbz_patch"] = None
 
         rain_wps = [e for e in enriched if e["rain_expected"]]
         clear_wps = [e for e in enriched if not e["rain_expected"]]
