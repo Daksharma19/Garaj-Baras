@@ -349,6 +349,27 @@ function toIST(etaMins) {
 
 // ── Shared Components ─────────────────────────────────────────────────────────
 
+function RadarDownModal({ onClose }) {
+  return (
+    <div className="radar-down-overlay" role="dialog" aria-modal="true" aria-labelledby="radar-down-title">
+      <div className="radar-down-modal">
+        <div className="radar-down-icon" aria-hidden>
+          <svg viewBox="0 0 48 48" fill="none" width="48" height="48">
+            <circle cx="24" cy="24" r="22" stroke="#EF4444" strokeWidth="2.5" strokeDasharray="6 4" />
+            <line x1="24" y1="24" x2="24" y2="24" stroke="#EF4444" strokeWidth="2.5" strokeLinecap="round" />
+            <path d="M24 14v12M24 32v2" stroke="#EF4444" strokeWidth="2.5" strokeLinecap="round" />
+          </svg>
+        </div>
+        <h2 className="radar-down-title" id="radar-down-title">Radar Unavailable</h2>
+        <p className="radar-down-msg">
+          Sorry for the inconvenience.<br />Radar is down for now.
+        </p>
+        <button className="radar-down-btn" type="button" onClick={onClose}>OK</button>
+      </div>
+    </div>
+  )
+}
+
 function TabBar({ activeTab, onChangeTab }) {
   return (
     <div className="tab-bar" role="tablist">
@@ -493,7 +514,7 @@ function NowcastSlots({ slots }) {
   )
 }
 
-function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' }) {
+function NowcastPage({ userLoc, activeTab, onChangeTab }) {
   const [ncLat, setNcLat] = useState(null)
   const [ncLon, setNcLon] = useState(null)
   const [ncName, setNcName] = useState('')
@@ -509,6 +530,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' 
   const [ncLoading, setNcLoading] = useState(false)
   const [ncError, setNcError] = useState(null)
   const [ncScanStatus, setNcScanStatus] = useState('')
+  const [radarDown, setRadarDown] = useState(false)
 
   useEffect(() => {
     if (userLoc && !ncLat) {
@@ -557,7 +579,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' 
     setNcScanStatus('Scanning radar…')
     try {
       const res = await postWithRetry(
-        `${NOWCAST_URL}?radar=${selectedRadar}`,
+        NOWCAST_URL,
         { lat: ncLat, lon: ncLon },
         { timeout: 90000 },
         (attempt, total) => {
@@ -569,6 +591,9 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' 
         }
       )
       setNcResult(res.data)
+      if ((res.data?.lag_mins ?? 0) > 75) {
+        setRadarDown(true)
+      }
     } catch (e) {
       const detail = e?.response?.data?.detail || e?.message || 'Something went wrong.'
       setNcError(typeof detail === 'string' ? detail.slice(0, 300) : 'Nowcast failed.')
@@ -709,9 +734,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' 
             <div className="banner banner--dying">
               <p className="banner__head">Outside radar coverage</p>
               <p className="banner__sub">
-                {selectedRadar === 'lucknow'
-                  ? 'This location is beyond Lucknow IMD radar range. Try a location closer to Uttar Pradesh.'
-                  : 'This location is beyond Delhi IMD radar range. Try a location closer to Delhi NCR.'}
+                This location is outside IMD radar coverage. Try a location in Delhi NCR or Uttar Pradesh.
               </p>
             </div>
           ) : (
@@ -724,6 +747,8 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' 
           )}
         </div>
       )}
+
+      {radarDown && <RadarDownModal onClose={() => setRadarDown(false)} />}
     </div>
   )
 }
@@ -731,7 +756,6 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [activeTab, setActiveTab] = useState('route')
-  const [selectedRadar, setSelectedRadar] = useState('delhi')
 
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
@@ -753,6 +777,7 @@ export default function App() {
   const [scanning, setScanning] = useState(false)
   const [scanStatus, setScanStatus] = useState('')
   const [result, setResult] = useState(null)
+  const [radarDown, setRadarDown] = useState(false)
   const [routeCoords, setRouteCoords] = useState([])
   const [routeSegments, setRouteSegments] = useState([])
   const [activeSeg, setActiveSeg] = useState(null)
@@ -767,9 +792,6 @@ export default function App() {
 
   useEffect(() => { warmBackend() }, [])
 
-  useEffect(() => {
-    setResult(null); setError(null); setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null)
-  }, [selectedRadar])
 
   useEffect(() => {
     let alive = true
@@ -882,7 +904,7 @@ export default function App() {
       setScanning(true)
 
       const predictRes = await postWithRetry(
-        `${PREDICT_WAYPOINTS_URL}?radar=${selectedRadar}`,
+        PREDICT_WAYPOINTS_URL,
         { waypoints: sampled.map(({ lat, lon, eta_mins }) => ({ lat, lon, eta_mins })) },
         { timeout: 90000 },
         (attempt, total) => {
@@ -903,6 +925,9 @@ export default function App() {
 
       setRouteSegments(buildColoredSegments(routeLonLat, mergedWaypoints))
       setResult({ ...predictRes.data, route_distance_km: totalKm, waypoints: mergedWaypoints })
+      if ((predictRes.data?.radar_lag_mins ?? 0) > 75) {
+        setRadarDown(true)
+      }
     } catch (e) {
       const status = e?.response?.status
       const detail = e?.response?.data?.detail || e?.response?.data?.error?.message || e?.response?.data?.message
@@ -952,6 +977,7 @@ export default function App() {
   function handleBackToPlanner() {
     setResult(null); setError(null); setActiveSeg(null)
     setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null); setShowBreakdown(false)
+    setRadarDown(false)
   }
 
   function handleTabChange(tab) {
@@ -968,9 +994,10 @@ export default function App() {
           userLoc={userLoc}
           activeTab={activeTab}
           onChangeTab={handleTabChange}
-          selectedRadar={selectedRadar}
         />
       )}
+
+      {radarDown && <RadarDownModal onClose={() => setRadarDown(false)} />}
 
       {/* ── ROUTE TAB SCREENS ── */}
       {activeTab === 'route' && (
@@ -991,25 +1018,8 @@ export default function App() {
               <section className="hero">
                 <div className="hero__glow" aria-hidden />
                 <h1 className="hero__title">Know the rain<br />before you leave.</h1>
-                <p className="hero__sub">{selectedRadar === 'lucknow' ? 'Lucknow / UP' : 'Delhi NCR'} · IMD radar · Route-aware</p>
+                <p className="hero__sub">Delhi NCR &amp; UP · IMD radar · Route-aware</p>
               </section>
-
-              <div className="radar-selector">
-                <button
-                  type="button"
-                  className={`radar-selector__btn${selectedRadar === 'delhi' ? ' radar-selector__btn--active' : ''}`}
-                  onClick={() => setSelectedRadar('delhi')}
-                >
-                  Delhi NCR
-                </button>
-                <button
-                  type="button"
-                  className={`radar-selector__btn${selectedRadar === 'lucknow' ? ' radar-selector__btn--active' : ''}`}
-                  onClick={() => setSelectedRadar('lucknow')}
-                >
-                  Lucknow / UP
-                </button>
-              </div>
 
               <div className="planner-card">
                 {/* Route inputs — vertical stack with left connector */}

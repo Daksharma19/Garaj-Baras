@@ -33,6 +33,22 @@ from patches import (  # type: ignore
     build_roi_mask,
 )
 import georef_lucknow  # type: ignore
+import georef as _georef_delhi  # type: ignore
+
+
+def _detect_radar(lat: float, lon: float) -> str:
+    """Pick the radar that covers the point; if both do, pick the closer one."""
+    in_delhi = _georef_delhi.is_within_radar(lat, lon)
+    in_lck   = georef_lucknow.is_within_radar(lat, lon)
+    if in_delhi and not in_lck:
+        return 'delhi'
+    if in_lck and not in_delhi:
+        return 'lucknow'
+    if in_delhi and in_lck:
+        d_delhi = haversine_km(lat, lon, 28.5562, 77.1000)
+        d_lck   = haversine_km(lat, lon, 26.8467, 80.9462)
+        return 'lucknow' if d_lck < d_delhi else 'delhi'
+    return 'delhi'
 import radar_lucknow   # type: ignore
 from datetime import timezone as _timezone
 
@@ -543,10 +559,10 @@ def get_latest_frames(n: int = 6, force: bool = True):
 # ENDPOINT 4: Predict Rain For Provided Waypoints
 
 @app.post("/predict_waypoints")
-def predict_waypoints(payload: PredictWaypointsRequest, radar: str = "delhi"):
+def predict_waypoints(payload: PredictWaypointsRequest):
     """
     Predict rain for a frontend-provided set of waypoints with explicit ETAs.
-    Pass ?radar=lucknow to use the Lucknow IMD radar instead of Delhi.
+    Radar is auto-selected based on which one covers the route midpoint.
     """
     try:
         if not payload.waypoints:
@@ -562,13 +578,16 @@ def predict_waypoints(payload: PredictWaypointsRequest, radar: str = "delhi"):
             if wp.eta_mins < 0:
                 raise HTTPException(status_code=400, detail="ETA minutes must be >= 0.")
 
-        # Select radar — Lucknow or Delhi
+        # Auto-detect radar from route midpoint
+        mid = payload.waypoints[len(payload.waypoints) // 2]
+        radar = _detect_radar(mid.lat, mid.lon)
+
         if radar == "lucknow":
-            _georef      = georef_lucknow
-            state        = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+            _georef = georef_lucknow
+            state   = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         else:
-            import georef as _georef  # type: ignore
-            state        = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+            _georef = _georef_delhi
+            state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
 
         _latlon_to_pixel = _georef.latlon_to_pixel
         _is_within_radar = _georef.is_within_radar
@@ -819,20 +838,22 @@ class NowcastRequest(BaseModel):
 
 
 @app.post("/nowcast")
-def nowcast_location(req: NowcastRequest, radar: str = "delhi"):
+def nowcast_location(req: NowcastRequest):
     """
     Predict rain arrival at a fixed location within 120 minutes.
-    Pass ?radar=lucknow to use the Lucknow IMD radar.
+    Radar is auto-selected based on which one covers the point.
     """
     try:
         if not (6 < req.lat < 38 and 68 < req.lon < 98):
             raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
 
+        radar = _detect_radar(req.lat, req.lon)
+
         if radar == "lucknow":
             _georef = georef_lucknow
             state   = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         else:
-            import georef as _georef  # type: ignore
+            _georef = _georef_delhi
             state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
 
         _latlon_to_pixel = _georef.latlon_to_pixel

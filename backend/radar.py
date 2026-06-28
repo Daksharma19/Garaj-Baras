@@ -466,14 +466,16 @@ def get_radar_lag_mins(latest_timestamp=None):
         now = datetime.now(IST)
         lag = (now - radar_time).total_seconds() / 60.0
 
-        # Sanity check - lag should be 0-180 mins
-        if 0 <= lag <= 180:
+        # Sanity check: reject clearly impossible values (negative or >24h old)
+        if 0 <= lag <= 1440:
             if lag < 30:
                 freshness = "fresh"
             elif lag < 60:
                 freshness = "stale"
-            else:
+            elif lag < 75:
                 freshness = "very_stale"
+            else:
+                freshness = "down"
 
             return {
                 "lag_mins": round(lag, 1),
