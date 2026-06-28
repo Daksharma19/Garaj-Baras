@@ -493,7 +493,7 @@ function NowcastSlots({ slots }) {
   )
 }
 
-function NowcastPage({ userLoc, activeTab, onChangeTab }) {
+function NowcastPage({ userLoc, activeTab, onChangeTab, selectedRadar = 'delhi' }) {
   const [ncLat, setNcLat] = useState(null)
   const [ncLon, setNcLon] = useState(null)
   const [ncName, setNcName] = useState('')
@@ -557,7 +557,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
     setNcScanStatus('Scanning radar…')
     try {
       const res = await postWithRetry(
-        NOWCAST_URL,
+        `${NOWCAST_URL}?radar=${selectedRadar}`,
         { lat: ncLat, lon: ncLon },
         { timeout: 90000 },
         (attempt, total) => {
@@ -709,8 +709,9 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
             <div className="banner banner--dying">
               <p className="banner__head">Outside radar coverage</p>
               <p className="banner__sub">
-                This location is beyond Delhi IMD radar range.
-                Try a location closer to Delhi NCR.
+                {selectedRadar === 'lucknow'
+                  ? 'This location is beyond Lucknow IMD radar range. Try a location closer to Uttar Pradesh.'
+                  : 'This location is beyond Delhi IMD radar range. Try a location closer to Delhi NCR.'}
               </p>
             </div>
           ) : (
@@ -730,6 +731,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [activeTab, setActiveTab] = useState('route')
+  const [selectedRadar, setSelectedRadar] = useState('delhi')
 
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
@@ -764,6 +766,10 @@ export default function App() {
   const routeName = useMemo(() => toCityRouteName(source, destination), [source, destination])
 
   useEffect(() => { warmBackend() }, [])
+
+  useEffect(() => {
+    setResult(null); setError(null); setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null)
+  }, [selectedRadar])
 
   useEffect(() => {
     let alive = true
@@ -876,7 +882,7 @@ export default function App() {
       setScanning(true)
 
       const predictRes = await postWithRetry(
-        PREDICT_WAYPOINTS_URL,
+        `${PREDICT_WAYPOINTS_URL}?radar=${selectedRadar}`,
         { waypoints: sampled.map(({ lat, lon, eta_mins }) => ({ lat, lon, eta_mins })) },
         { timeout: 90000 },
         (attempt, total) => {
@@ -962,6 +968,7 @@ export default function App() {
           userLoc={userLoc}
           activeTab={activeTab}
           onChangeTab={handleTabChange}
+          selectedRadar={selectedRadar}
         />
       )}
 
@@ -984,8 +991,25 @@ export default function App() {
               <section className="hero">
                 <div className="hero__glow" aria-hidden />
                 <h1 className="hero__title">Know the rain<br />before you leave.</h1>
-                <p className="hero__sub">Delhi NCR · IMD radar · Route-aware</p>
+                <p className="hero__sub">{selectedRadar === 'lucknow' ? 'Lucknow / UP' : 'Delhi NCR'} · IMD radar · Route-aware</p>
               </section>
+
+              <div className="radar-selector">
+                <button
+                  type="button"
+                  className={`radar-selector__btn${selectedRadar === 'delhi' ? ' radar-selector__btn--active' : ''}`}
+                  onClick={() => setSelectedRadar('delhi')}
+                >
+                  Delhi NCR
+                </button>
+                <button
+                  type="button"
+                  className={`radar-selector__btn${selectedRadar === 'lucknow' ? ' radar-selector__btn--active' : ''}`}
+                  onClick={() => setSelectedRadar('lucknow')}
+                >
+                  Lucknow / UP
+                </button>
+              </div>
 
               <div className="planner-card">
                 {/* Route inputs — vertical stack with left connector */}

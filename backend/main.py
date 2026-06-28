@@ -30,7 +30,10 @@ from patches import (  # type: ignore
     compute_patch_motion,
     score_patches_for_route,
     build_ncr_roi_mask,
+    build_roi_mask,
 )
+import georef_lucknow  # type: ignore
+import radar_lucknow   # type: ignore
 from datetime import timezone as _timezone
 
 from datetime import datetime as _dt, timedelta as _td
@@ -55,11 +58,19 @@ def _warm_radar_cache_on_startup():
     def _worker():
         try:
             _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
-            print("Radar cache warmed at startup.")
+            print("Delhi radar cache warmed at startup.")
         except Exception as e:
-            print(f"Startup radar warm-up failed (non-fatal): {e}")
+            print(f"Delhi startup warm-up failed (non-fatal): {e}")
+
+    def _lucknow_worker():
+        try:
+            _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+            print("Lucknow radar cache warmed at startup.")
+        except Exception as e:
+            print(f"Lucknow startup warm-up failed (non-fatal): {e}")
 
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_lucknow_worker, daemon=True).start()
 
 # Serve extracted radar PNGs (and allow clients to fetch them)
 try:
@@ -69,6 +80,13 @@ try:
         app.mount("/radar/frames", StaticFiles(directory=FRAMES_FOLDER), name="radar_frames")
 except Exception:
     # Best-effort: API still works without static mounting (e.g. missing folder on first boot)
+    pass
+
+# Serve Lucknow radar frame PNGs — create folder now so mount never fails
+try:
+    os.makedirs(radar_lucknow.FRAMES_FOLDER, exist_ok=True)
+    app.mount("/radar/frames_lucknow", StaticFiles(directory=radar_lucknow.FRAMES_FOLDER), name="radar_frames_lucknow")
+except Exception:
     pass
 
 # Allow all origins for now (frontend will call this)
@@ -159,7 +177,13 @@ radar_cache = {
     "last_loaded": None
 }
 
-_radar_state_lock = threading.Lock()
+lucknow_cache = {
+    "clutter_mask": None,
+    "last_loaded": None
+}
+
+_radar_state_lock   = threading.Lock()
+_lucknow_state_lock = threading.Lock()
 RADAR_CACHE_TTL_SEC = RADAR_TTL_SEC  # keep a single source of truth
 
 
@@ -284,6 +308,115 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
         return radar_cache
 
 
+# ── Lucknow radar cache ───────────────────────────────────────────────────────
+
+def _lucknow_cache_is_fresh(ttl_sec: float) -> bool:
+    last = lucknow_cache.get("last_loaded")
+    if not last:
+        return False
+    if (time.time() - float(last)) >= float(ttl_sec):
+        return False
+    if not lucknow_cache.get("frame_data"):
+        return False
+    if not lucknow_cache.get("movement"):
+        return False
+    if lucknow_cache.get("clutter_mask") is None:
+        return False
+    if not lucknow_cache.get("latest_frame"):
+        return False
+    return True
+
+
+def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    if (not force) and _lucknow_cache_is_fresh(ttl_sec):
+        return lucknow_cache
+
+    with _lucknow_state_lock:
+        if (not force) and _lucknow_cache_is_fresh(ttl_sec):
+            return lucknow_cache
+
+        now = time.time()
+        lk_gif = radar_lucknow.GIF_SAVE_PATH
+        try:
+            gif_fresh = os.path.exists(lk_gif) and (now - os.path.getmtime(lk_gif) < ttl_sec)
+        except Exception:
+            gif_fresh = False
+
+        frame_data, did_refresh = radar_lucknow.refresh_frames_if_stale(
+            ttl_sec=ttl_sec, force=force, clear_pngs=True
+        )
+        if did_refresh:
+            all_frame_data = frame_data
+        else:
+            if gif_fresh:
+                all_frame_data = radar_lucknow.extract_frames(lk_gif, radar_lucknow.FRAMES_FOLDER)
+            else:
+                all_frame_data = radar_lucknow.get_all_frames()
+
+        recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        all_paths = [p for (p, _ts) in all_frame_data]
+        clutter_mask = build_clutter_mask(all_paths)
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(
+            recent_frame_data, clutter_mask=clutter_mask
+        )
+        latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
+        latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
+        lag_info     = radar_lucknow.get_radar_lag_mins(latest_ts)
+
+        patches_motion = []
+        roi_mask = None
+        try:
+            roi_mask = build_roi_mask(
+                georef_lucknow.latlon_to_pixel,
+                georef_lucknow.IMAGE_WIDTH,
+                georef_lucknow.IMAGE_HEIGHT,
+                georef_lucknow.CENTER_LAT,
+                georef_lucknow.CENTER_LON,
+                radius_km=150.0,
+            )
+            pairs = list(zip(recent_frame_data[:-1], recent_frame_data[1:]))
+            for (p_prev, ts_prev), (p_last, ts_last) in reversed(pairs):
+                from optical_flow import isolate_rain as _ir  # type: ignore
+                if _ir(p_prev, clutter_mask=clutter_mask).max() == 0:
+                    continue
+                gap = 10.0
+                if ts_prev and ts_last:
+                    gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+                patches_motion = compute_patch_motion(
+                    p_prev, p_last, gap_mins=gap,
+                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                    pixel_to_latlon_fn=georef_lucknow.pixel_to_latlon,
+                )
+                print(f"  Lucknow per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m)")
+                break
+        except Exception as _pe:
+            print(f"  Lucknow per-patch motion failed (non-fatal): {_pe}")
+            patches_motion, roi_mask = [], None
+
+        decay_tracks = []
+        try:
+            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            print(f"  Lucknow decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
+        except Exception as _de:
+            print(f"  Lucknow decay tracking failed (non-fatal): {_de}")
+
+        lucknow_cache.update({
+            "frame_data": all_frame_data,
+            "recent_frame_data": recent_frame_data,
+            "clutter_mask": clutter_mask,
+            "movement": (dx, dy, dir_from, dir_to, speed),
+            "latest_frame": latest_frame,
+            "latest_ts": latest_ts,
+            "lag_info": lag_info,
+            "patches": patches_motion,
+            "roi_mask": roi_mask,
+            "decay_tracks": decay_tracks,
+            "last_loaded": time.time(),
+            "gif_mtime": os.path.getmtime(lk_gif) if os.path.exists(lk_gif) else None,
+        })
+        return lucknow_cache
+
+
 # ENDPOINT 1: Health Check
 
 @app.get("/health")
@@ -354,14 +487,17 @@ def get_movement():
 # ENDPOINT 3: Latest Radar Frames (PNG + GIF)
 
 @app.get("/radar/gif")
-def get_radar_gif():
-    """
-    Returns the latest downloaded Delhi radar GIF (if present).
-    Use with /frames/latest to ensure the GIF/frames are refreshed when stale.
-    """
-    if not os.path.exists(GIF_SAVE_PATH):
-        raise HTTPException(status_code=404, detail="Radar GIF not found on server yet.")
-    return FileResponse(GIF_SAVE_PATH, media_type="image/gif", filename="delhi_radar.gif")
+def get_radar_gif(radar: str = "delhi"):
+    """Returns the latest downloaded radar GIF. Pass ?radar=lucknow for Lucknow."""
+    if radar == "lucknow":
+        gif_path = radar_lucknow.GIF_SAVE_PATH
+        filename  = "lucknow_radar.gif"
+    else:
+        gif_path = GIF_SAVE_PATH
+        filename  = "delhi_radar.gif"
+    if not os.path.exists(gif_path):
+        raise HTTPException(status_code=404, detail=f"{radar.title()} radar GIF not found yet.")
+    return FileResponse(gif_path, media_type="image/gif", filename=filename)
 
 
 @app.get("/frames/latest")
@@ -407,13 +543,10 @@ def get_latest_frames(n: int = 6, force: bool = True):
 # ENDPOINT 4: Predict Rain For Provided Waypoints
 
 @app.post("/predict_waypoints")
-def predict_waypoints(payload: PredictWaypointsRequest):
+def predict_waypoints(payload: PredictWaypointsRequest, radar: str = "delhi"):
     """
     Predict rain for a frontend-provided set of waypoints with explicit ETAs.
-
-    Use-case:
-      Frontend computes a road route geometry + ETAs from user-provided avg speed,
-      then asks the backend to score rain intensity at those points/times.
+    Pass ?radar=lucknow to use the Lucknow IMD radar instead of Delhi.
     """
     try:
         if not payload.waypoints:
@@ -429,8 +562,17 @@ def predict_waypoints(payload: PredictWaypointsRequest):
             if wp.eta_mins < 0:
                 raise HTTPException(status_code=400, detail="ETA minutes must be >= 0.")
 
-        # Load radar state with TTL lazy-cache
-        state = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        # Select radar — Lucknow or Delhi
+        if radar == "lucknow":
+            _georef      = georef_lucknow
+            state        = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        else:
+            import georef as _georef  # type: ignore
+            state        = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+
+        _latlon_to_pixel = _georef.latlon_to_pixel
+        _is_within_radar = _georef.is_within_radar
+
         clutter_mask = state["clutter_mask"]
         dx, dy, dir_from, dir_to, speed = state["movement"]
         latest_frame = state["latest_frame"]
@@ -455,7 +597,7 @@ def predict_waypoints(payload: PredictWaypointsRequest):
         waypoints_pixels = []
         waypoints_latlon = []
         for wp in payload.waypoints:
-            px, py = latlon_to_pixel(wp.lat, wp.lon)
+            px, py = _latlon_to_pixel(wp.lat, wp.lon)
             waypoints_pixels.append((px, py, float(wp.eta_mins)))
             waypoints_latlon.append((float(wp.lat), float(wp.lon), float(wp.eta_mins)))
 
@@ -502,10 +644,11 @@ def predict_waypoints(payload: PredictWaypointsRequest):
             dy,
             lag_info=lag_info,
             frame_rgb=frame_rgb,
+            latlon_to_pixel_fn=_latlon_to_pixel,
         )
 
         for e, (px, py, _eta) in zip(enriched, waypoints_pixels):
-            e["in_radar_bounds"] = is_within_radar(e["lat"], e["lon"])
+            e["in_radar_bounds"] = _is_within_radar(e["lat"], e["lon"])
             if e["rain_expected"] and decay_tracks:
                 lag = lag_info["lag_mins"]
                 effective_eta = e["eta_mins"] + lag
@@ -676,19 +819,26 @@ class NowcastRequest(BaseModel):
 
 
 @app.post("/nowcast")
-def nowcast_location(req: NowcastRequest):
+def nowcast_location(req: NowcastRequest, radar: str = "delhi"):
     """
     Predict rain arrival at a fixed location within 120 minutes.
-
-    Reuses the same cached radar state as /predict_waypoints — no extra GIF download.
-    Returns a list of rain events sorted by ETA, each with probability (0–100)
-    derived from projected dBZ after patch decay.
+    Pass ?radar=lucknow to use the Lucknow IMD radar.
     """
     try:
         if not (6 < req.lat < 38 and 68 < req.lon < 98):
             raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
 
-        if not is_within_radar(req.lat, req.lon):
+        if radar == "lucknow":
+            _georef = georef_lucknow
+            state   = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        else:
+            import georef as _georef  # type: ignore
+            state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+
+        _latlon_to_pixel = _georef.latlon_to_pixel
+        _is_within_radar = _georef.is_within_radar
+
+        if not _is_within_radar(req.lat, req.lon):
             return {
                 "in_radar_bounds": False,
                 "events": [],
@@ -698,7 +848,6 @@ def nowcast_location(req: NowcastRequest):
                 "total_events": 0,
             }
 
-        state = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         dx, dy, _dir_from, _dir_to, _speed = state["movement"]
         latest_frame = state.get("latest_frame")
         lag_info = state.get("lag_info") or {}
@@ -713,7 +862,7 @@ def nowcast_location(req: NowcastRequest):
         rain_mask = isolate_rain(latest_frame, clutter_mask=clutter_mask)
         rgb_arr = np.array(Image.open(latest_frame).convert("RGB"))
 
-        user_px, user_py = latlon_to_pixel(req.lat, req.lon)
+        user_px, user_py = _latlon_to_pixel(req.lat, req.lon)
 
         from nowcast import compute_nowcast_slots  # type: ignore
         slots = compute_nowcast_slots(

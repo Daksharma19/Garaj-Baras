@@ -158,8 +158,9 @@ def get_movement_vector(frame_data, clutter_mask=None):
             if gap_mins < 0:
                 print(f"  SKIP (time went backward): frame_{i:02d}->{i+1:02d}")
                 continue
-            if gap_mins > 20:
-                print(f"  SKIP (gap={gap_mins:.0f}mins too large): frame_{i:02d}->{i+1:02d}")
+            if gap_mins > 120:
+                # Truly stale pair — skip only if gap is absurdly large
+                print(f"  SKIP (gap={gap_mins:.0f}mins, > 2hr): frame_{i:02d}->{i+1:02d}")
                 continue
 
             print(f"  USE gap={gap_mins:.0f}mins: frame_{i:02d}->{i+1:02d}")

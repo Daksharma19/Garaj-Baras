@@ -10,6 +10,7 @@ from optical_flow import isolate_rain, get_direction_string
 from fuzzy import COLOR_TABLE
 
 _roi_cache = {}
+_roi_cache_generic = {}
 
 # km per pixel — kept consistent with optical_flow.py
 _KM_PER_PX = 0.877
@@ -18,6 +19,25 @@ _KM_PER_PX = 0.877
 _CT_RGB = np.array([(r, g, b) for r, g, b, _ in COLOR_TABLE], dtype=np.int16)
 _CT_DBZ = np.array([d for _, _, _, d in COLOR_TABLE], dtype=np.int32)
 _MAX_DIST2 = 80 ** 2  # beyond this RGB distance, pixel is not a legend color
+
+
+def build_roi_mask(latlon_to_pixel_fn, image_width, image_height, center_lat, center_lon, radius_km=150.0):
+    """
+    Generic ROI mask builder — not tied to any specific radar's georef.
+    Returns uint8 mask (255 = inside coverage circle, 0 = outside).
+    """
+    key = (id(latlon_to_pixel_fn), round(radius_km, 1))
+    if key in _roi_cache_generic:
+        return _roi_cache_generic[key]
+
+    cx, cy = latlon_to_pixel_fn(center_lat, center_lon)
+    radius_px = radius_km / _KM_PER_PX
+
+    ys, xs = np.ogrid[:image_height, :image_width]
+    dist2 = (xs - cx) ** 2 + (ys - cy) ** 2
+    mask = np.where(dist2 <= radius_px ** 2, 255, 0).astype(np.uint8)
+    _roi_cache_generic[key] = mask
+    return mask
 
 
 def build_ncr_roi_mask(radius_km=150.0):
@@ -57,7 +77,8 @@ def _patch_max_dbz(img_rgb, px_mask):
 
 
 def compute_patch_motion(p_prev, p_last, gap_mins=10.0,
-                         clutter_mask=None, roi_mask=None, min_area_px=4):
+                         clutter_mask=None, roi_mask=None, min_area_px=4,
+                         pixel_to_latlon_fn=None):
     """
     Detects individual rain patches (connected components) in the latest radar
     frame and computes each patch's own motion vector via dense optical flow.
@@ -115,7 +136,8 @@ def compute_patch_motion(p_prev, p_last, gap_mins=10.0,
                 in_ncr = False
 
         max_dbz = _patch_max_dbz(img_rgb, px_mask)
-        lat, lon = pixel_to_latlon(int(round(cx_f)), int(round(cy_f)))
+        _ptl = pixel_to_latlon_fn if pixel_to_latlon_fn is not None else pixel_to_latlon
+        lat, lon = _ptl(int(round(cx_f)), int(round(cy_f)))
 
         patches.append({
             "id": comp_id,

@@ -52,8 +52,9 @@ def get_pixel_intensity(frame_path, px, py):
         "rgb": (r, g, b)
     }
 
-def enrich_results(results, waypoints_latlon, 
-                   latest_frame, dx, dy, lag_info=None, frame_rgb=None):
+def enrich_results(results, waypoints_latlon,
+                   latest_frame, dx, dy, lag_info=None, frame_rgb=None,
+                   latlon_to_pixel_fn=None):
     from PIL import Image
     import numpy as np
 
@@ -67,8 +68,11 @@ def enrich_results(results, waypoints_latlon,
     lag_mins = lag_info['lag_mins'] if lag_info else 25.0
 
     for r, (lat, lon, eta) in zip(results, waypoints_latlon):
-        from georef import latlon_to_pixel
-        px, py = latlon_to_pixel(lat, lon)
+        if latlon_to_pixel_fn is not None:
+            px, py = latlon_to_pixel_fn(lat, lon)
+        else:
+            from georef import latlon_to_pixel
+            px, py = latlon_to_pixel(lat, lon)
 
         if r["rain_expected"]:
             effective_eta = eta + lag_mins
