@@ -668,6 +668,95 @@ def predict_rain(route: RouteRequest):
             detail=f"Prediction failed: {str(e)}\n{traceback.format_exc()}"
         )
 
+# ENDPOINT: Point Nowcast
+
+class NowcastRequest(BaseModel):
+    lat: float
+    lon: float
+
+
+@app.post("/nowcast")
+def nowcast_location(req: NowcastRequest):
+    """
+    Predict rain arrival at a fixed location within 120 minutes.
+
+    Reuses the same cached radar state as /predict_waypoints — no extra GIF download.
+    Returns a list of rain events sorted by ETA, each with probability (0–100)
+    derived from projected dBZ after patch decay.
+    """
+    try:
+        if not (6 < req.lat < 38 and 68 < req.lon < 98):
+            raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
+
+        if not is_within_radar(req.lat, req.lon):
+            return {
+                "in_radar_bounds": False,
+                "events": [],
+                "summary": "Location is outside radar coverage area.",
+                "radar_as_of": None,
+                "lag_mins": None,
+                "total_events": 0,
+            }
+
+        state = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        dx, dy, _dir_from, _dir_to, _speed = state["movement"]
+        latest_frame = state.get("latest_frame")
+        lag_info = state.get("lag_info") or {}
+        lag_mins = float(lag_info.get("lag_mins", 10.0))
+        patch_tracks = state.get("decay_tracks") or []
+        clutter_mask = state.get("clutter_mask")
+        latest_ts = state.get("latest_ts")
+
+        if not latest_frame:
+            raise HTTPException(status_code=503, detail="Radar data not yet loaded. Try again in a moment.")
+
+        rain_mask = isolate_rain(latest_frame, clutter_mask=clutter_mask)
+        rgb_arr = np.array(Image.open(latest_frame).convert("RGB"))
+
+        user_px, user_py = latlon_to_pixel(req.lat, req.lon)
+
+        from nowcast import compute_nowcast_slots  # type: ignore
+        slots = compute_nowcast_slots(
+            user_px=float(user_px),
+            user_py=float(user_py),
+            dx=float(dx),
+            dy=float(dy),
+            rain_mask=rain_mask,
+            rgb_arr=rgb_arr,
+            patch_tracks=patch_tracks,
+            lag_mins=lag_mins,
+        )
+
+        as_of = latest_ts.strftime("%H:%M IST") if latest_ts else "unknown"
+
+        first_rain = next((s for s in slots if s["has_rain"]), None)
+        if not first_rain:
+            summary = "Clear skies for the next 2 hours"
+        elif first_rain["slot_mins"] <= 0:
+            summary = f"Rain right now · {first_rain['probability']}% probability"
+        else:
+            summary = f"Rain in ~{int(first_rain['slot_mins'])} min · {first_rain['probability']}% probability"
+
+        rain_slot_count = sum(1 for s in slots if s["has_rain"])
+
+        return {
+            "in_radar_bounds": True,
+            "slots": slots,
+            "summary": summary,
+            "radar_as_of": as_of,
+            "lag_mins": round(lag_mins, 1),
+            "rain_slots": rain_slot_count,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Nowcast failed: {str(e)}\n{traceback.format_exc()}"
+        )
+
+
 # RUN INSTRUCTIONS:
 # cd backend
 # .\venv\Scripts\activate

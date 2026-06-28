@@ -5,6 +5,7 @@ import './App.css'
 const API_BASE =
   import.meta.env.VITE_API_BASE || 'https://garaj-baras-api.onrender.com'
 const PREDICT_WAYPOINTS_URL = `${API_BASE}/predict_waypoints`
+const NOWCAST_URL = `${API_BASE}/nowcast`
 
 const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search'
 const NOMINATIM_REVERSE_URL = 'https://nominatim.openstreetmap.org/reverse'
@@ -13,7 +14,6 @@ const ORS_KEY = import.meta.env.VITE_ORS_API_KEY
 
 const RouteMap = lazy(() => import('./RouteMap.jsx'))
 
-// Wake the backend (Render free tier sleeps after ~15 min). Fire-and-forget.
 function warmBackend() {
   try {
     axios.get(`${API_BASE}/health`, { timeout: 90000 }).catch(() => {})
@@ -22,9 +22,6 @@ function warmBackend() {
   }
 }
 
-// Retry with exponential backoff on network/timeout/5xx. Render free-tier
-// cold-starts can take 30–60s, so we quietly retry up to 4 times before
-// surfacing an error to the user.
 async function postWithRetry(url, body, config = {}, onAttempt = null) {
   const backoffsMs = [0, 3000, 7000, 15000]
   let lastErr = null
@@ -43,7 +40,6 @@ async function postWithRetry(url, body, config = {}, onAttempt = null) {
       const isTimeout = err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')
       const isServerErr = status && status >= 500
       const isNetwork = !status && !err?.response
-      // Only retry on transient errors; surface anything else immediately.
       if (!(isTimeout || isServerErr || isNetwork)) throw err
     }
   }
@@ -54,17 +50,9 @@ function computeViewboxAround(lat, lon, radiusKm = 180) {
   const la = Number(lat)
   const lo = Number(lon)
   if (!Number.isFinite(la) || !Number.isFinite(lo)) return null
-
-  // Very rough: 1° lat ≈ 111 km; lon shrinks by cos(lat).
   const dLat = radiusKm / 111
   const dLon = radiusKm / (111 * Math.max(0.2, Math.cos((la * Math.PI) / 180)))
-
-  const left = lo - dLon
-  const right = lo + dLon
-  const top = la + dLat
-  const bottom = la - dLat
-  // Nominatim expects "left,top,right,bottom" (lon,lat,lon,lat)
-  return `${left},${top},${right},${bottom}`
+  return `${lo - dLon},${la + dLat},${lo + dLon},${la - dLat}`
 }
 
 function getRainColor(label) {
@@ -87,10 +75,6 @@ function getRainGroupLabel(label) {
   return 'No Rain'
 }
 
-// Collapse a sorted list of waypoints into contiguous rain patches and
-// produce a human-friendly summary focused on the patch CLOSEST to the user.
-//
-// Returns: { tone, headline, secondary, patches, closest, lastEta } or null.
 function computeRainTimeline(waypoints) {
   if (!Array.isArray(waypoints) || !waypoints.length) return null
 
@@ -148,11 +132,8 @@ function computeRainTimeline(waypoints) {
   }
 
   const closest = patches[0]
-  const NOW_THRESHOLD_MIN = 2
-  const END_THRESHOLD_MIN = 2.5
-
-  const isNow = closest.startMin <= firstEta + NOW_THRESHOLD_MIN
-  const continuesToEnd = closest.endMin >= lastEta - END_THRESHOLD_MIN
+  const isNow = closest.startMin <= firstEta + 2
+  const continuesToEnd = closest.endMin >= lastEta - 2.5
 
   const fmt = (m) => `${Math.max(0, Math.round(Number(m) || 0))} min`
 
@@ -160,35 +141,28 @@ function computeRainTimeline(waypoints) {
   const isDying = closestDecay === 'dying' || closestDecay === 'dead'
   const isWeakening = closestDecay === 'weakening'
 
-  let headline
-  let secondary
-  let decayNote = null  // shown as a sub-note when patch is fading
+  let headline, secondary, decayNote = null
 
   if (isDying) {
     headline = isNow
-      ? 'Rain nearby — but it\'s fading fast'
+      ? "Rain nearby — but it's fading fast"
       : `Rain detected in ${fmt(closest.startMin)} — likely to clear`
     secondary = 'This patch is losing intensity. By the time you reach it, skies may already be clearing.'
     decayNote = 'dying'
   } else if (isWeakening) {
-    if (isNow) {
-      headline = 'Light rain right now — weakening as you travel'
-      secondary = 'Rain is losing strength. Expect it to get lighter along your route.'
-    } else {
-      headline = `Rain in ${fmt(closest.startMin)} — and it\'s weakening`
-      secondary = 'This patch is losing intensity. Rain will likely be lighter than current radar shows.'
-    }
+    headline = isNow
+      ? 'Light rain right now — weakening as you travel'
+      : `Rain in ${fmt(closest.startMin)} — and it's weakening`
+    secondary = 'This patch is losing intensity. Rain will likely be lighter than current radar shows.'
     decayNote = 'weakening'
   } else {
-    // stable / growing — normal messaging
     if (isNow) {
-      if (continuesToEnd) {
-        headline = 'Rain right now — continues to destination'
-        secondary = `Expect rain for the full ${fmt(lastEta)} trip.`
-      } else {
-        headline = `Rain right now — clearing in ${fmt(closest.endMin)}`
-        secondary = 'After that, skies clear for the rest of the route.'
-      }
+      headline = continuesToEnd
+        ? 'Rain right now — continues to destination'
+        : `Rain right now — clearing in ${fmt(closest.endMin)}`
+      secondary = continuesToEnd
+        ? `Expect rain for the full ${fmt(lastEta)} trip.`
+        : 'After that, skies clear for the rest of the route.'
     } else {
       if (continuesToEnd) {
         headline = `Rain starts in ${fmt(closest.startMin)}`
@@ -231,30 +205,18 @@ function toCityRouteName(a, b) {
 async function geocode(place) {
   const q = String(place ?? '').trim()
   if (!q) throw new Error('Please enter both Source and Destination.')
-
-  const url = `${NOMINATIM_SEARCH_URL}?q=${encodeURIComponent(
-    q
-  )}&format=json&limit=1&countrycodes=in`
-
-  const res = await axios.get(url, {
-    timeout: 15000,
-    headers: { Accept: 'application/json' },
-  })
+  const res = await axios.get(
+    `${NOMINATIM_SEARCH_URL}?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=in`,
+    { timeout: 15000, headers: { Accept: 'application/json' } }
+  )
   const data = Array.isArray(res.data) ? res.data[0] : null
   if (!data?.lat || !data?.lon) throw new Error('No geocoding results.')
-  return {
-    lat: parseFloat(data.lat),
-    lon: parseFloat(data.lon),
-    display_name: data.display_name,
-  }
+  return { lat: parseFloat(data.lat), lon: parseFloat(data.lon), display_name: data.display_name }
 }
 
 async function searchPlaces(query, signal, opts = {}) {
   const q = String(query ?? '').trim()
   if (!q) return []
-
-  const viewbox = opts?.viewbox || null
-
   const res = await axios.get(NOMINATIM_SEARCH_URL, {
     timeout: 15000,
     signal,
@@ -263,14 +225,11 @@ async function searchPlaces(query, signal, opts = {}) {
       format: 'jsonv2',
       limit: 6,
       addressdetails: 1,
-      // Do NOT hard-restrict to a region. If we have a viewbox (e.g. user's
-      // current location), use it as a soft ranking hint.
-      ...(viewbox ? { viewbox, bounded: 0 } : {}),
+      ...(opts?.viewbox ? { viewbox: opts.viewbox, bounded: 0 } : {}),
       countrycodes: 'in',
     },
     headers: { Accept: 'application/json' },
   })
-
   const arr = Array.isArray(res.data) ? res.data : []
   return arr
     .filter((x) => x?.lat && x?.lon && x?.display_name)
@@ -288,91 +247,45 @@ async function reversePlaceName(lat, lon, signal) {
   const res = await axios.get(NOMINATIM_REVERSE_URL, {
     timeout: 15000,
     signal,
-    params: {
-      lat,
-      lon,
-      format: 'jsonv2',
-      zoom: 16,
-      addressdetails: 1,
-    },
+    params: { lat, lon, format: 'jsonv2', zoom: 16, addressdetails: 1 },
     headers: { Accept: 'application/json' },
   })
   const name = res.data?.display_name
   return typeof name === 'string' && name.trim() ? name.trim() : null
 }
 
-function sampleRouteEvery2km(routeCoords, stepKm = 2.0) {
-  // routeCoords: Array of [lon, lat]
-  if (!Array.isArray(routeCoords) || routeCoords.length < 2) return []
-
-  const sampled = []
-  sampled.push(routeCoords[0])
-
-  let distAcc = 0
-  for (let i = 1; i < routeCoords.length; i++) {
-    const [lon1, lat1] = routeCoords[i - 1]
-    const [lon2, lat2] = routeCoords[i]
-    distAcc += haversine(lat1, lon1, lat2, lon2)
-    if (distAcc >= stepKm) {
-      sampled.push(routeCoords[i])
-      distAcc = 0
-    }
-  }
-
-  const last = routeCoords[routeCoords.length - 1]
-  const lastKey = `${last[0]}|${last[1]}`
-  const lastSampled = sampled[sampled.length - 1]
-  const lastSampledKey = `${lastSampled[0]}|${lastSampled[1]}`
-  if (lastKey !== lastSampledKey) sampled.push(last)
-
-  // Convert to {lat,lon} objects
-  return sampled.map(([lon, lat]) => ({ lat, lon }))
-}
-
 function sampleRouteEvery5Min(routeCoords, speedKmh, intervalMin = 5) {
-  // routeCoords: Array of [lon, lat]
   if (!Array.isArray(routeCoords) || routeCoords.length < 2) return []
   const v = Number(speedKmh)
   if (!Number.isFinite(v) || v <= 0) return []
-
   const stepKm = v * (intervalMin / 60)
   const sampled = []
-
   let cumKm = 0
   let distAcc = 0
-
-  // always start
   const [lon0, lat0] = routeCoords[0]
   sampled.push({ lat: lat0, lon: lon0, eta_mins: 0, cumKm: 0 })
-
   for (let i = 1; i < routeCoords.length; i++) {
     const [lon1, lat1] = routeCoords[i - 1]
     const [lon2, lat2] = routeCoords[i]
     const dKm = haversine(lat1, lon1, lat2, lon2)
     cumKm += dKm
     distAcc += dKm
-
     if (distAcc >= stepKm) {
-      const eta = (cumKm / v) * 60
-      sampled.push({ lat: lat2, lon: lon2, eta_mins: eta, cumKm })
+      sampled.push({ lat: lat2, lon: lon2, eta_mins: (cumKm / v) * 60, cumKm })
       distAcc = 0
     }
   }
-
   const [lonLast, latLast] = routeCoords[routeCoords.length - 1]
   const last = sampled[sampled.length - 1]
   if (!last || Math.abs(last.lat - latLast) > 1e-9 || Math.abs(last.lon - lonLast) > 1e-9) {
-    const eta = (cumKm / v) * 60
-    sampled.push({ lat: latLast, lon: lonLast, eta_mins: eta, cumKm })
+    sampled.push({ lat: latLast, lon: lonLast, eta_mins: (cumKm / v) * 60, cumKm })
   }
-
   return sampled
 }
 
 function binarySearchNearestIndex(sortedNums, target) {
   if (!Array.isArray(sortedNums) || !sortedNums.length) return -1
-  let lo = 0
-  let hi = sortedNums.length - 1
+  let lo = 0, hi = sortedNums.length - 1
   while (lo <= hi) {
     const mid = (lo + hi) >> 1
     const v = sortedNums[mid]
@@ -382,16 +295,12 @@ function binarySearchNearestIndex(sortedNums, target) {
   }
   if (lo <= 0) return 0
   if (lo >= sortedNums.length) return sortedNums.length - 1
-  const a = sortedNums[lo - 1]
-  const b = sortedNums[lo]
-  return Math.abs(a - target) <= Math.abs(b - target) ? lo - 1 : lo
+  return Math.abs(sortedNums[lo - 1] - target) <= Math.abs(sortedNums[lo] - target) ? lo - 1 : lo
 }
 
 function buildColoredSegments(routeLonLat, predictedWaypoints) {
-  // routeLonLat: Array<[lon,lat]>
   if (!Array.isArray(routeLonLat) || routeLonLat.length < 2) return []
   if (!Array.isArray(predictedWaypoints) || !predictedWaypoints.length) return []
-
   const cumKm = [0]
   let acc = 0
   for (let i = 1; i < routeLonLat.length; i++) {
@@ -400,16 +309,13 @@ function buildColoredSegments(routeLonLat, predictedWaypoints) {
     acc += haversine(lat1, lon1, lat2, lon2)
     cumKm.push(acc)
   }
-
   const wpEta = predictedWaypoints.map((w) => Number(w?.eta_mins || 0))
   const maxEta = Math.max(...wpEta, 0)
   const totalKm = cumKm[cumKm.length - 1] || 1e-6
   const wpKm = predictedWaypoints.map((w) => {
     const eta = Number(w?.eta_mins || 0)
-    const frac = maxEta > 0 ? Math.max(0, Math.min(1, eta / maxEta)) : 0
-    return frac * totalKm
+    return (maxEta > 0 ? Math.max(0, Math.min(1, eta / maxEta)) : 0) * totalKm
   })
-
   const segments = []
   for (let i = 1; i < routeLonLat.length; i++) {
     const midKm = (cumKm[i - 1] + cumKm[i]) / 2
@@ -418,93 +324,116 @@ function buildColoredSegments(routeLonLat, predictedWaypoints) {
     const inBounds = !!wp?.in_radar_bounds
     const label = wp?.label || 'Unknown'
     const color = inBounds ? getRainColor(label) : '#64748B'
-    const midLat = (routeLonLat[i - 1][1] + routeLonLat[i][1]) / 2
-    const midLon = (routeLonLat[i - 1][0] + routeLonLat[i][0]) / 2
     segments.push({
       positions: [
         [routeLonLat[i - 1][1], routeLonLat[i - 1][0]],
         [routeLonLat[i][1], routeLonLat[i][0]],
       ],
-      color,
-      inBounds,
-      label,
+      color, inBounds, label,
       eta_mins: wp?.eta_mins ?? null,
       dbz: wp?.dbz ?? null,
       rain_expected: !!wp?.rain_expected,
-      mid: { lat: midLat, lon: midLon },
+      mid: {
+        lat: (routeLonLat[i - 1][1] + routeLonLat[i][1]) / 2,
+        lon: (routeLonLat[i - 1][0] + routeLonLat[i][0]) / 2,
+      },
     })
   }
   return segments
 }
 
-function joinApiUrl(maybePath) {
-  const p = String(maybePath || '')
-  if (!p) return ''
-  if (p.startsWith('http://') || p.startsWith('https://')) return p
-  if (p.startsWith('/')) return `${API_BASE}${p}`
-  return `${API_BASE}/${p}`
-}
-
 function toIST(etaMins) {
-  const ms = Date.now() + etaMins * 60 * 1000
-  const ist = new Date(ms + 5.5 * 60 * 60 * 1000)
-  const h = String(ist.getUTCHours()).padStart(2, '0')
-  const m = String(ist.getUTCMinutes()).padStart(2, '0')
-  return `${h}:${m}`
+  const ist = new Date(Date.now() + etaMins * 60 * 1000 + 5.5 * 60 * 60 * 1000)
+  return `${String(ist.getUTCHours()).padStart(2, '0')}:${String(ist.getUTCMinutes()).padStart(2, '0')}`
 }
 
+// ── Shared Components ─────────────────────────────────────────────────────────
+
+function TabBar({ activeTab, onChangeTab }) {
+  return (
+    <div className="tab-bar" role="tablist">
+      <button
+        role="tab"
+        aria-selected={activeTab === 'route'}
+        className={`tab-bar__btn${activeTab === 'route' ? ' tab-bar__btn--active' : ''}`}
+        onClick={() => onChangeTab('route')}
+      >
+        Route
+      </button>
+      <button
+        role="tab"
+        aria-selected={activeTab === 'nowcast'}
+        className={`tab-bar__btn${activeTab === 'nowcast' ? ' tab-bar__btn--active' : ''}`}
+        onClick={() => onChangeTab('nowcast')}
+      >
+        Nowcast
+      </button>
+    </div>
+  )
+}
+
+// ── Rain Timeline Bar ─────────────────────────────────────────────────────────
 function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown }) {
   if (!patches?.length || !lastEta || lastEta <= 0) return null
   const first = patches[0]
-  const startIST = toIST(first.startMin)
-  const endIST = toIST(first.endMin)
   const duration = Math.round(first.endMin - first.startMin)
-  const firstLabel = duration <= 1 ? `Rain at ${startIST}` : `${startIST} – ${endIST}`
+  const firstLabel = duration <= 1
+    ? `Rain at ${toIST(first.startMin)}`
+    : `${toIST(first.startMin)} – ${toIST(first.endMin)}`
 
   return (
-    <div className="routeTimeline">
-      <div className="routeTimelineTrack">
-        <div className="routeStartDot" />
+    <div className="timeline">
+      <div className="timeline__track">
+        <div className="timeline__cap timeline__cap--start" aria-hidden />
         {patches.map((p, i) => {
           const left = Math.max(0, (p.startMin / lastEta) * 100)
           const width = Math.max(3, Math.min(100 - left, ((p.endMin - p.startMin) / lastEta) * 100))
           return (
             <div
               key={i}
-              className="routeRainPatch"
+              className="timeline__patch"
               style={{ left: `${left}%`, width: `${width}%` }}
             />
           )
         })}
-        <div className="routeEndDot" />
+        <div className="timeline__cap timeline__cap--end" aria-hidden />
       </div>
-      <div className="routeTimelineMeta">
-        <span>{toIST(0)}</span>
-        <span className="routeTimelineNote">{firstLabel}</span>
-        <span>{toIST(lastEta)}</span>
+      <div className="timeline__meta">
+        <span className="timeline__time">{toIST(0)}</span>
+        <span className="timeline__rain-note">{firstLabel}</span>
+        <span className="timeline__time">{toIST(lastEta)}</span>
       </div>
 
-      <button className="breakdownToggle" type="button" onClick={onToggleBreakdown}>
-        {showBreakdown ? 'Hide breakdown' : `See full breakdown (${patches.length} rain ${patches.length === 1 ? 'zone' : 'zones'})`}
+      <button className="breakdown-toggle" type="button" onClick={onToggleBreakdown}>
+        {showBreakdown
+          ? 'Hide breakdown'
+          : `See full breakdown (${patches.length} rain ${patches.length === 1 ? 'zone' : 'zones'})`}
       </button>
 
       {showBreakdown && (
-        <div className="rainBreakdown">
+        <div className="breakdown">
           {patches.map((p, i) => {
             const decay = p.decayStatus || 'stable'
-            const decayLabel = decay === 'dead' ? 'Likely clear'
+            const decayLabel =
+              decay === 'dead' ? 'Likely clear'
               : decay === 'dying' ? 'Fading fast'
               : decay === 'weakening' ? 'Weakening'
               : null
             return (
-              <div key={i} className={`rainBreakdownRow ${decay !== 'stable' ? 'rainBreakdownRow--fading' : ''}`}>
-                <span className={`breakdownDot breakdownDot--${(p.intensity || 'Light').toLowerCase()}`} />
-                <div className="breakdownMain">
-                  <span className="breakdownTime">{toIST(p.startMin)} – {toIST(p.endMin)}</span>
-                  <span className="breakdownIntensity">{p.intensity || 'Light'} Rain</span>
+              <div
+                key={i}
+                className={`breakdown__row${decay !== 'stable' ? ' breakdown__row--fading' : ''}`}
+              >
+                <span
+                  className={`breakdown__dot breakdown__dot--${(p.intensity || 'Light').toLowerCase()}`}
+                  aria-hidden
+                />
+                <div className="breakdown__info">
+                  <span className="breakdown__time">{toIST(p.startMin)} – {toIST(p.endMin)}</span>
+                  <span className="breakdown__intensity">{p.intensity || 'Light'} Rain</span>
                 </div>
                 {decayLabel && (
-                  <span className={`decayChip decayChip--${decay}`}>{decayLabel}</span>
+                  <span className={`decay-chip decay-chip--${decay}`}>{decayLabel}</span>
                 )}
               </div>
             )
@@ -515,14 +444,299 @@ function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown })
   )
 }
 
+// ── Nowcast Components ────────────────────────────────────────────────────────
 
+function NowcastSlots({ slots }) {
+  if (!Array.isArray(slots) || !slots.length) return null
+  return (
+    <div className="nc-slots">
+      {slots.map((slot, i) => {
+        const timeIST = toIST(slot.slot_mins)
+        const filled = Math.round(slot.probability / 10)
+        const hasRain = slot.has_rain
+        const decayLabel =
+          slot.decay_status === 'dying' ? 'Fading'
+          : slot.decay_status === 'dead' ? 'Clearing'
+          : slot.decay_status === 'weakening' ? 'Weakening'
+          : null
+        const isNow = i === 0
+
+        return (
+          <div
+            key={i}
+            className={`nc-slot${hasRain ? ' nc-slot--rain' : ' nc-slot--clear'}${isNow ? ' nc-slot--now' : ''}`}
+          >
+            <span className="nc-slot__time">
+              {isNow ? 'Now' : timeIST}
+            </span>
+            <div className="nc-slot__bar" aria-hidden>
+              {Array.from({ length: 10 }, (_, j) => (
+                <div
+                  key={j}
+                  className={`nc-slot__seg${j < filled ? ' nc-slot__seg--filled' : ''}`}
+                />
+              ))}
+            </div>
+            <span className="nc-slot__label">
+              {hasRain ? (slot.intensity || 'Rain') : 'Clear'}
+            </span>
+            <span className={`nc-slot__prob${!hasRain ? ' nc-slot__prob--clear' : ''}`}>
+              {hasRain ? `${slot.probability}%` : '—'}
+            </span>
+            {decayLabel && hasRain && (
+              <span className={`decay-chip decay-chip--${slot.decay_status}`}>{decayLabel}</span>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function NowcastPage({ userLoc, activeTab, onChangeTab }) {
+  const [ncLat, setNcLat] = useState(null)
+  const [ncLon, setNcLon] = useState(null)
+  const [ncName, setNcName] = useState('')
+  const [isMyLoc, setIsMyLoc] = useState(false)
+
+  const [ncSearchQuery, setNcSearchQuery] = useState('')
+  const [ncSuggestions, setNcSuggestions] = useState([])
+  const [ncSugOpen, setNcSugOpen] = useState(false)
+  const ncDebounceRef = useRef(null)
+  const ncAbortRef = useRef(null)
+
+  const [ncResult, setNcResult] = useState(null)
+  const [ncLoading, setNcLoading] = useState(false)
+  const [ncError, setNcError] = useState(null)
+  const [ncScanStatus, setNcScanStatus] = useState('')
+
+  useEffect(() => {
+    if (userLoc && !ncLat) {
+      setNcLat(userLoc.lat)
+      setNcLon(userLoc.lon)
+      setNcName('My Location')
+      setIsMyLoc(true)
+    }
+  }, [userLoc])
+
+  useEffect(() => {
+    const q = ncSearchQuery.trim()
+    if (ncAbortRef.current) ncAbortRef.current.abort()
+    if (ncDebounceRef.current) clearTimeout(ncDebounceRef.current)
+    if (q.length < 3) { setNcSuggestions([]); return }
+    ncDebounceRef.current = setTimeout(async () => {
+      const ac = new AbortController()
+      ncAbortRef.current = ac
+      try {
+        const viewbox = userLoc ? computeViewboxAround(userLoc.lat, userLoc.lon, 220) : null
+        setNcSuggestions(await searchPlaces(q, ac.signal, { viewbox }))
+      } catch (e) {
+        if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setNcSuggestions([])
+      }
+    }, 350)
+    return () => { if (ncDebounceRef.current) clearTimeout(ncDebounceRef.current) }
+  }, [ncSearchQuery, userLoc])
+
+  function useMyLocation() {
+    if (!userLoc) return
+    setNcLat(userLoc.lat)
+    setNcLon(userLoc.lon)
+    setNcName('My Location')
+    setIsMyLoc(true)
+    setNcSearchQuery('')
+    setNcSuggestions([])
+    setNcResult(null)
+    setNcError(null)
+  }
+
+  async function handleScan() {
+    if (!ncLat || !ncLon) { setNcError('Please select a location first.'); return }
+    setNcError(null)
+    setNcLoading(true)
+    setNcResult(null)
+    setNcScanStatus('Scanning radar…')
+    try {
+      const res = await postWithRetry(
+        NOWCAST_URL,
+        { lat: ncLat, lon: ncLon },
+        { timeout: 90000 },
+        (attempt, total) => {
+          setNcScanStatus(
+            attempt === 1
+              ? 'Scanning radar…'
+              : `Waking server — attempt ${attempt} of ${total}`
+          )
+        }
+      )
+      setNcResult(res.data)
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || 'Something went wrong.'
+      setNcError(typeof detail === 'string' ? detail.slice(0, 300) : 'Nowcast failed.')
+    } finally {
+      setNcLoading(false)
+      setNcScanStatus('')
+    }
+  }
+
+  const hasLocation = ncLat != null && ncLon != null
+
+  return (
+    <div className="pg-nowcast">
+      <nav className="nav">
+        <span className="nav__brand">GARAJ BARAS</span>
+        <span className="nav__live" aria-hidden>
+          <span className="nav__live-dot" />
+          LIVE
+        </span>
+      </nav>
+
+      <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
+
+      <div className="nc-card">
+        <div className="nc-section-label">SCAN LOCATION</div>
+
+        {/* Current selected location display */}
+        {hasLocation && (
+          <div className="nc-loc-display">
+            <svg className="nc-loc-icon" viewBox="0 0 20 20" fill="none" aria-hidden>
+              <circle cx="10" cy="9" r="3" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M10 2C6.13 2 3 5.13 3 9c0 5.25 7 11 7 11s7-5.75 7-11c0-3.87-3.13-7-7-7z"
+                stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+            </svg>
+            <div className="nc-loc-text">
+              <span className="nc-loc-name">{ncName || 'Selected Location'}</span>
+              <span className="nc-loc-coords">
+                {Number(ncLat).toFixed(4)}°N, {Number(ncLon).toFixed(4)}°E
+              </span>
+            </div>
+            {userLoc && !isMyLoc && (
+              <button className="nc-use-me-btn" type="button" onClick={useMyLocation}>
+                Use me
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Location search */}
+        <div className="typeahead-wrap" style={{ marginTop: hasLocation ? 12 : 0 }}>
+          <div className="rf-shell">
+            <input
+              className="rf-input"
+              placeholder={hasLocation ? 'Search a different location…' : 'Search location…'}
+              value={ncSearchQuery}
+              onChange={(e) => { setNcSearchQuery(e.target.value); setNcSugOpen(true) }}
+              onFocus={() => setNcSugOpen(true)}
+              onBlur={() => setTimeout(() => setNcSugOpen(false), 140)}
+            />
+          </div>
+          {ncSugOpen && ncSuggestions.length > 0 && (
+            <div className="dropdown" role="listbox">
+              {ncSuggestions.map((it) => (
+                <button
+                  key={it.id}
+                  type="button"
+                  className="dropdown__item"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setNcLat(it.lat); setNcLon(it.lon)
+                    setNcName(toShortCityName(it.display_name))
+                    setIsMyLoc(false)
+                    setNcSearchQuery(''); setNcSuggestions([]); setNcSugOpen(false)
+                    setNcResult(null); setNcError(null)
+                  }}
+                >
+                  <div className="dropdown__primary">{it.display_name}</div>
+                  {it.type && <div className="dropdown__secondary">{it.type}</div>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Detect location button if no location yet */}
+        {!hasLocation && userLoc && (
+          <button className="nc-detect-btn" type="button" onClick={useMyLocation}>
+            <svg viewBox="0 0 20 20" fill="none" width="15" height="15" aria-hidden>
+              <circle cx="10" cy="10" r="3" stroke="currentColor" strokeWidth="2" />
+              <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.5" strokeDasharray="3 3" />
+              <line x1="10" y1="1" x2="10" y2="4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              <line x1="10" y1="16" x2="10" y2="19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              <line x1="1" y1="10" x2="4" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              <line x1="16" y1="10" x2="19" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            Use my current location
+          </button>
+        )}
+
+        <button
+          className="scan-btn"
+          style={{ marginTop: 16 }}
+          type="button"
+          onClick={handleScan}
+          disabled={!hasLocation || ncLoading}
+        >
+          {ncLoading ? (
+            <>
+              <span className="spinner" style={{ borderTopColor: '#05101F', borderColor: 'rgba(5,16,31,0.25)' }} />
+              {ncScanStatus || 'Scanning…'}
+            </>
+          ) : (
+            <>
+              Scan Next 2 Hours
+              <svg className="scan-btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden>
+                <path d="M4 10h12M11 5l5 5-5 5" stroke="currentColor" strokeWidth="2.2"
+                  strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </>
+          )}
+        </button>
+      </div>
+
+      {ncError && (
+        <div className="error-toast" role="alert" aria-live="polite">
+          <span className="error-toast__icon" aria-hidden>!</span>
+          <div>
+            <div className="error-toast__title">Scan failed</div>
+            <div className="error-toast__body">{ncError}</div>
+          </div>
+        </div>
+      )}
+
+      {ncResult && !ncLoading && (
+        <div className="nc-results">
+
+          {!ncResult.in_radar_bounds ? (
+            <div className="banner banner--dying">
+              <p className="banner__head">Outside radar coverage</p>
+              <p className="banner__sub">
+                This location is beyond Delhi IMD radar range.
+                Try a location closer to Delhi NCR.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className={`banner banner--${(ncResult.rain_slots ?? 0) > 0 ? 'rain' : 'clear'}`}>
+                <p className="banner__head">{ncResult.summary}</p>
+              </div>
+              <NowcastSlots slots={ncResult.slots} />
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
+  const [activeTab, setActiveTab] = useState('route')
+
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
   const [avgSpeedKmh, setAvgSpeedKmh] = useState('')
-  const [sourcePlace, setSourcePlace] = useState(null) // {lat,lon,display_name}
-  const [destPlace, setDestPlace] = useState(null) // {lat,lon,display_name}
-  const [userLoc, setUserLoc] = useState(null) // {lat,lon} for soft place-search bias
+  const [sourcePlace, setSourcePlace] = useState(null)
+  const [destPlace, setDestPlace] = useState(null)
+  const [userLoc, setUserLoc] = useState(null)
 
   const [sourceSug, setSourceSug] = useState([])
   const [destSug, setDestSug] = useState([])
@@ -537,9 +751,9 @@ export default function App() {
   const [scanning, setScanning] = useState(false)
   const [scanStatus, setScanStatus] = useState('')
   const [result, setResult] = useState(null)
-  const [routeCoords, setRouteCoords] = useState([]) // [lat, lon] full road polyline
-  const [routeSegments, setRouteSegments] = useState([]) // colored line segments
-  const [activeSeg, setActiveSeg] = useState(null) // {lat,lon,label,dbz,eta_mins,rain_expected,inBounds,locationName}
+  const [routeCoords, setRouteCoords] = useState([])
+  const [routeSegments, setRouteSegments] = useState([])
+  const [activeSeg, setActiveSeg] = useState(null)
   const [routeDistanceKm, setRouteDistanceKm] = useState(null)
   const [showBreakdown, setShowBreakdown] = useState(false)
   const [error, setError] = useState(null)
@@ -547,19 +761,10 @@ export default function App() {
   const reverseAbortRef = useRef(null)
   const reverseCacheRef = useRef(new Map())
 
-  const routeName = useMemo(
-    () => toCityRouteName(source, destination),
-    [source, destination]
-  )
+  const routeName = useMemo(() => toCityRouteName(source, destination), [source, destination])
 
-  // Warm the backend once on mount so the first click doesn't pay the
-  // Render free-tier cold-start cost (which was causing the "open-after-a-while"
-  // timeouts that the welcome popup alludes to).
-  useEffect(() => {
-    warmBackend()
-  }, [])
+  useEffect(() => { warmBackend() }, [])
 
-  // Soft-bias search suggestions near the user's current location.
   useEffect(() => {
     let alive = true
     try {
@@ -569,153 +774,86 @@ export default function App() {
           if (!alive) return
           const lat = Number(pos?.coords?.latitude)
           const lon = Number(pos?.coords?.longitude)
-          if (!Number.isFinite(lat) || !Number.isFinite(lon)) return
-          setUserLoc({ lat, lon })
+          if (Number.isFinite(lat) && Number.isFinite(lon)) setUserLoc({ lat, lon })
         },
-        () => {
-          // ignore (permission denied / unavailable)
-        },
+        () => {},
         { enableHighAccuracy: false, timeout: 6000, maximumAge: 5 * 60 * 1000 }
       )
-    } catch {
-      // ignore
-    }
-    return () => {
-      alive = false
-    }
+    } catch {}
+    return () => { alive = false }
   }, [])
 
-  // Autocomplete: Source
   useEffect(() => {
     const q = String(source || '').trim()
     if (sourceAbortRef.current) sourceAbortRef.current.abort()
     if (sourceDebounceRef.current) clearTimeout(sourceDebounceRef.current)
-
-    if (q.length < 3) {
-      setSourceSug([])
-      return
-    }
-
+    if (q.length < 3) { setSourceSug([]); return }
     sourceDebounceRef.current = setTimeout(async () => {
       const ac = new AbortController()
       sourceAbortRef.current = ac
       try {
         const viewbox = userLoc ? computeViewboxAround(userLoc.lat, userLoc.lon, 220) : null
-        const items = await searchPlaces(q, ac.signal, { viewbox })
-        setSourceSug(items)
+        setSourceSug(await searchPlaces(q, ac.signal, { viewbox }))
       } catch (e) {
-        if (e?.name === 'CanceledError' || e?.name === 'AbortError') return
-        setSourceSug([])
+        if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setSourceSug([])
       }
     }, 350)
-
-    return () => {
-      if (sourceDebounceRef.current) clearTimeout(sourceDebounceRef.current)
-    }
+    return () => { if (sourceDebounceRef.current) clearTimeout(sourceDebounceRef.current) }
   }, [source, userLoc])
 
-  // Autocomplete: Destination
   useEffect(() => {
     const q = String(destination || '').trim()
     if (destAbortRef.current) destAbortRef.current.abort()
     if (destDebounceRef.current) clearTimeout(destDebounceRef.current)
-
-    if (q.length < 3) {
-      setDestSug([])
-      return
-    }
-
+    if (q.length < 3) { setDestSug([]); return }
     destDebounceRef.current = setTimeout(async () => {
       const ac = new AbortController()
       destAbortRef.current = ac
       try {
         const viewbox = userLoc ? computeViewboxAround(userLoc.lat, userLoc.lon, 220) : null
-        const items = await searchPlaces(q, ac.signal, { viewbox })
-        setDestSug(items)
+        setDestSug(await searchPlaces(q, ac.signal, { viewbox }))
       } catch (e) {
-        if (e?.name === 'CanceledError' || e?.name === 'AbortError') return
-        setDestSug([])
+        if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setDestSug([])
       }
     }, 350)
-
-    return () => {
-      if (destDebounceRef.current) clearTimeout(destDebounceRef.current)
-    }
+    return () => { if (destDebounceRef.current) clearTimeout(destDebounceRef.current) }
   }, [destination, userLoc])
 
   async function handlePredict() {
     const startCity = source.trim()
     const endCity = destination.trim()
     const speedNum = Number(avgSpeedKmh)
+    if (!startCity || !endCity) { setError('Please enter both Source and Destination city names.'); return }
+    if (!Number.isFinite(speedNum) || speedNum <= 0) { setError('Please enter a valid average speed (km/h).'); return }
+    if (!ORS_KEY) { setError('Missing ORS API key. Set `VITE_ORS_API_KEY` in frontend/.env.'); return }
 
-    if (!startCity || !endCity) {
-      setError('Please enter both Source and Destination city names.')
-      return
-    }
-    if (!Number.isFinite(speedNum) || speedNum <= 0) {
-      setError('Please enter a valid average speed (km/h).')
-      return
-    }
-    if (!ORS_KEY) {
-      setError('Missing ORS API key. Set `VITE_ORS_API_KEY` in frontend/.env.')
-      return
-    }
-
-    setError(null)
-    setLoading(true)
-    setResult(null)
-    setRouteCoords([])
-    setRouteSegments([])
-    setRouteDistanceKm(null)
-    setScanning(false)
-    setScanStatus('')
-
-    // Kick a health ping in parallel to wake Render (harmless if already warm).
+    setError(null); setLoading(true); setResult(null)
+    setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null)
+    setScanning(false); setScanStatus('')
     warmBackend()
 
     try {
-      // 1) Geocode source + destination in parallel (saves ~200-1000ms).
       const [start, end] = await Promise.all([
         sourcePlace ? Promise.resolve(sourcePlace) : geocode(startCity),
         destPlace ? Promise.resolve(destPlace) : geocode(endCity),
       ])
 
-      // 2) Get road route from ORS
       let routeLonLat = null
       try {
         const orsRes = await axios.post(
           'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
-          {
-            coordinates: [
-              [start.lon, start.lat],
-              [end.lon, end.lat],
-            ],
-            // Helps when geocoded points are slightly away from roads.
-            radiuses: [5000, 5000],
-          },
-          {
-            timeout: 90000,
-            headers: {
-              Authorization: ORS_KEY,
-              'Content-Type': 'application/json',
-            },
-          }
+          { coordinates: [[start.lon, start.lat], [end.lon, end.lat]], radiuses: [5000, 5000] },
+          { timeout: 90000, headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' } }
         )
         routeLonLat = orsRes.data?.features?.[0]?.geometry?.coordinates || null
-      } catch (orsError) {
-        // ORS can return 404 "Could not find routable point..." for city centers.
-        // Fallback to a straight segment so prediction can still proceed.
-        routeLonLat = [
-          [start.lon, start.lat],
-          [end.lon, end.lat],
-        ]
+      } catch {
+        routeLonLat = [[start.lon, start.lat], [end.lon, end.lat]]
       }
 
       if (!Array.isArray(routeLonLat) || routeLonLat.length < 2) {
         throw new Error('Route planning failed (ORS returned empty geometry).')
       }
 
-      // Total distance from the actual road geometry (used for UI stats)
       let totalKm = 0
       for (let i = 1; i < routeLonLat.length; i++) {
         const [lon1, lat1] = routeLonLat[i - 1]
@@ -724,101 +862,55 @@ export default function App() {
       }
       setRouteDistanceKm(totalKm)
 
-      // 3) Sample waypoints every 5 minutes by constant avg speed
       const sampled = sampleRouteEvery5Min(routeLonLat, speedNum, 5)
-      if (!sampled.length) {
-        throw new Error('Could not sample route into waypoints. Try a different route or speed.')
-      }
+      if (!sampled.length) throw new Error('Could not sample route into waypoints.')
 
-      // 4) PHASE 2 — show the map + route polyline immediately, then scan radar
-      // in the background so the user doesn't stare at a blank spinner.
-      const polylineLatLon = routeLonLat.map(([lon, lat]) => [lat, lon])
-      setRouteCoords(polylineLatLon)
+      setRouteCoords(routeLonLat.map(([lon, lat]) => [lat, lon]))
       setResult({
-        total_waypoints: sampled.length,
-        rain_waypoints: 0,
-        clear_waypoints: sampled.length,
-        first_rain_eta: null,
-        first_rain_label: null,
-        rain_direction_from: '—',
-        rain_direction_to: '—',
-        rain_speed_kmh: 0,
-        radar_lag_mins: null,
-        radar_freshness: 'pending',
-        radar_message: 'Scanning radar…',
-        route_distance_km: totalKm,
-        waypoints: [],
-        _pending: true,
+        total_waypoints: sampled.length, rain_waypoints: 0, clear_waypoints: sampled.length,
+        first_rain_eta: null, first_rain_label: null, rain_direction_from: '—', rain_direction_to: '—',
+        rain_speed_kmh: 0, radar_lag_mins: null, radar_freshness: 'pending',
+        radar_message: 'Scanning radar…', route_distance_km: totalKm, waypoints: [], _pending: true,
       })
       setLoading(false)
       setScanning(true)
 
-      // 5) PHASE 3 — call predict-waypoints API (retry once on cold-start).
-      const cumWaypoints = sampled.map(({ lat, lon, eta_mins }) => ({
-        lat,
-        lon,
-        eta_mins,
-      }))
-
       const predictRes = await postWithRetry(
         PREDICT_WAYPOINTS_URL,
-        { waypoints: cumWaypoints },
+        { waypoints: sampled.map(({ lat, lon, eta_mins }) => ({ lat, lon, eta_mins })) },
         { timeout: 90000 },
         (attempt, total) => {
-          if (attempt === 1) {
-            setScanStatus('Scanning radar…')
-          } else {
-            setScanStatus(
-              `Waking up server — attempt ${attempt} of ${total} (first load can take up to a minute)`
-            )
-          }
+          setScanStatus(
+            attempt === 1
+              ? 'Scanning radar…'
+              : `Waking up server — attempt ${attempt} of ${total} (first load can take up to a minute)`
+          )
         }
       )
 
-      const predictWaypoints = Array.isArray(predictRes.data?.waypoints)
-        ? predictRes.data.waypoints
-        : []
-
+      const predictWaypoints = Array.isArray(predictRes.data?.waypoints) ? predictRes.data.waypoints : []
       const mergedWaypoints = predictWaypoints.map((wp) => ({
         ...wp,
         rainGroup: getRainGroupLabel(wp.label),
         rainColor: getRainColor(wp.label),
       }))
 
-      const segments = buildColoredSegments(routeLonLat, mergedWaypoints)
-      setRouteSegments(segments)
-
-      setResult({
-        ...predictRes.data,
-        route_distance_km: totalKm,
-        waypoints: mergedWaypoints,
-      })
+      setRouteSegments(buildColoredSegments(routeLonLat, mergedWaypoints))
+      setResult({ ...predictRes.data, route_distance_km: totalKm, waypoints: mergedWaypoints })
     } catch (e) {
       const status = e?.response?.status
-      const detail =
-        e?.response?.data?.detail ||
-        e?.response?.data?.error?.message ||
-        e?.response?.data?.message
+      const detail = e?.response?.data?.detail || e?.response?.data?.error?.message || e?.response?.data?.message
       const isTimeout = e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')
       const isNetwork = !status && !e?.response
-      let msg
-      if (isTimeout || isNetwork) {
-        msg = "Couldn't reach the radar server. It may still be waking up — please try again in a minute."
-      } else {
-        msg = status
+      const msg = (isTimeout || isNetwork)
+        ? "Couldn't reach the radar server. It may still be waking up — please try again in a minute."
+        : status
           ? `Request failed (${status}): ${detail || e?.message || 'Unknown error'}`
           : e?.message || 'Something went wrong while scanning the radar.'
-      }
       setError(typeof msg === 'string' ? msg : 'Something went wrong.')
-      // Roll back the optimistic Phase-2 result so we return to the planner.
-      setResult(null)
-      setRouteCoords([])
-      setRouteSegments([])
-      setRouteDistanceKm(null)
+      setResult(null); setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null)
     } finally {
-      setLoading(false)
-      setScanning(false)
-      setScanStatus('')
+      setLoading(false); setScanning(false); setScanStatus('')
     }
   }
 
@@ -827,27 +919,16 @@ export default function App() {
     const lat = Number(seg.mid.lat)
     const lon = Number(seg.mid.lon)
     const key = `${lat.toFixed(4)},${lon.toFixed(4)}`
-
-    setActiveSeg({
-      ...seg,
-      locationName: reverseCacheRef.current.get(key) || null,
-    })
-
+    setActiveSeg({ ...seg, locationName: reverseCacheRef.current.get(key) || null })
     if (reverseCacheRef.current.has(key)) return
-
     if (reverseAbortRef.current) reverseAbortRef.current.abort()
     const ac = new AbortController()
     reverseAbortRef.current = ac
     try {
       const name = await reversePlaceName(lat, lon, ac.signal)
       if (name) reverseCacheRef.current.set(key, name)
-      setActiveSeg((prev) => {
-        if (!prev) return prev
-        return { ...prev, locationName: name }
-      })
-    } catch (e) {
-      // ignore abort/network errors; popup will still show lat/lon + intensity
-    }
+      setActiveSeg((prev) => prev ? { ...prev, locationName: name } : prev)
+    } catch {}
   }
 
   const hasRain = !!result && (result.rain_waypoints ?? 0) > 0
@@ -857,237 +938,244 @@ export default function App() {
       ? Number(result.route_distance_km)
       : null
 
-  // Compute the rain timeline (patches + headline) only for the finalized
-  // predict response. During the optimistic Phase-2 "_pending" window we
-  // don't have real waypoints yet, so skip.
   const rainTimeline = useMemo(() => {
     if (!result || result._pending) return null
     return computeRainTimeline(result.waypoints)
   }, [result])
 
   function handleBackToPlanner() {
-    setResult(null)
+    setResult(null); setError(null); setActiveSeg(null)
+    setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null); setShowBreakdown(false)
+  }
+
+  function handleTabChange(tab) {
+    setActiveTab(tab)
     setError(null)
-    setActiveSeg(null)
-    setRouteCoords([])
-    setRouteSegments([])
-    setRouteDistanceKm(null)
-    setShowBreakdown(false)
   }
 
   return (
     <div className="app">
-      <header className="topbar">
-        <div style={{ width: 36 }} />
-        <div className="brandTitle">GARAJ BARAS</div>
-        <div style={{ width: 36 }} />
-      </header>
 
-      <div className="screen">
+      {/* ── NOWCAST PAGE ── */}
+      {activeTab === 'nowcast' && (
+        <NowcastPage
+          userLoc={userLoc}
+          activeTab={activeTab}
+          onChangeTab={handleTabChange}
+        />
+      )}
+
+      {/* ── ROUTE TAB SCREENS ── */}
+      {activeTab === 'route' && (
         <>
-        {/* Hero + Inputs */}
-        {!loading && !result && (
-          <>
-            <section className="heroBlock">
-              <h1 className="heroTitle">Where to next?</h1>
-              <div className="heroSubtitle">Real-time rain prediction on your route</div>
-            </section>
+          {/* PLANNER SCREEN */}
+          {!loading && !result && (
+            <div className="pg-planner">
+              <nav className="nav">
+                <span className="nav__brand">GARAJ BARAS</span>
+                <span className="nav__live" aria-hidden>
+                  <span className="nav__live-dot" />
+                  LIVE
+                </span>
+              </nav>
 
-            <section className="card plannerCard">
-              <div className="fieldGrid">
-                <div className="field">
-                  <div className="fieldLabel">Source</div>
-                  <div className="typeaheadWrap">
-                    <div className="inputShell">
-                      <span className="glowDot glowDot--source" aria-hidden="true" />
-                      <input
-                        className="routeInput"
-                        placeholder="Starting point"
-                        value={source}
-                        onChange={(e) => {
-                          setSource(e.target.value)
-                          setSourcePlace(null)
-                          setSourceOpen(true)
-                        }}
-                        onFocus={() => setSourceOpen(true)}
-                        onBlur={() => {
-                          // allow click selection to register
-                          setTimeout(() => setSourceOpen(false), 140)
-                        }}
-                      />
-                    </div>
+              <TabBar activeTab={activeTab} onChangeTab={handleTabChange} />
 
-                    {sourceOpen && sourceSug.length > 0 && (
-                      <div className="typeaheadMenu" role="listbox">
-                        {sourceSug.map((it) => (
-                          <button
-                            key={it.id}
-                            type="button"
-                            className="typeaheadItem"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              setSource(it.display_name)
-                              setSourcePlace(it)
-                              setSourceSug([])
-                              setSourceOpen(false)
-                            }}
-                          >
-                            <div className="typeaheadPrimary">{it.display_name}</div>
-                            {it.type ? <div className="typeaheadSecondary">{it.type}</div> : null}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="arrowBetween" aria-hidden="true">
-                  →
-                </div>
-
-                <div className="field">
-                  <div className="fieldLabel">Destination</div>
-                  <div className="typeaheadWrap">
-                    <div className="inputShell">
-                      <span className="glowDot glowDot--destination" aria-hidden="true" />
-                      <input
-                        className="routeInput"
-                        placeholder="Destination"
-                        value={destination}
-                        onChange={(e) => {
-                          setDestination(e.target.value)
-                          setDestPlace(null)
-                          setDestOpen(true)
-                        }}
-                        onFocus={() => setDestOpen(true)}
-                        onBlur={() => {
-                          setTimeout(() => setDestOpen(false), 140)
-                        }}
-                      />
-                    </div>
-
-                    {destOpen && destSug.length > 0 && (
-                      <div className="typeaheadMenu" role="listbox">
-                        {destSug.map((it) => (
-                          <button
-                            key={it.id}
-                            type="button"
-                            className="typeaheadItem"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              setDestination(it.display_name)
-                              setDestPlace(it)
-                              setDestSug([])
-                              setDestOpen(false)
-                            }}
-                          >
-                            <div className="typeaheadPrimary">{it.display_name}</div>
-                            {it.type ? <div className="typeaheadSecondary">{it.type}</div> : null}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="speedRow">
-                <div className="field">
-                  <div className="fieldLabel">Avg speed (km/h)</div>
-                  <div className="inputShell">
-                    <input
-                      className="routeInput"
-                      inputMode="decimal"
-                      placeholder="e.g., 55"
-                      value={avgSpeedKmh}
-                      onChange={(e) => setAvgSpeedKmh(e.target.value)}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <button
-                className="planButton"
-                type="button"
-                onClick={handlePredict}
-                disabled={!source.trim() || !destination.trim() || !String(avgSpeedKmh).trim() || loading}
-                aria-label="Plan My Route"
-              >
-                Plan My Route →
-              </button>
-
-              <div className="dividerMini" />
-            </section>
-
-            {error && (
-              <section className="errorCard" role="alert" aria-live="polite">
-                <div className="errorTitle">Scan failed</div>
-                <div className="errorBody">{error}</div>
+              <section className="hero">
+                <div className="hero__glow" aria-hidden />
+                <h1 className="hero__title">Know the rain<br />before you leave.</h1>
+                <p className="hero__sub">Delhi NCR · IMD radar · Route-aware</p>
               </section>
-            )}
-          </>
-        )}
 
-        {/* Loading */}
-        {loading && (
-          <section className="card loadingCard" aria-live="polite">
-            <div className="spinner" aria-hidden="true" />
-            <div className="loadingText">SCANNING RADAR...</div>
-          </section>
-        )}
+              <div className="planner-card">
+                {/* Route inputs — vertical stack with left connector */}
+                <div className="rf-stack">
+                  {/* Source field */}
+                  <div className="rf-field">
+                    <div className="rf-track" aria-hidden>
+                      <div className="rf-dot rf-dot--src" />
+                    </div>
+                    <div className="rf-body">
+                      <label className="rf-label">FROM</label>
+                      <div className="typeahead-wrap">
+                        <div className="rf-shell">
+                          <input
+                            className="rf-input"
+                            placeholder="Starting city"
+                            value={source}
+                            onChange={(e) => { setSource(e.target.value); setSourcePlace(null); setSourceOpen(true) }}
+                            onFocus={() => setSourceOpen(true)}
+                            onBlur={() => setTimeout(() => setSourceOpen(false), 140)}
+                          />
+                        </div>
+                        {sourceOpen && sourceSug.length > 0 && (
+                          <div className="dropdown" role="listbox">
+                            {sourceSug.map((it) => (
+                              <button
+                                key={it.id}
+                                type="button"
+                                className="dropdown__item"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => { setSource(it.display_name); setSourcePlace(it); setSourceSug([]); setSourceOpen(false) }}
+                              >
+                                <div className="dropdown__primary">{it.display_name}</div>
+                                {it.type && <div className="dropdown__secondary">{it.type}</div>}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
 
-        {/* Results */}
-        {result && (
-          <section className="resultsWrap">
-            <section className="card resultsCard">
-              <div className="resultsHeader">
-                <button
-                  type="button"
-                  className="backBtn"
-                  onClick={handleBackToPlanner}
-                >
-                  ← Back
-                </button>
-                <div
-                  className={`statusPill ${
-                    result._pending
-                      ? 'statusPill--pending'
-                      : hasRain
-                        ? 'statusPill--rain'
-                        : 'statusPill--clear'
-                  }`}
-                >
-                  {result._pending ? 'Scanning…' : hasRain ? 'Rain ahead' : 'Clear skies'}
+                  {/* Vertical connector line */}
+                  <div className="rf-connector" aria-hidden>
+                    <div className="rf-connector__line" />
+                  </div>
+
+                  {/* Destination field */}
+                  <div className="rf-field">
+                    <div className="rf-track" aria-hidden>
+                      <div className="rf-dot rf-dot--dst" />
+                    </div>
+                    <div className="rf-body">
+                      <label className="rf-label">TO</label>
+                      <div className="typeahead-wrap">
+                        <div className="rf-shell">
+                          <input
+                            className="rf-input"
+                            placeholder="Destination city"
+                            value={destination}
+                            onChange={(e) => { setDestination(e.target.value); setDestPlace(null); setDestOpen(true) }}
+                            onFocus={() => setDestOpen(true)}
+                            onBlur={() => setTimeout(() => setDestOpen(false), 140)}
+                          />
+                        </div>
+                        {destOpen && destSug.length > 0 && (
+                          <div className="dropdown" role="listbox">
+                            {destSug.map((it) => (
+                              <button
+                                key={it.id}
+                                type="button"
+                                className="dropdown__item"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => { setDestination(it.display_name); setDestPlace(it); setDestSug([]); setDestOpen(false) }}
+                              >
+                                <div className="dropdown__primary">{it.display_name}</div>
+                                {it.type && <div className="dropdown__secondary">{it.type}</div>}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div className="resultsRouteTitle">{routeName}</div>
 
-              {/* Rain timeline banner: primary narrative focused on the
-                  rain patch closest to the user. Appears as soon as the
-                  predict response lands (skipped during _pending). */}
-              {rainTimeline && (
+                {/* Speed */}
+                <div className="speed-field">
+                  <label className="rf-label">AVG SPEED</label>
+                  <div className="speed-row">
+                    <div className="rf-shell rf-shell--speed">
+                      <input
+                        className="rf-input"
+                        inputMode="decimal"
+                        placeholder="55"
+                        value={avgSpeedKmh}
+                        onChange={(e) => setAvgSpeedKmh(e.target.value)}
+                      />
+                    </div>
+                    <span className="speed-unit">km/h</span>
+                  </div>
+                </div>
+
+                {/* Scan CTA */}
+                <button
+                  className="scan-btn"
+                  type="button"
+                  onClick={handlePredict}
+                  disabled={!source.trim() || !destination.trim() || !String(avgSpeedKmh).trim() || loading}
+                >
+                  Scan My Route
+                  <svg className="scan-btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden>
+                    <path
+                      d="M4 10h12M11 5l5 5-5 5"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+              {error && (
+                <div className="error-toast" role="alert" aria-live="polite">
+                  <span className="error-toast__icon" aria-hidden>!</span>
+                  <div>
+                    <div className="error-toast__title">Scan failed</div>
+                    <div className="error-toast__body">{error}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* LOADING SCREEN */}
+          {loading && (
+            <div className="pg-loading" aria-live="polite">
+              <div className="radar-anim" aria-hidden>
+                <div className="radar-ring radar-ring--1" />
+                <div className="radar-ring radar-ring--2" />
+                <div className="radar-ring radar-ring--3" />
+                <div className="radar-center" />
+              </div>
+              <p className="loading-label">SCANNING RADAR</p>
+              <p className="loading-sub">Reading IMD frames · Mapping your route</p>
+            </div>
+          )}
+
+          {/* RESULTS SCREEN */}
+          {result && (
+            <div className="pg-results">
+              {/* Nav */}
+              <nav className="nav">
+                <button className="back-btn" type="button" onClick={handleBackToPlanner}>
+                  <svg viewBox="0 0 20 20" fill="none" width="15" height="15" aria-hidden>
+                    <path d="M13 4l-6 6 6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  Back
+                </button>
+                <span className={`status-pill status-pill--${result._pending ? 'pending' : hasRain ? 'rain' : 'clear'}`}>
+                  {result._pending ? 'Scanning…' : hasRain ? 'Rain ahead' : 'Clear skies'}
+                </span>
+              </nav>
+
+              {/* Route title */}
+              <h2 className="route-title">{routeName}</h2>
+
+              {/* Rain narrative banner */}
+              {rainTimeline && !result._pending && (
                 <div
-                  className={`rainBanner ${
-                    rainTimeline.tone === 'rain'
-                      ? rainTimeline.decayNote === 'dying' ? 'rainBanner--dying'
-                        : rainTimeline.decayNote === 'weakening' ? 'rainBanner--weakening'
-                        : 'rainBanner--rain'
-                      : 'rainBanner--clear'
+                  className={`banner banner--${
+                    rainTimeline.tone !== 'rain' ? 'clear'
+                    : rainTimeline.decayNote === 'dying' ? 'dying'
+                    : rainTimeline.decayNote === 'weakening' ? 'weakening'
+                    : 'rain'
                   }`}
                   role="status"
                 >
                   {rainTimeline.decayNote && (
-                    <div className={`decayNoteBadge decayNoteBadge--${rainTimeline.decayNote}`}>
+                    <span className={`decay-badge decay-badge--${rainTimeline.decayNote}`}>
                       {rainTimeline.decayNote === 'dying' ? 'Patch fading' : 'Weakening'}
-                    </div>
+                    </span>
                   )}
-                  <div className="rainBannerHead">{rainTimeline.headline}</div>
-                  {rainTimeline.secondary && (
-                    <div className="rainBannerSub">{rainTimeline.secondary}</div>
-                  )}
+                  <p className="banner__head">{rainTimeline.headline}</p>
+                  {rainTimeline.secondary && <p className="banner__sub">{rainTimeline.secondary}</p>}
                 </div>
               )}
 
+              {/* Timeline */}
               {rainTimeline?.tone === 'rain' && !result._pending && (
                 <RainTimelineBar
                   patches={rainTimeline.patches}
@@ -1097,78 +1185,37 @@ export default function App() {
                 />
               )}
 
-              <div className="statsRow">
-                <div className="statBox">
-                  <div className="statLabel">Distance</div>
-                  <div className="statValue">
+              {/* Stats strip */}
+              <div className="stats-strip">
+                <div className="stat">
+                  <span className="stat__label">Distance</span>
+                  <span className="stat__value">
                     {shownDistanceKm == null ? '—' : `${shownDistanceKm.toFixed(1)} km`}
-                  </div>
+                  </span>
                 </div>
-                <div className="statBox">
+                <div className="stat-div" aria-hidden />
+                <div className="stat">
                   {(() => {
-                    // Adaptive middle stat:
-                    //  - rain right now + ends on route => "Rain ends" Xm
-                    //  - rain right now + continues to end => "Rain duration" route length
-                    //  - rain upcoming => "Rain starts" Xm
-                    //  - no rain => "Rain" —
-                    if (result._pending) {
-                      return (
-                        <>
-                          <div className="statLabel">Rain status</div>
-                          <div className="statValue">—</div>
-                        </>
-                      )
-                    }
+                    if (result._pending) return (<><span className="stat__label">Rain status</span><span className="stat__value">—</span></>)
                     const tl = rainTimeline
-                    if (!tl || tl.tone === 'clear' || !tl.closest) {
-                      return (
-                        <>
-                          <div className="statLabel">Rain</div>
-                          <div className="statValue">None</div>
-                        </>
-                      )
-                    }
+                    if (!tl || tl.tone === 'clear' || !tl.closest) return (<><span className="stat__label">Rain</span><span className="stat__value">None</span></>)
                     const firstEta = Number(tl.closest.startMin) || 0
                     const lastEta = Number(tl.lastEta) || 0
                     const isNow = firstEta <= 2
                     const continuesToEnd = tl.closest.endMin >= lastEta - 2.5
-                    if (isNow && continuesToEnd) {
-                      return (
-                        <>
-                          <div className="statLabel">Rain duration</div>
-                          <div className="statValue">{Math.round(lastEta)} min</div>
-                        </>
-                      )
-                    }
-                    if (isNow) {
-                      return (
-                        <>
-                          <div className="statLabel">Rain ends</div>
-                          <div className="statValue">
-                            {Math.round(tl.closest.endMin)} min
-                          </div>
-                        </>
-                      )
-                    }
-                    return (
-                      <>
-                        <div className="statLabel">Rain starts</div>
-                        <div className="statValue">
-                          {Math.round(firstEta)} min
-                        </div>
-                      </>
-                    )
+                    if (isNow && continuesToEnd) return (<><span className="stat__label">Rain duration</span><span className="stat__value">{Math.round(lastEta)} min</span></>)
+                    if (isNow) return (<><span className="stat__label">Rain ends</span><span className="stat__value">{Math.round(tl.closest.endMin)} min</span></>)
+                    return (<><span className="stat__label">Rain starts</span><span className="stat__value">{Math.round(firstEta)} min</span></>)
                   })()}
                 </div>
               </div>
 
-{/* Map (rendered as soon as the route polyline is ready,
-                  even before the rain predict response lands) */}
-              <div style={{ position: 'relative' }}>
+              {/* Map */}
+              <div className="map-wrap">
                 <Suspense
                   fallback={
                     <div className="map-container">
-                      <div style={{ height: 320, display: 'grid', placeItems: 'center' }}>
+                      <div style={{ height: 320, display: 'grid', placeItems: 'center', color: 'var(--text-secondary)' }}>
                         Loading map…
                       </div>
                     </div>
@@ -1183,44 +1230,20 @@ export default function App() {
                   />
                 </Suspense>
                 {scanning && (
-                  <div
-                    className="scanOverlay"
-                    role="status"
-                    aria-live="polite"
-                    style={{
-                      position: 'absolute',
-                      inset: 0,
-                      display: 'grid',
-                      placeItems: 'center',
-                      background: 'rgba(8, 12, 24, 0.55)',
-                      backdropFilter: 'blur(2px)',
-                      borderRadius: 12,
-                      pointerEvents: 'none',
-                      zIndex: 500,
-                      padding: 16,
-                      textAlign: 'center',
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <span className="spinner" aria-hidden="true" />
-                        <span style={{ fontWeight: 800, letterSpacing: 1 }}>
-                          SCANNING RADAR…
-                        </span>
-                      </div>
-                      {scanStatus && scanStatus !== 'Scanning radar…' && (
-                        <div style={{ fontSize: 12, opacity: 0.85, maxWidth: 320 }}>
-                          {scanStatus}
-                        </div>
-                      )}
-                    </div>
+                  <div className="scan-overlay" role="status" aria-live="polite">
+                    <span className="spinner" aria-hidden />
+                    <span className="scan-overlay__label">SCANNING RADAR…</span>
+                    {scanStatus && scanStatus !== 'Scanning radar…' && (
+                      <span className="scan-overlay__sub">{scanStatus}</span>
+                    )}
                   </div>
                 )}
               </div>
 
-              <div className="legendWrap">
-                <div className="legendTitle">Route colors</div>
-                <div className="legendChips">
+              {/* Legend */}
+              <div className="legend">
+                <span className="legend__title">Route colors</span>
+                <div className="legend__chips">
                   {[
                     { cls: 'veryheavy', label: 'Very Heavy' },
                     { cls: 'heavy',     label: 'Heavy' },
@@ -1230,18 +1253,17 @@ export default function App() {
                     { cls: 'norain',    label: 'No Rain' },
                     { cls: 'unknown',   label: 'Out of radar' },
                   ].map(({ cls, label }) => (
-                    <div key={cls} className="legendChip">
-                      <span className={`legendSwatch legendSwatch--${cls}`} />
-                      <span className="legendText">{label}</span>
+                    <div key={cls} className="legend__chip">
+                      <span className={`legend__swatch legend__swatch--${cls}`} aria-hidden />
+                      <span className="legend__text">{label}</span>
                     </div>
                   ))}
                 </div>
               </div>
-            </section>
-          </section>
-        )}
+            </div>
+          )}
         </>
-      </div>
+      )}
     </div>
   )
 }
