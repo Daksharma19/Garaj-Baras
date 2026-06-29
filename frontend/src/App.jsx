@@ -2,8 +2,9 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import './App.css'
 
-const API_BASE =
-  import.meta.env.VITE_API_BASE || 'https://garaj-baras-api.onrender.com'
+const API_BASE = import.meta.env.DEV
+  ? 'http://127.0.0.1:8000'
+  : (import.meta.env.VITE_API_BASE || 'https://garaj-baras-api.onrender.com')
 const PREDICT_WAYPOINTS_URL = `${API_BASE}/predict_waypoints`
 const NOWCAST_URL = `${API_BASE}/nowcast`
 
