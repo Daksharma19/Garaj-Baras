@@ -14,7 +14,7 @@ from radar import (
     RADAR_TTL_SEC,
 )
 
-GIF_URL       = "https://mausam.imd.gov.in/Radar/animation/Converted/LUCKNOW_MAXZ.gif"
+GIF_URL       = "https://mausam.imd.gov.in/Radar/animation/Converted/LKN_MAXZ.gif"
 GIF_SAVE_PATH = os.path.join(os.path.dirname(__file__), "lucknow_radar.gif")
 FRAMES_FOLDER = os.path.join(os.path.dirname(__file__), "frames_lucknow")
 
