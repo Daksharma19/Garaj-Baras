@@ -33,6 +33,7 @@ before any of this runs.
 
 from __future__ import annotations
 
+import math
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional
@@ -48,6 +49,12 @@ MAX_NOWCAST_MINS: int = 120
 
 # Minimum probability to include an event (below this we treat rain as not coming)
 MIN_PROBABILITY: int = 8
+
+# Patch-forward: search circle radius around user (pixels)
+PATCH_SEARCH_RADIUS_PX: int = 120
+
+# Patches with |dx_10| < this AND |dy_10| < this are fresh pop-ups — skip forward projection
+FRESH_POPUP_VELOCITY_THRESH: float = 0.3
 
 
 @dataclass
@@ -96,6 +103,22 @@ def _is_rain_near(rain_mask: np.ndarray, fx: float, fy: float, radius: int) -> b
     if x1 < x0 or y1 < y0:
         return False
     return bool(rain_mask[y0:y1 + 1, x0:x1 + 1].any())
+
+
+def _find_track_for_patch(patch: dict, patch_tracks) -> Optional[object]:
+    """Return the PatchTrack whose latest-frame centroid is nearest to this patch's centroid."""
+    MATCH_RADIUS_PX = 35
+    cx, cy = patch["centroid_px"]
+    best_track, best_dist = None, float(MATCH_RADIUS_PX)
+    for track in (patch_tracks or []):
+        if not track.centroids:
+            continue
+        tcx, tcy = track.centroids[-1]
+        dist = math.sqrt((tcx - cx) ** 2 + (tcy - cy) ** 2)
+        if dist < best_dist:
+            best_dist = dist
+            best_track = track
+    return best_track
 
 
 def _find_patch_track(orig_px: float, orig_py: float, patch_tracks) -> Optional[object]:
@@ -202,6 +225,8 @@ def compute_nowcast_slots(
     num_slots: int = NUM_SLOTS,
     slot_interval: int = SLOT_INTERVAL_MINS,
     radius: int = LOCATION_RADIUS_PX,
+    patches_motion: list = None,
+    search_radius_px: int = PATCH_SEARCH_RADIUS_PX,
 ) -> list:
     """
     Return 8 discrete 15-min checkpoint predictions (0, 15, 30 … 105 min).
@@ -217,18 +242,69 @@ def compute_nowcast_slots(
     from decay import project_dbz, _classify  # type: ignore
     from fuzzy import dbz_to_label            # type: ignore
 
+    # Pre-sort patches by current distance from user (closest first, checked first per slot)
+    _sorted_patches = sorted(
+        patches_motion or [],
+        key=lambda p: (p["centroid_px"][0] - user_px) ** 2 + (p["centroid_px"][1] - user_py) ** 2,
+    )
+
     slots = []
     for i in range(num_slots):
         t = float(i * slot_interval)
         eff = t + lag_mins
-        orig_px = user_px - dx * eff / 10.0
-        orig_py = user_py - dy * eff / 10.0
+        shifts = eff / 10.0
 
-        has_rain = _is_rain_near(rain_mask, orig_px, orig_py, radius)
+        has_rain = False
         proj_dbz = 0.0
         decay_status = "stable"
+        patch_hit = None
 
-        if has_rain:
+        # ── 1. PATCH-FORWARD PASS ─────────────────────────────────────────────
+        # For each patch in the search circle, forward-project its centroid using
+        # its own velocity and check if it reaches the user at this slot's time.
+        for patch in _sorted_patches:
+            cx, cy = patch["centroid_px"]
+            vx = patch.get("dx_10", 0.0)
+            vy = patch.get("dy_10", 0.0)
+
+            # Only consider patches currently inside the search circle
+            if math.sqrt((cx - user_px) ** 2 + (cy - user_py) ** 2) > search_radius_px:
+                continue
+
+            # Skip fresh pop-ups — no reliable direction, handled by fallback below
+            if abs(vx) < FRESH_POPUP_VELOCITY_THRESH and abs(vy) < FRESH_POPUP_VELOCITY_THRESH:
+                continue
+
+            # Where will this patch be at time `eff`?
+            pred_cx = cx + vx * shifts
+            pred_cy = cy + vy * shifts
+
+            # Hit test: patch edge (from area) + user location tolerance
+            patch_radius = max(5, int(math.sqrt(patch.get("area_px", 25) / math.pi)))
+            dist = math.sqrt((pred_cx - user_px) ** 2 + (pred_cy - user_py) ** 2)
+            if dist <= (patch_radius + radius):
+                has_rain = True
+                patch_hit = patch
+                break  # closest patch wins for this slot
+
+        # ── 2. GLOBAL-FLOW FALLBACK ───────────────────────────────────────────
+        # Catches diffuse rain, fresh pop-ups, and cases with no tracked patches.
+        orig_px = orig_py = None
+        if not has_rain:
+            orig_px = user_px - dx * eff / 10.0
+            orig_py = user_py - dy * eff / 10.0
+            has_rain = _is_rain_near(rain_mask, orig_px, orig_py, radius)
+
+        # ── 3. dBZ / decay lookup ─────────────────────────────────────────────
+        if has_rain and patch_hit is not None:
+            track = _find_track_for_patch(patch_hit, patch_tracks)
+            if track:
+                proj_dbz = max(0.0, project_dbz(track, eff))
+                decay_status = _classify(proj_dbz, track.decay_rate)
+            else:
+                proj_dbz = float(patch_hit.get("max_dbz", 0))
+                decay_status = "stable"
+        elif has_rain:
             track = _find_patch_track(orig_px, orig_py, patch_tracks)
             if track:
                 proj_dbz = max(0.0, project_dbz(track, eff))

@@ -298,27 +298,25 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
         lag_info = get_radar_lag_mins(latest_ts)
 
         # --- Per-patch motion (NCR-focused) ---
-        # Walk recent pairs newest-first; use the first pair where at least one
-        # blob-sized rain pixel exists in the earlier frame (same skip logic as
-        # get_movement_vector). Avoids all-zero flow when the last pair is rain-free.
+        # Use last 4 frames (3 pairs) so optical flow is averaged over multiple
+        # frame transitions — more stable velocity for persistent patches.
+        # Fresh pop-ups (only in the last frame) are naturally dampened.
         patches_motion = []
         roi_mask = None
         try:
             roi_mask = build_ncr_roi_mask(radius_km=150.0)
-            pairs = list(zip(recent_frame_data[:-1], recent_frame_data[1:]))
-            for (p_prev, ts_prev), (p_last, ts_last) in reversed(pairs):
-                from optical_flow import isolate_rain as _ir  # type: ignore
-                if _ir(p_prev, clutter_mask=clutter_mask).max() == 0:
-                    continue
-                gap = 10.0
-                if ts_prev and ts_last:
-                    gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            motion_frames = [p for p, _ in recent_frame_data[-4:]]
+            ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
+            ts_last = recent_frame_data[-1][1] if recent_frame_data else None
+            gap = 10.0
+            if ts_prev and ts_last:
+                gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    p_prev, p_last, gap_mins=gap,
+                    motion_frames, gap_mins=gap,
                     clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
                 )
-                print(f"  Per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m)")
-                break
+                print(f"  Per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
         except Exception as _pe:
             print(f"  Per-patch motion failed (non-fatal): {_pe}")
             patches_motion, roi_mask = [], None
@@ -414,21 +412,19 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
                 georef_lucknow.CENTER_LON,
                 radius_km=150.0,
             )
-            pairs = list(zip(recent_frame_data[:-1], recent_frame_data[1:]))
-            for (p_prev, ts_prev), (p_last, ts_last) in reversed(pairs):
-                from optical_flow import isolate_rain as _ir  # type: ignore
-                if _ir(p_prev, clutter_mask=clutter_mask).max() == 0:
-                    continue
-                gap = 10.0
-                if ts_prev and ts_last:
-                    gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            motion_frames = [p for p, _ in recent_frame_data[-4:]]
+            ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
+            ts_last = recent_frame_data[-1][1] if recent_frame_data else None
+            gap = 10.0
+            if ts_prev and ts_last:
+                gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    p_prev, p_last, gap_mins=gap,
+                    motion_frames, gap_mins=gap,
                     clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
                     pixel_to_latlon_fn=georef_lucknow.pixel_to_latlon,
                 )
-                print(f"  Lucknow per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m)")
-                break
+                print(f"  Lucknow per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
         except Exception as _pe:
             print(f"  Lucknow per-patch motion failed (non-fatal): {_pe}")
             patches_motion, roi_mask = [], None
@@ -523,21 +519,19 @@ def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool
                 georef_patna.CENTER_LON,
                 radius_km=150.0,
             )
-            pairs = list(zip(recent_frame_data[:-1], recent_frame_data[1:]))
-            for (p_prev, ts_prev), (p_last, ts_last) in reversed(pairs):
-                from optical_flow import isolate_rain as _ir  # type: ignore
-                if _ir(p_prev, clutter_mask=clutter_mask).max() == 0:
-                    continue
-                gap = 10.0
-                if ts_prev and ts_last:
-                    gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            motion_frames = [p for p, _ in recent_frame_data[-4:]]
+            ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
+            ts_last = recent_frame_data[-1][1] if recent_frame_data else None
+            gap = 10.0
+            if ts_prev and ts_last:
+                gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    p_prev, p_last, gap_mins=gap,
+                    motion_frames, gap_mins=gap,
                     clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
                     pixel_to_latlon_fn=georef_patna.pixel_to_latlon,
                 )
-                print(f"  Patna per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m)")
-                break
+                print(f"  Patna per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
         except Exception as _pe:
             print(f"  Patna per-patch motion failed (non-fatal): {_pe}")
             patches_motion, roi_mask = [], None
@@ -1016,6 +1010,7 @@ def nowcast_location(req: NowcastRequest):
         lag_info = state.get("lag_info") or {}
         lag_mins = float(lag_info.get("lag_mins", 10.0))
         patch_tracks = state.get("decay_tracks") or []
+        patches_motion = state.get("patches") or []
         clutter_mask = state.get("clutter_mask")
         latest_ts = state.get("latest_ts")
 
@@ -1037,6 +1032,7 @@ def nowcast_location(req: NowcastRequest):
             rgb_arr=rgb_arr,
             patch_tracks=patch_tracks,
             lag_mins=lag_mins,
+            patches_motion=patches_motion,
         )
 
         as_of = latest_ts.strftime("%H:%M IST") if latest_ts else "unknown"

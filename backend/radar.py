@@ -388,8 +388,8 @@ def extract_timestamp_from_gif():
         frames = list(ImageSequence.Iterator(gif))
         last_frame = frames[-1].convert('RGB')
 
-        # Direct crop - no guessing
-        ts_crop = last_frame.crop((614, 230, 820, 310))
+        # Crop the right info panel — wide enough to capture full timestamp text
+        ts_crop = last_frame.crop((635, 215, 875, 355))
 
         # Scale up 3x for better OCR accuracy
         w, h = ts_crop.size
@@ -406,13 +406,11 @@ def extract_timestamp_from_gif():
 
         print(f"OCR raw text: {repr(text)}")
 
-        # Parse UTC time pattern: HH:MM:SSZ
+        # 1. Try UTC line: HH:MM:SSZ  (OCR sometimes misreads Z as 2 or S)
         utc_match = re.search(
-            r'(\d{1,2}):(\d{2}):(\d{2})\s*Z',
+            r'(\d{1,2}):(\d{2}):(\d{2})\s*[Zz2S]',
             text,
-            flags=re.IGNORECASE
         )
-
         if utc_match:
             h, m, s = map(int, utc_match.groups())
             today = datetime.now(timezone.utc).date()
@@ -421,13 +419,12 @@ def extract_timestamp_from_gif():
                 h, m, s, tzinfo=timezone.utc
             )
             dt_ist = dt_utc.astimezone(IST)
-            print(f"Timestamp extracted: {dt_ist.strftime('%H:%M:%S IST')}")
+            print(f"Timestamp extracted (UTC->IST): {dt_ist.strftime('%H:%M:%S IST')}")
             return dt_ist
 
-        # Some OCR outputs miss the trailing 'Z' but still contain the HH:MM:SS
-        # time (often the IST line, e.g. "... 18:02:27 Is").
+        # 2. Try IST line explicitly: HH:MM:SS IST
         ist_match = re.search(
-            r'(\d{1,2}):(\d{2}):(\d{2})',
+            r'(\d{1,2}):(\d{2}):(\d{2})\s+[Ii][Ss][Tt]',
             text
         )
         if ist_match:
@@ -437,7 +434,7 @@ def extract_timestamp_from_gif():
                 today.year, today.month, today.day,
                 h, m, s, tzinfo=IST
             )
-            print(f"Timestamp extracted: {dt_ist.strftime('%H:%M:%S IST')}")
+            print(f"Timestamp extracted (IST): {dt_ist.strftime('%H:%M:%S IST')}")
             return dt_ist
 
         print("OCR failed - using 25 min fallback")

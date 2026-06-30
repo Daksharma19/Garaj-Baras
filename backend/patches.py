@@ -76,27 +76,53 @@ def _patch_max_dbz(img_rgb, px_mask):
     return int(dbz_vals.max())
 
 
-def compute_patch_motion(p_prev, p_last, gap_mins=10.0,
+def compute_patch_motion(frame_paths, gap_mins=10.0,
                          clutter_mask=None, roi_mask=None, min_area_px=4,
                          pixel_to_latlon_fn=None):
     """
     Detects individual rain patches (connected components) in the latest radar
     frame and computes each patch's own motion vector via dense optical flow.
 
+    frame_paths: list of frame file paths, oldest first, latest last.
+                 Use at least 4 frames (3 pairs) for reliable velocity averaging.
+                 With 2 paths the result is identical to the previous behaviour.
+
+    Optical flow is computed for every consecutive pair and averaged. This gives
+    stable patches a smooth multi-frame velocity estimate. Fresh pop-ups (only
+    visible in the last frame) naturally get a dampened velocity because earlier
+    pairs show near-zero flow at those pixels.
+
     Returns a list of patch dicts. Each dict includes a 'mask' key (numpy bool
     array) that must be stripped before JSON serialization (_patch_to_public).
     """
+    if len(frame_paths) < 2:
+        return []
+
+    p_last = frame_paths[-1]
     mask_last = isolate_rain(p_last, clutter_mask=clutter_mask)
     if mask_last.max() == 0:
         return []
 
-    img1 = np.array(Image.open(p_prev).convert('L'))
-    img2 = np.array(Image.open(p_last).convert('L'))
-    flow = cv2.calcOpticalFlowFarneback(
-        img1, img2, None,
-        pyr_scale=0.5, levels=3, winsize=15,
-        iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
-    )
+    # Compute optical flow for every consecutive pair.
+    imgs_gray = [np.array(Image.open(p).convert('L')) for p in frame_paths]
+    flows = []
+    for i in range(len(frame_paths) - 1):
+        f = cv2.calcOpticalFlowFarneback(
+            imgs_gray[i], imgs_gray[i + 1], None,
+            pyr_scale=0.5, levels=3, winsize=15,
+            iterations=3, poly_n=5, poly_sigma=1.2, flags=0,
+        )
+        flows.append(f)
+
+    # Rain masks for intermediate frames (frame_paths[1:-1]).
+    # older_rain_masks[k] is the mask of frame_paths[k+1].
+    # Used per-patch below to decide whether to include flows[k] in the average.
+    older_rain_masks = [
+        isolate_rain(p, clutter_mask=clutter_mask)
+        for p in frame_paths[1:-1]
+    ]
+
+    latest_flow = flows[-1]  # always used — patch exists in the latest frame
 
     _, labels, _stats, centroids = cv2.connectedComponentsWithStats(mask_last, connectivity=8)
     img_rgb = np.array(Image.open(p_last).convert('RGB'))
@@ -116,8 +142,24 @@ def compute_patch_motion(p_prev, p_last, gap_mins=10.0,
         cx_f = float(centroids[comp_id][0])
         cy_f = float(centroids[comp_id][1])
 
-        dx = float(np.mean(flow[:, :, 0][px_mask]))
-        dy = float(np.mean(flow[:, :, 1][px_mask]))
+        ci, cj = int(round(cy_f)), int(round(cx_f))
+
+        # Build per-patch valid flow list.
+        # Always include the latest pair. Include an older pair only if rain
+        # existed near the patch centroid in that intermediate frame — avoids
+        # diluting velocity with zero-flow from frames where the patch didn't exist.
+        valid_flows = [latest_flow]
+        CENTROID_SEARCH_PX = 12
+        for k, old_mask in enumerate(older_rain_masks):
+            r0 = max(0, ci - CENTROID_SEARCH_PX)
+            r1 = min(old_mask.shape[0], ci + CENTROID_SEARCH_PX + 1)
+            c0 = max(0, cj - CENTROID_SEARCH_PX)
+            c1 = min(old_mask.shape[1], cj + CENTROID_SEARCH_PX + 1)
+            if old_mask[r0:r1, c0:c1].any():
+                valid_flows.append(flows[k])
+
+        dx = float(np.mean([np.mean(f[:, :, 0][px_mask]) for f in valid_flows]))
+        dy = float(np.mean([np.mean(f[:, :, 1][px_mask]) for f in valid_flows]))
 
         magnitude = (dx ** 2 + dy ** 2) ** 0.5
         speed_kmh = (magnitude * _KM_PER_PX / gap) * 60.0
