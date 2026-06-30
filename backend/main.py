@@ -85,31 +85,7 @@ def _warm_radar_cache_on_startup():
         except Exception as e:
             print(f"Delhi startup warm-up failed (non-fatal): {e}")
 
-    def _lucknow_worker():
-        try:
-            _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
-            print("Lucknow radar cache warmed at startup.")
-        except Exception as e:
-            print(f"Lucknow startup warm-up failed (non-fatal): {e}")
-
-    def _patna_worker():
-        try:
-            _load_patna_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
-            print("Patna radar cache warmed at startup.")
-        except Exception as e:
-            print(f"Patna startup warm-up failed (non-fatal): {e}")
-
-    def _bhopal_worker():
-        try:
-            _load_bhopal_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
-            print("Bhopal radar cache warmed at startup.")
-        except Exception as e:
-            print(f"Bhopal startup warm-up failed (non-fatal): {e}")
-
     threading.Thread(target=_worker, daemon=True).start()
-    threading.Thread(target=_lucknow_worker, daemon=True).start()
-    threading.Thread(target=_patna_worker, daemon=True).start()
-    threading.Thread(target=_bhopal_worker, daemon=True).start()
 
 # Serve extracted radar PNGs (and allow clients to fetch them)
 try:
