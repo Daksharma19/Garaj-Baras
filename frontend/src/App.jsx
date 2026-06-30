@@ -23,6 +23,11 @@ function warmBackend() {
   }
 }
 
+function isRadarNotReady(err) {
+  const detail = err?.response?.data?.detail || ''
+  return typeof detail === 'string' && /not yet loaded/i.test(detail)
+}
+
 async function postWithRetry(url, body, config = {}, onAttempt = null) {
   const backoffsMs = [0, 3000, 7000, 15000]
   let lastErr = null
@@ -45,6 +50,37 @@ async function postWithRetry(url, body, config = {}, onAttempt = null) {
     }
   }
   throw lastErr
+}
+
+// Handles Render free-tier cold start: retries for up to 3 minutes,
+// showing elapsed time, never surfacing "not yet loaded" as a user error.
+async function postWithWarmup(url, body, config = {}, onStatus = null) {
+  const INTERVAL_MS = 10000
+  const MAX_WAIT_MS = 180000
+  const start = Date.now()
+  let attempt = 0
+
+  while (true) {
+    attempt++
+    const elapsed = Math.round((Date.now() - start) / 1000)
+    if (typeof onStatus === 'function') {
+      if (attempt === 1) {
+        onStatus('Scanning radar…')
+      } else {
+        onStatus(`Server warming up… ${elapsed}s (radar downloads on first load)`)
+      }
+    }
+    try {
+      return await axios.post(url, body, { timeout: 90000, ...config })
+    } catch (err) {
+      const status = err?.response?.status
+      const isTimeout = err?.code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')
+      const isWarmup = isRadarNotReady(err) || (status === 503) || isTimeout || (!status && !err?.response)
+      const fatal = !isWarmup || (Date.now() - start > MAX_WAIT_MS)
+      if (fatal) throw err
+      await new Promise((r) => setTimeout(r, INTERVAL_MS))
+    }
+  }
 }
 
 function computeViewboxAround(lat, lon, radiusKm = 180) {
@@ -579,17 +615,11 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
     setNcResult(null)
     setNcScanStatus('Scanning radar…')
     try {
-      const res = await postWithRetry(
+      const res = await postWithWarmup(
         NOWCAST_URL,
         { lat: ncLat, lon: ncLon },
-        { timeout: 90000 },
-        (attempt, total) => {
-          setNcScanStatus(
-            attempt === 1
-              ? 'Scanning radar…'
-              : `Waking server — attempt ${attempt} of ${total}`
-          )
-        }
+        {},
+        (msg) => setNcScanStatus(msg),
       )
       setNcResult(res.data)
       if ((res.data?.lag_mins ?? 0) > 75) {
@@ -904,17 +934,11 @@ export default function App() {
       setLoading(false)
       setScanning(true)
 
-      const predictRes = await postWithRetry(
+      const predictRes = await postWithWarmup(
         PREDICT_WAYPOINTS_URL,
         { waypoints: sampled.map(({ lat, lon, eta_mins }) => ({ lat, lon, eta_mins })) },
-        { timeout: 90000 },
-        (attempt, total) => {
-          setScanStatus(
-            attempt === 1
-              ? 'Scanning radar…'
-              : `Waking up server — attempt ${attempt} of ${total} (first load can take up to a minute)`
-          )
-        }
+        {},
+        (msg) => setScanStatus(msg),
       )
 
       const predictWaypoints = Array.isArray(predictRes.data?.waypoints) ? predictRes.data.waypoints : []
