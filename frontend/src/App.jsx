@@ -407,6 +407,37 @@ function RadarDownModal({ onClose }) {
   )
 }
 
+function LongJourneyModal({ onContinue, onDismiss }) {
+  return (
+    <div className="radar-down-overlay" role="dialog" aria-modal="true" aria-labelledby="lj-title">
+      <div className="radar-down-modal">
+        <div className="radar-down-icon" aria-hidden>
+          <svg viewBox="0 0 48 48" fill="none" width="48" height="48">
+            <circle cx="24" cy="24" r="22" stroke="#f59e0b" strokeWidth="2.5" />
+            <path d="M24 14v12M24 32v2" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
+          </svg>
+        </div>
+        <h2 className="radar-down-title" id="lj-title" style={{ color: '#f59e0b' }}>Long Journey</h2>
+        <p className="radar-down-msg">
+          This journey is over 3 hours.<br />
+          Radar predictions beyond 2 hours are less reliable.<br /><br />
+          Try planning the journey <strong>in parts</strong> for better accuracy.
+        </p>
+        <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+          <button className="radar-down-btn" type="button" onClick={onDismiss}
+            style={{ background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.7)' }}>
+            Got it
+          </button>
+          <button className="radar-down-btn" type="button" onClick={onContinue}
+            style={{ background: '#f59e0b', color: '#000' }}>
+            Continue anyway
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function TabBar({ activeTab, onChangeTab }) {
   return (
     <div className="tab-bar" role="tablist">
@@ -815,6 +846,8 @@ export default function App() {
   const [routeDistanceKm, setRouteDistanceKm] = useState(null)
   const [showBreakdown, setShowBreakdown] = useState(false)
   const [error, setError] = useState(null)
+  const [showLongJourneyModal, setShowLongJourneyModal] = useState(false)
+  const longJourneyResolveRef = useRef(null)
 
   const reverseAbortRef = useRef(null)
   const reverseCacheRef = useRef(new Map())
@@ -921,6 +954,13 @@ export default function App() {
       }
       setRouteDistanceKm(totalKm)
 
+      if ((totalKm / speedNum) * 60 > 180) {
+        setShowLongJourneyModal(true)
+        const proceed = await new Promise((resolve) => { longJourneyResolveRef.current = resolve })
+        setShowLongJourneyModal(false)
+        if (!proceed) { setLoading(false); setScanning(false); return }
+      }
+
       const sampled = sampleRouteEvery5Min(routeLonLat, speedNum, 5)
       if (!sampled.length) throw new Error('Could not sample route into waypoints.')
 
@@ -1023,6 +1063,13 @@ export default function App() {
       )}
 
       {radarDown && <RadarDownModal onClose={() => setRadarDown(false)} />}
+
+      {showLongJourneyModal && (
+        <LongJourneyModal
+          onContinue={() => longJourneyResolveRef.current?.(true)}
+          onDismiss={() => { longJourneyResolveRef.current?.(false); setShowLongJourneyModal(false) }}
+        />
+      )}
 
       {/* ── ROUTE TAB SCREENS ── */}
       {activeTab === 'route' && (
