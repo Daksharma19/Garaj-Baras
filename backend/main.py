@@ -34,22 +34,25 @@ from patches import (  # type: ignore
 )
 import georef_lucknow  # type: ignore
 import georef as _georef_delhi  # type: ignore
+import georef_patna  # type: ignore
+import radar_lucknow   # type: ignore
+import radar_patna  # type: ignore
 
 
 def _detect_radar(lat: float, lon: float) -> str:
-    """Pick the radar that covers the point; if both do, pick the closer one."""
-    in_delhi = _georef_delhi.is_within_radar(lat, lon)
-    in_lck   = georef_lucknow.is_within_radar(lat, lon)
-    if in_delhi and not in_lck:
-        return 'delhi'
-    if in_lck and not in_delhi:
-        return 'lucknow'
-    if in_delhi and in_lck:
-        d_delhi = haversine_km(lat, lon, 28.5562, 77.1000)
-        d_lck   = haversine_km(lat, lon, 26.8467, 80.9462)
-        return 'lucknow' if d_lck < d_delhi else 'delhi'
-    return 'delhi'
-import radar_lucknow   # type: ignore
+    """Pick the radar whose coverage contains the point; break ties by proximity."""
+    in_delhi  = _georef_delhi.is_within_radar(lat, lon)
+    in_lck    = georef_lucknow.is_within_radar(lat, lon)
+    in_patna  = georef_patna.is_within_radar(lat, lon)
+
+    candidates = []
+    if in_delhi:  candidates.append(('delhi',   haversine_km(lat, lon, 28.5562, 77.1000)))
+    if in_lck:    candidates.append(('lucknow', haversine_km(lat, lon, 26.8467, 80.9462)))
+    if in_patna:  candidates.append(('patna',   haversine_km(lat, lon, 25.5913, 85.0956)))
+
+    if not candidates:
+        return 'delhi'   # fallback
+    return min(candidates, key=lambda x: x[1])[0]
 from datetime import timezone as _timezone
 
 from datetime import datetime as _dt, timedelta as _td
@@ -85,8 +88,16 @@ def _warm_radar_cache_on_startup():
         except Exception as e:
             print(f"Lucknow startup warm-up failed (non-fatal): {e}")
 
+    def _patna_worker():
+        try:
+            _load_patna_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+            print("Patna radar cache warmed at startup.")
+        except Exception as e:
+            print(f"Patna startup warm-up failed (non-fatal): {e}")
+
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_lucknow_worker, daemon=True).start()
+    threading.Thread(target=_patna_worker, daemon=True).start()
 
 # Serve extracted radar PNGs (and allow clients to fetch them)
 try:
@@ -102,6 +113,13 @@ except Exception:
 try:
     os.makedirs(radar_lucknow.FRAMES_FOLDER, exist_ok=True)
     app.mount("/radar/frames_lucknow", StaticFiles(directory=radar_lucknow.FRAMES_FOLDER), name="radar_frames_lucknow")
+except Exception:
+    pass
+
+# Serve Patna radar frame PNGs
+try:
+    os.makedirs(radar_patna.FRAMES_FOLDER, exist_ok=True)
+    app.mount("/radar/frames_patna", StaticFiles(directory=radar_patna.FRAMES_FOLDER), name="radar_frames_patna")
 except Exception:
     pass
 
@@ -198,8 +216,14 @@ lucknow_cache = {
     "last_loaded": None
 }
 
+patna_cache = {
+    "clutter_mask": None,
+    "last_loaded": None
+}
+
 _radar_state_lock   = threading.Lock()
 _lucknow_state_lock = threading.Lock()
+_patna_state_lock   = threading.Lock()
 RADAR_CACHE_TTL_SEC = RADAR_TTL_SEC  # keep a single source of truth
 
 
@@ -433,6 +457,115 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
         return lucknow_cache
 
 
+# ── Patna radar cache ─────────────────────────────────────────────────────────
+
+def _patna_cache_is_fresh(ttl_sec: float) -> bool:
+    last = patna_cache.get("last_loaded")
+    if not last:
+        return False
+    if (time.time() - float(last)) >= float(ttl_sec):
+        return False
+    if not patna_cache.get("frame_data"):
+        return False
+    if not patna_cache.get("movement"):
+        return False
+    if patna_cache.get("clutter_mask") is None:
+        return False
+    if not patna_cache.get("latest_frame"):
+        return False
+    return True
+
+
+def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    if (not force) and _patna_cache_is_fresh(ttl_sec):
+        return patna_cache
+
+    with _patna_state_lock:
+        if (not force) and _patna_cache_is_fresh(ttl_sec):
+            return patna_cache
+
+        now = time.time()
+        ptn_gif = radar_patna.GIF_SAVE_PATH
+        try:
+            gif_fresh = os.path.exists(ptn_gif) and (now - os.path.getmtime(ptn_gif) < ttl_sec)
+        except Exception:
+            gif_fresh = False
+
+        frame_data, did_refresh = radar_patna.refresh_frames_if_stale(
+            ttl_sec=ttl_sec, force=force, clear_pngs=True
+        )
+        if did_refresh:
+            all_frame_data = frame_data
+        else:
+            if gif_fresh:
+                all_frame_data = radar_patna.extract_frames(ptn_gif, radar_patna.FRAMES_FOLDER)
+            else:
+                all_frame_data = radar_patna.get_all_frames()
+
+        recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        all_paths = [p for (p, _ts) in all_frame_data]
+        clutter_mask = build_clutter_mask(all_paths)
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(
+            recent_frame_data, clutter_mask=clutter_mask
+        )
+        latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
+        latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
+        lag_info     = radar_patna.get_radar_lag_mins(latest_ts)
+
+        patches_motion = []
+        roi_mask = None
+        try:
+            roi_mask = build_roi_mask(
+                georef_patna.latlon_to_pixel,
+                georef_patna.IMAGE_WIDTH,
+                georef_patna.IMAGE_HEIGHT,
+                georef_patna.CENTER_LAT,
+                georef_patna.CENTER_LON,
+                radius_km=150.0,
+            )
+            pairs = list(zip(recent_frame_data[:-1], recent_frame_data[1:]))
+            for (p_prev, ts_prev), (p_last, ts_last) in reversed(pairs):
+                from optical_flow import isolate_rain as _ir  # type: ignore
+                if _ir(p_prev, clutter_mask=clutter_mask).max() == 0:
+                    continue
+                gap = 10.0
+                if ts_prev and ts_last:
+                    gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+                patches_motion = compute_patch_motion(
+                    p_prev, p_last, gap_mins=gap,
+                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                    pixel_to_latlon_fn=georef_patna.pixel_to_latlon,
+                )
+                print(f"  Patna per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m)")
+                break
+        except Exception as _pe:
+            print(f"  Patna per-patch motion failed (non-fatal): {_pe}")
+            patches_motion, roi_mask = [], None
+
+        decay_tracks = []
+        try:
+            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            print(f"  Patna decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
+        except Exception as _de:
+            print(f"  Patna decay tracking failed (non-fatal): {_de}")
+
+        patna_cache.update({
+            "frame_data": all_frame_data,
+            "recent_frame_data": recent_frame_data,
+            "clutter_mask": clutter_mask,
+            "movement": (dx, dy, dir_from, dir_to, speed),
+            "latest_frame": latest_frame,
+            "latest_ts": latest_ts,
+            "lag_info": lag_info,
+            "patches": patches_motion,
+            "roi_mask": roi_mask,
+            "decay_tracks": decay_tracks,
+            "last_loaded": time.time(),
+            "gif_mtime": os.path.getmtime(ptn_gif) if os.path.exists(ptn_gif) else None,
+        })
+        return patna_cache
+
+
 # ENDPOINT 1: Health Check
 
 @app.get("/health")
@@ -504,10 +637,13 @@ def get_movement():
 
 @app.get("/radar/gif")
 def get_radar_gif(radar: str = "delhi"):
-    """Returns the latest downloaded radar GIF. Pass ?radar=lucknow for Lucknow."""
+    """Returns the latest downloaded radar GIF. Pass ?radar=lucknow or ?radar=patna."""
     if radar == "lucknow":
         gif_path = radar_lucknow.GIF_SAVE_PATH
         filename  = "lucknow_radar.gif"
+    elif radar == "patna":
+        gif_path = radar_patna.GIF_SAVE_PATH
+        filename  = "patna_radar.gif"
     else:
         gif_path = GIF_SAVE_PATH
         filename  = "delhi_radar.gif"
@@ -585,6 +721,9 @@ def predict_waypoints(payload: PredictWaypointsRequest):
         if radar == "lucknow":
             _georef = georef_lucknow
             state   = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        elif radar == "patna":
+            _georef = georef_patna
+            state   = _load_patna_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         else:
             _georef = _georef_delhi
             state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
@@ -852,6 +991,9 @@ def nowcast_location(req: NowcastRequest):
         if radar == "lucknow":
             _georef = georef_lucknow
             state   = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        elif radar == "patna":
+            _georef = georef_patna
+            state   = _load_patna_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         else:
             _georef = _georef_delhi
             state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
