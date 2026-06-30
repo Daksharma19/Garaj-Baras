@@ -901,7 +901,7 @@ def nowcast_location(req: NowcastRequest):
 
         first_rain = next((s for s in slots if s["has_rain"]), None)
         if not first_rain:
-            summary = "Clear skies for the next 2 hours"
+            summary = "No rains for the next 2 hours"
         elif first_rain["slot_mins"] <= 0:
             summary = f"Rain right now · {first_rain['probability']}% probability"
         else:

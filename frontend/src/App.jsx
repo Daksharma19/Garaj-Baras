@@ -500,7 +500,7 @@ function NowcastSlots({ slots }) {
               ))}
             </div>
             <span className="nc-slot__label">
-              {hasRain ? (slot.intensity || 'Rain') : 'Clear'}
+              {hasRain ? (slot.intensity || 'Rain') : 'No Rain'}
             </span>
             <span className={`nc-slot__prob${!hasRain ? ' nc-slot__prob--clear' : ''}`}>
               {hasRain ? `${slot.probability}%` : '—'}
