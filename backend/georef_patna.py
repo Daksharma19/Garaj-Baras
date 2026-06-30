@@ -1,39 +1,40 @@
 # Garaj Baras - georef_patna.py
 #
 # Patna radar crop: 527 x 525 px (same IMD 880x720 layout as Delhi).
+# CROP applied by extract_frames(): img.crop((0, 125, 527, 650))
 #
 # Quadratic georef model (identical form to georef.py / georef_lucknow.py):
 #   px = c0 + c1*lat + c2*lon + c3*lat*lon + c4*lat^2 + c5*lon^2
 #   py = d0 + d1*lat + d2*lon + d3*lat*lon + d4*lat^2 + d5*lon^2
 #
-# Minimum-norm least-squares fit to 4 GCPs (0 px residual on all 4):
-#   Patna Airport    (25.5913, 85.0956) → (242, 430)
-#   Motihari         (26.6543, 84.9162) → (225, 316)
-#   Gaya Airport     (24.7440, 84.9514) → (234, 516)
-#   Darbhanga Airport(26.1912, 85.9102) → (321, 370)
+# GCPs measured from the CROPPED 527x525 frame (not the raw 880x720 GIF):
+#   PTN Airport    (25.5913, 85.0956) → (255, 334)  — plane icon, PTN zoom
+#   GYA Airport    (24.7440, 84.9514) → (230, 430)  — plane icon, GYA zoom
+#   DBG Airport    (26.1912, 85.9102) → (325, 262)  — estimated (under rain)
+#   MZF station    (26.1225, 85.3906) → (291, 273)  — diamond marker, MZF zoom
 
 IMAGE_WIDTH  = 527
 IMAGE_HEIGHT = 525
 
-CENTER_LAT = 25.5913   # Patna radar station (Lok Nayak Jayaprakash Airport area)
+CENTER_LAT = 25.5913
 CENTER_LON = 85.0956
 
 CPX = (
-    -1.9586246869800599,
-    -25.625608169260854,
-    -83.72366931141534,
-    -2.193464504107668,
-     4.066558936888271,
-     1.3999966348949173,
+    -1.386711445084279,
+    -18.198456309642886,
+    -59.32096035268407,
+    -6.851246305984665,
+    12.30090542101467,
+     1.7447272757609402,
 )
 
 CPY = (
-     0.7977623074921709,
-    10.426486884799665,
-    34.10360259842307,
-     0.01506852131913807,
-    -2.263189792167349,
-    -0.17818862254962853,
+     0.9997760040848815,
+    13.003822543507665,
+    42.793956453645876,
+    -2.0738264374724986,
+     1.00847833300066,
+     0.02960220374246474,
 )
 
 
@@ -89,10 +90,10 @@ def is_within_radar(lat, lon):
 
 if __name__ == "__main__":
     gcps = [
-        ("Patna Airport",     25.5913, 85.0956, 242, 430),
-        ("Motihari",          26.6543, 84.9162, 225, 316),
-        ("Gaya Airport",      24.7440, 84.9514, 234, 516),
-        ("Darbhanga Airport", 26.1912, 85.9102, 321, 370),
+        ("PTN Airport",   25.5913, 85.0956, 255, 334),
+        ("GYA Airport",   24.7440, 84.9514, 230, 430),
+        ("DBG Airport",   26.1912, 85.9102, 325, 262),
+        ("MZF station",   26.1225, 85.3906, 291, 273),
     ]
     print("Patna GCP check:")
     for name, la, lo, ex, ey in gcps:
