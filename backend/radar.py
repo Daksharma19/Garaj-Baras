@@ -162,7 +162,7 @@ def extract_frames(gif_path, output_folder):
                 try:
                     from PIL import ImageEnhance
 
-                    ts_crop = full.crop((614, 230, 820, 310))
+                    ts_crop = full.crop((635, 215, 875, 355))
                     w, h = ts_crop.size
                     ts_large = ts_crop.resize((w * 3, h * 3), Image.LANCZOS)
                     ts_gray = ts_large.convert('L')
@@ -171,19 +171,19 @@ def extract_frames(gif_path, output_folder):
 
                     text = pytesseract.image_to_string(
                         ts_ready,
-                        config='--psm 6 -c tessedit_char_whitelist=0123456789:ZIST'
+                        config='--psm 6'
                     ).strip()
 
                     upper = text.upper()
 
-                    # Prefer UTC time if it is read with a trailing 'Z'.
+                    # Prefer UTC time; OCR sometimes misreads trailing Z as 2 or S.
                     utc_match = re.search(
-                        r'(\d{1,2}):(\d{2}):(\d{2})\s*Z',
+                        r'(\d{1,2}):(\d{2}):(\d{2})\s*[Z2S]',
                         upper
                     )
-                    # IST line is usually read as "... HH:MM:SS IST" or "... HH:MM:SS Is"
+                    # IST line: anchored to "IST" keyword to avoid matching the UTC line
                     ist_match = re.search(
-                        r'(\d{1,2}):(\d{2}):(\d{2})\s*(?:IST|IS)',
+                        r'(\d{1,2}):(\d{2}):(\d{2})\s+IST',
                         upper
                     )
 
