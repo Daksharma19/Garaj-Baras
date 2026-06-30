@@ -1067,8 +1067,34 @@ export default function App() {
                             onBlur={() => setTimeout(() => setSourceOpen(false), 140)}
                           />
                         </div>
-                        {sourceOpen && sourceSug.length > 0 && (
+                        {sourceOpen && (userLoc || sourceSug.length > 0) && (
                           <div className="dropdown" role="listbox">
+                            {userLoc && (
+                              <button
+                                type="button"
+                                className="dropdown__item dropdown__item--myloc"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                  setSource('My Location')
+                                  setSourcePlace({ lat: userLoc.lat, lon: userLoc.lon, display_name: 'My Location' })
+                                  setSourceSug([])
+                                  setSourceOpen(false)
+                                }}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 20 20" fill="none" style={{ flexShrink: 0, marginRight: 6 }}>
+                                  <circle cx="10" cy="10" r="3" fill="currentColor" />
+                                  <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.8" strokeDasharray="3 3" />
+                                  <line x1="10" y1="1" x2="10" y2="4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <line x1="10" y1="16" x2="10" y2="19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <line x1="1" y1="10" x2="4" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <line x1="16" y1="10" x2="19" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                </svg>
+                                <div>
+                                  <div className="dropdown__primary">My Location</div>
+                                  <div className="dropdown__secondary">Use your current location</div>
+                                </div>
+                              </button>
+                            )}
                             {sourceSug.map((it) => (
                               <button
                                 key={it.id}
