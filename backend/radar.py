@@ -98,7 +98,7 @@ CROP_RIGHT  = 527          # left=0 → width 527 (Delhi radar circle, matches g
 CROP_BOTTOM = 650          # top=125 → height 525
 
 
-def extract_frames(gif_path, output_folder):
+def extract_frames(gif_path, output_folder, ocr_crop=None):
     """
     Extract all frames from animated GIF.
 
@@ -162,7 +162,8 @@ def extract_frames(gif_path, output_folder):
                 try:
                     from PIL import ImageEnhance
 
-                    ts_crop = full.crop((635, 215, 875, 355))
+                    _ocr_box = ocr_crop if ocr_crop is not None else (635, 215, 875, 355)
+                    ts_crop = full.crop(_ocr_box)
                     w, h = ts_crop.size
                     ts_large = ts_crop.resize((w * 3, h * 3), Image.LANCZOS)
                     ts_gray = ts_large.convert('L')

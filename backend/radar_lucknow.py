@@ -1,6 +1,12 @@
 # Garaj Baras - radar_lucknow.py
 # Lucknow IMD radar GIF management.
 # Mirrors the radar.py public interface; reuses parameterized helpers from radar.py.
+#
+# Lucknow GIF is 704x594 (NOT the standard 880x720).
+# OCR crop measured from full 704x594 frame: timestamp at ~(530,165,704,270).
+
+# Lucknow-specific OCR crop (x0,y0,x1,y1) in full-GIF coordinates (704x594)
+_OCR_CROP = (530, 165, 704, 270)
 
 import os
 import threading
@@ -28,7 +34,7 @@ def gif_is_fresh(ttl_sec=RADAR_TTL_SEC):
 def get_all_frames():
     success, _ = download_gif(GIF_URL, GIF_SAVE_PATH)
     if success:
-        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER)
+        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
     print("Lucknow radar: GIF download failed.")
     return []
 
@@ -51,5 +57,5 @@ def refresh_frames_if_stale(*, ttl_sec=RADAR_TTL_SEC, force=False, clear_pngs=Tr
             if deleted:
                 print(f"Lucknow: cleared {deleted} old frame PNGs")
 
-        frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER)
+        frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
         return (frame_data, True)
