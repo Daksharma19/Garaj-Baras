@@ -296,11 +296,17 @@ def compute_nowcast_slots(
             has_rain = _is_rain_near(rain_mask, orig_px, orig_py, radius)
 
         # ── 3. dBZ / decay lookup ─────────────────────────────────────────────
+        # For slots ≤ 30 min: use max(raw, projected) so fresh heavy rain isn't
+        # underreported. Beyond 30 min: trust decay projection only — the storm
+        # may have weakened significantly by then.
+        use_max_blend = (t <= 30.0)
+
         if has_rain and patch_hit is not None:
             track = _find_track_for_patch(patch_hit, patch_tracks)
             raw = float(patch_hit.get("max_dbz", 0))
             if track:
-                proj_dbz = max(raw, max(0.0, project_dbz(track, eff)))
+                p = max(0.0, project_dbz(track, eff))
+                proj_dbz = max(raw, p) if use_max_blend else p
                 decay_status = _classify(proj_dbz, track.decay_rate)
             else:
                 proj_dbz = raw
@@ -309,7 +315,8 @@ def compute_nowcast_slots(
             track = _find_patch_track(orig_px, orig_py, patch_tracks)
             raw = _sample_raw_dbz(rain_mask, rgb_arr, orig_px, orig_py, radius)
             if track:
-                proj_dbz = max(raw, max(0.0, project_dbz(track, eff)))
+                p = max(0.0, project_dbz(track, eff))
+                proj_dbz = max(raw, p) if use_max_blend else p
                 decay_status = _classify(proj_dbz, track.decay_rate)
             else:
                 proj_dbz = raw
