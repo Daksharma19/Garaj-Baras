@@ -298,19 +298,21 @@ def compute_nowcast_slots(
         # ── 3. dBZ / decay lookup ─────────────────────────────────────────────
         if has_rain and patch_hit is not None:
             track = _find_track_for_patch(patch_hit, patch_tracks)
+            raw = float(patch_hit.get("max_dbz", 0))
             if track:
-                proj_dbz = max(0.0, project_dbz(track, eff))
+                proj_dbz = max(raw, max(0.0, project_dbz(track, eff)))
                 decay_status = _classify(proj_dbz, track.decay_rate)
             else:
-                proj_dbz = float(patch_hit.get("max_dbz", 0))
+                proj_dbz = raw
                 decay_status = "stable"
         elif has_rain:
             track = _find_patch_track(orig_px, orig_py, patch_tracks)
+            raw = _sample_raw_dbz(rain_mask, rgb_arr, orig_px, orig_py, radius)
             if track:
-                proj_dbz = max(0.0, project_dbz(track, eff))
+                proj_dbz = max(raw, max(0.0, project_dbz(track, eff)))
                 decay_status = _classify(proj_dbz, track.decay_rate)
             else:
-                proj_dbz = _sample_raw_dbz(rain_mask, rgb_arr, orig_px, orig_py, radius)
+                proj_dbz = raw
                 decay_status = "stable"
 
         prob = dbz_to_probability(proj_dbz) if has_rain else 0
