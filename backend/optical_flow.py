@@ -50,7 +50,7 @@ def isolate_rain(frame_path, clutter_mask=None, tolerance=65):
     return rain_mask
 
 
-def build_clutter_mask(frames_list, threshold=0.6):
+def build_clutter_mask(frames_list, threshold=0.9):
     """
     Identifies permanent ground clutter pixels by analyzing all radar frames.
 
@@ -70,11 +70,9 @@ def build_clutter_mask(frames_list, threshold=0.6):
     # Dilate each frame's mask by 1 px before stacking so that a stationary
     # label that wobbles ±1 px between scans still registers as "present" in
     # every frame and crosses the 0.6 threshold.
-    _k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     masks = []
     for path in frames_list:
         m = (isolate_rain(path, clutter_mask=None) > 0).astype(np.uint8)
-        m = cv2.dilate(m, _k, iterations=1)
         masks.append(m > 0)
 
     stacked = np.stack(masks, axis=0)  # shape: (N, H, W)
