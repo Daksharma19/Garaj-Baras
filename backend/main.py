@@ -71,21 +71,6 @@ app = FastAPI(
 )
 
 
-@app.on_event("startup")
-def _warm_radar_cache_on_startup():
-    """
-    Kick radar cache warm-up in the background at server boot so the very first
-    /predict_waypoints call doesn't pay the full download + OCR + optical-flow
-    cost (which on Render free tier compounds with cold-start latency).
-    """
-    def _worker():
-        try:
-            _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
-            print("Delhi radar cache warmed at startup.")
-        except Exception as e:
-            print(f"Delhi startup warm-up failed (non-fatal): {e}")
-
-    threading.Thread(target=_worker, daemon=True).start()
 
 # Serve extracted radar PNGs (and allow clients to fetch them)
 try:
