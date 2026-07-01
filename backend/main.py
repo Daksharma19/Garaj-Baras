@@ -316,7 +316,7 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
         decay_tracks = []
         try:
             decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
-            print(f"  Decay tracks: {len(decay_tracks)} patch(es) tracked across {len(all_frame_data)} frames")
+            print(f"  Decay tracks: {len(decay_tracks)} patch(es) tracked across {len(recent_frame_data)} frames")
         except Exception as _de:
             print(f"  Decay tracking failed (non-fatal): {_de}")
 
