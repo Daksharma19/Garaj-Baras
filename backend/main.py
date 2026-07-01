@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse  # type: ignore
 from fastapi.staticfiles import StaticFiles  # type: ignore
 from pydantic import BaseModel  # type: ignore
 from typing import List
+import gc
 import os
 import time
 import threading
@@ -276,7 +277,10 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
+        del all_frame_data
         clutter_mask = build_clutter_mask(all_paths)
+        del all_paths
+        gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
             recent_frame_data, clutter_mask=clutter_mask
         )
@@ -311,13 +315,13 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
         # --- Decay track computation ---
         decay_tracks = []
         try:
-            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
             print(f"  Decay tracks: {len(decay_tracks)} patch(es) tracked across {len(all_frame_data)} frames")
         except Exception as _de:
             print(f"  Decay tracking failed (non-fatal): {_de}")
 
         radar_cache.update({
-            "frame_data": all_frame_data,
+            "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
             "movement": (dx, dy, dir_from, dir_to, speed),
@@ -380,7 +384,10 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
+        del all_frame_data
         clutter_mask = build_clutter_mask(all_paths)
+        del all_paths
+        gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
             recent_frame_data, clutter_mask=clutter_mask
         )
@@ -418,13 +425,13 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
 
         decay_tracks = []
         try:
-            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
             print(f"  Lucknow decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
         except Exception as _de:
             print(f"  Lucknow decay tracking failed (non-fatal): {_de}")
 
         lucknow_cache.update({
-            "frame_data": all_frame_data,
+            "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
             "movement": (dx, dy, dir_from, dir_to, speed),
@@ -487,7 +494,10 @@ def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
+        del all_frame_data
         clutter_mask = build_clutter_mask(all_paths)
+        del all_paths
+        gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
             recent_frame_data, clutter_mask=clutter_mask
         )
@@ -525,13 +535,13 @@ def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool
 
         decay_tracks = []
         try:
-            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
             print(f"  Patna decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
         except Exception as _de:
             print(f"  Patna decay tracking failed (non-fatal): {_de}")
 
         patna_cache.update({
-            "frame_data": all_frame_data,
+            "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
             "movement": (dx, dy, dir_from, dir_to, speed),
@@ -594,7 +604,10 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
+        del all_frame_data
         clutter_mask = build_clutter_mask(all_paths)
+        del all_paths
+        gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
             recent_frame_data, clutter_mask=clutter_mask
         )
@@ -632,13 +645,13 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
 
         decay_tracks = []
         try:
-            decay_tracks = compute_decay_tracks(all_frame_data, dx, dy, clutter_mask=clutter_mask)
+            decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
             print(f"  Bhopal decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
         except Exception as _de:
             print(f"  Bhopal decay tracking failed (non-fatal): {_de}")
 
         bhopal_cache.update({
-            "frame_data": all_frame_data,
+            "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
             "movement": (dx, dy, dir_from, dir_to, speed),
