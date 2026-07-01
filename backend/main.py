@@ -250,7 +250,7 @@ def _do_delhi_refresh(ttl_sec: float, force: bool = False) -> None:
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
+        frame_data, did_refresh = refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=False)
         if did_refresh:
             all_frame_data = frame_data
         else:
@@ -346,7 +346,7 @@ def _do_lucknow_refresh(ttl_sec: float, force: bool = False) -> None:
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = radar_lucknow.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
+        frame_data, did_refresh = radar_lucknow.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=False)
         if did_refresh:
             all_frame_data = frame_data
         else:
@@ -441,7 +441,7 @@ def _do_patna_refresh(ttl_sec: float, force: bool = False) -> None:
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = radar_patna.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
+        frame_data, did_refresh = radar_patna.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=False)
         if did_refresh:
             all_frame_data = frame_data
         else:
@@ -536,7 +536,7 @@ def _do_bhopal_refresh(ttl_sec: float, force: bool = False) -> None:
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = radar_bhopal.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
+        frame_data, did_refresh = radar_bhopal.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=False)
         if did_refresh:
             all_frame_data = frame_data
         else:
