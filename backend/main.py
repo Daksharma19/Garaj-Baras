@@ -46,13 +46,14 @@ def _detect_radar(lat: float, lon: float) -> str:
     in_delhi  = _georef_delhi.is_within_radar(lat, lon)
     in_lck    = georef_lucknow.is_within_radar(lat, lon)
     in_patna  = georef_patna.is_within_radar(lat, lon)
-    in_bhopal = georef_bhopal.is_within_radar(lat, lon)
+    # Bhopal disabled on Render free tier (512MB OOM) — re-enable on paid plan
+    # in_bhopal = georef_bhopal.is_within_radar(lat, lon)
 
     candidates = []
     if in_delhi:  candidates.append(('delhi',   haversine_km(lat, lon, 28.5562, 77.1000)))
     if in_lck:    candidates.append(('lucknow', haversine_km(lat, lon, 26.8467, 80.9462)))
     if in_patna:  candidates.append(('patna',   haversine_km(lat, lon, 25.5913, 85.0956)))
-    if in_bhopal: candidates.append(('bhopal',  haversine_km(lat, lon, 23.2875, 77.3374)))
+    # if in_bhopal: candidates.append(('bhopal',  haversine_km(lat, lon, 23.2875, 77.3374)))
 
     if not candidates:
         return 'delhi'   # fallback
