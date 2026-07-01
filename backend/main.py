@@ -186,114 +186,88 @@ def _patch_to_public(p: dict) -> dict:
     }
 
 
-# Global state - loaded once at startup
-# Lazy-cache refreshed by TTL
-radar_cache = {
-    "clutter_mask": None,
-    "last_loaded": None
-}
+# ── Radar state management ────────────────────────────────────────────────────
+#
+# Each radar has:
+#   _*_cache     : dict served to all requests — atomically updated at end of refresh
+#   _*_state_lock: guards cache.update() writes
+#   _*_bg_lock   : non-blocking acquire prevents two simultaneous refreshes
+#   _*_ready     : Event set once the first data is available (cold-start gate)
+#
+# Request flow:
+#   Cold start (no data yet)  → block on _*_ready.wait() while bg thread loads
+#   Cache fresh               → return immediately (sub-ms)
+#   Cache stale               → return current data now, kick off bg refresh
+#
+# Root bug fixed: old _cache_is_fresh() checked `clutter_mask is None` but
+# clutter_mask is intentionally None (disabled). This made the cache appear
+# stale on every single request, triggering a full reload each time.
 
-lucknow_cache = {
-    "clutter_mask": None,
-    "last_loaded": None
-}
-
-patna_cache = {
-    "clutter_mask": None,
-    "last_loaded": None
-}
-
-bhopal_cache = {
-    "clutter_mask": None,
-    "last_loaded": None
-}
+radar_cache   = {"clutter_mask": None, "last_loaded": None}
+lucknow_cache = {"clutter_mask": None, "last_loaded": None}
+patna_cache   = {"clutter_mask": None, "last_loaded": None}
+bhopal_cache  = {"clutter_mask": None, "last_loaded": None}
 
 _radar_state_lock   = threading.Lock()
 _lucknow_state_lock = threading.Lock()
 _patna_state_lock   = threading.Lock()
 _bhopal_state_lock  = threading.Lock()
-RADAR_CACHE_TTL_SEC = RADAR_TTL_SEC  # keep a single source of truth
+
+_delhi_bg_lock   = threading.Lock()
+_lucknow_bg_lock = threading.Lock()
+_patna_bg_lock   = threading.Lock()
+_bhopal_bg_lock  = threading.Lock()
+
+_delhi_ready   = threading.Event()
+_lucknow_ready = threading.Event()
+_patna_ready   = threading.Event()
+_bhopal_ready  = threading.Event()
+
+RADAR_CACHE_TTL_SEC = RADAR_TTL_SEC
 
 
-def _cache_is_fresh(ttl_sec: float) -> bool:
-    """
-    True iff radar_cache was populated less than ttl_sec seconds ago AND has
-    all the fields downstream code depends on. Purely in-memory — does NOT
-    consult the filesystem, so ephemeral filesystem quirks on Render can't
-    bust the cache.
-    """
-    last = radar_cache.get("last_loaded")
+def _is_fresh(cache: dict, ttl_sec: float) -> bool:
+    """True iff cache has been populated within ttl_sec and has the required fields."""
+    last = cache.get("last_loaded")
     if not last:
         return False
     if (time.time() - float(last)) >= float(ttl_sec):
         return False
-    if not radar_cache.get("frame_data"):
-        return False
-    if not radar_cache.get("movement"):
-        return False
-    if radar_cache.get("clutter_mask") is None:
-        return False
-    if not radar_cache.get("latest_frame"):
-        return False
-    return True
+    return bool(cache.get("latest_frame") and cache.get("movement") and cache.get("frame_data"))
 
 
-def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
-    """
-    Lazy cache manager used by /predict.
+# ── Delhi ─────────────────────────────────────────────────────────────────────
 
-    Fresh path (cache populated < ttl_sec ago): returns in-memory cache with
-    no disk I/O. Stale path: refreshes GIF, clears old PNGs, extracts frames
-    + timestamps, then recomputes clutter mask + movement vector once.
-    """
-    # Fast path: purely in-memory, no filesystem checks
-    if (not force) and _cache_is_fresh(ttl_sec):
-        return radar_cache
-
-    with _radar_state_lock:
-        # Re-check inside lock
-        if (not force) and _cache_is_fresh(ttl_sec):
-            return radar_cache
-
+def _do_delhi_refresh(ttl_sec: float, force: bool = False) -> None:
+    """Full Delhi radar refresh. Non-blocking acquire — silently no-ops if already running."""
+    if not _delhi_bg_lock.acquire(blocking=False):
+        return
+    try:
+        print("Delhi radar: refresh started")
         now = time.time()
         try:
             gif_fresh = os.path.exists(GIF_SAVE_PATH) and (now - os.path.getmtime(GIF_SAVE_PATH) < ttl_sec)
         except Exception:
             gif_fresh = False
 
-        # If stale/missing, refresh (download + clear PNGs + extract frames)
         frame_data, did_refresh = refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
         if did_refresh:
             all_frame_data = frame_data
         else:
-            # If GIF is fresh but we don't have in-memory cache (e.g. server restart),
-            # do a *no-download* extract from the existing GIF once.
-            # NOTE: we import FRAMES_FOLDER locally but DO NOT rebind GIF_SAVE_PATH here —
-            # importing it inside this function body would make Python treat GIF_SAVE_PATH
-            # as a local for the whole function and raise UnboundLocalError when the
-            # branch above (`did_refresh=True`) runs instead.
-            from radar import extract_frames, FRAMES_FOLDER  # type: ignore
-            all_frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER) if gif_fresh else get_all_frames()
+            from radar import extract_frames, FRAMES_FOLDER as _FF  # type: ignore
+            all_frame_data = extract_frames(GIF_SAVE_PATH, _FF) if gif_fresh else get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
-        all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = None  # clutter mask disabled — testing without
-        del all_paths
+        clutter_mask = None
         gc.collect()
-        dx, dy, dir_from, dir_to, speed = get_movement_vector(
-            recent_frame_data, clutter_mask=clutter_mask
-        )
-        latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
-        latest_ts = recent_frame_data[-1][1] if recent_frame_data else None
-        lag_info = get_radar_lag_mins(latest_ts)
 
-        # --- Per-patch motion (NCR-focused) ---
-        # Use last 4 frames (3 pairs) so optical flow is averaged over multiple
-        # frame transitions — more stable velocity for persistent patches.
-        # Fresh pop-ups (only in the last frame) are naturally dampened.
-        patches_motion = []
-        roi_mask = None
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(recent_frame_data, clutter_mask=clutter_mask)
+        latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
+        latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
+        lag_info     = get_radar_lag_mins(latest_ts)
+
+        patches_motion, roi_mask = [], None
         try:
             roi_mask = build_ncr_roi_mask(radius_km=150.0)
             motion_frames = [p for p, _ in recent_frame_data[-4:]]
@@ -304,23 +278,21 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
                 gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
             if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    motion_frames, gap_mins=gap,
-                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                    motion_frames, gap_mins=gap, clutter_mask=clutter_mask,
+                    roi_mask=roi_mask, min_area_px=4,
                 )
-                print(f"  Per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
+                print(f"  Delhi per-patch: {len(patches_motion)} patch(es) (gap={gap:.0f}m)")
         except Exception as _pe:
-            print(f"  Per-patch motion failed (non-fatal): {_pe}")
-            patches_motion, roi_mask = [], None
+            print(f"  Delhi per-patch failed: {_pe}")
 
-        # --- Decay track computation ---
         decay_tracks = []
         try:
             decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
-            print(f"  Decay tracks: {len(decay_tracks)} patch(es) tracked across {len(recent_frame_data)} frames")
+            print(f"  Delhi decay tracks: {len(decay_tracks)} patch(es)")
         except Exception as _de:
-            print(f"  Decay tracking failed (non-fatal): {_de}")
+            print(f"  Delhi decay tracking failed: {_de}")
 
-        radar_cache.update({
+        new_state = {
             "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
@@ -333,78 +305,69 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
             "decay_tracks": decay_tracks,
             "last_loaded": time.time(),
             "gif_mtime": os.path.getmtime(GIF_SAVE_PATH) if os.path.exists(GIF_SAVE_PATH) else None,
-        })
+        }
+        with _radar_state_lock:
+            radar_cache.update(new_state)
+        print("Delhi radar: refresh complete")
+    except Exception as e:
+        print(f"Delhi radar: refresh failed: {e}\n{traceback.format_exc()}")
+    finally:
+        _delhi_ready.set()   # always unblock cold-start waiters
+        _delhi_bg_lock.release()
+
+
+def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    # Cold start: no data yet — block until background thread delivers first load
+    if not _delhi_ready.is_set():
+        threading.Thread(target=_do_delhi_refresh, args=(ttl_sec, True), daemon=True).start()
+        _delhi_ready.wait(timeout=60)
         return radar_cache
 
+    # Fresh: return instantly — no I/O, no computation
+    if not force and _is_fresh(radar_cache, ttl_sec):
+        return radar_cache
 
-# ── Lucknow radar cache ───────────────────────────────────────────────────────
-
-def _lucknow_cache_is_fresh(ttl_sec: float) -> bool:
-    last = lucknow_cache.get("last_loaded")
-    if not last:
-        return False
-    if (time.time() - float(last)) >= float(ttl_sec):
-        return False
-    if not lucknow_cache.get("frame_data"):
-        return False
-    if not lucknow_cache.get("movement"):
-        return False
-    if lucknow_cache.get("clutter_mask") is None:
-        return False
-    if not lucknow_cache.get("latest_frame"):
-        return False
-    return True
+    # Stale or forced: return current data immediately, refresh silently in background
+    threading.Thread(target=_do_delhi_refresh, args=(ttl_sec, force), daemon=True).start()
+    return radar_cache
 
 
-def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
-    if (not force) and _lucknow_cache_is_fresh(ttl_sec):
-        return lucknow_cache
+# ── Lucknow ───────────────────────────────────────────────────────────────────
 
-    with _lucknow_state_lock:
-        if (not force) and _lucknow_cache_is_fresh(ttl_sec):
-            return lucknow_cache
-
-        now = time.time()
+def _do_lucknow_refresh(ttl_sec: float, force: bool = False) -> None:
+    if not _lucknow_bg_lock.acquire(blocking=False):
+        return
+    try:
+        print("Lucknow radar: refresh started")
         lk_gif = radar_lucknow.GIF_SAVE_PATH
+        now = time.time()
         try:
             gif_fresh = os.path.exists(lk_gif) and (now - os.path.getmtime(lk_gif) < ttl_sec)
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = radar_lucknow.refresh_frames_if_stale(
-            ttl_sec=ttl_sec, force=force, clear_pngs=True
-        )
+        frame_data, did_refresh = radar_lucknow.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
         if did_refresh:
             all_frame_data = frame_data
         else:
-            if gif_fresh:
-                all_frame_data = radar_lucknow.extract_frames(lk_gif, radar_lucknow.FRAMES_FOLDER)
-            else:
-                all_frame_data = radar_lucknow.get_all_frames()
+            all_frame_data = radar_lucknow.extract_frames(lk_gif, radar_lucknow.FRAMES_FOLDER) if gif_fresh else radar_lucknow.get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
-        all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = None  # clutter mask disabled — testing without
-        del all_paths
+        clutter_mask = None
         gc.collect()
-        dx, dy, dir_from, dir_to, speed = get_movement_vector(
-            recent_frame_data, clutter_mask=clutter_mask
-        )
+
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(recent_frame_data, clutter_mask=clutter_mask)
         latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
         latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
         lag_info     = radar_lucknow.get_radar_lag_mins(latest_ts)
 
-        patches_motion = []
-        roi_mask = None
+        patches_motion, roi_mask = [], None
         try:
             roi_mask = build_roi_mask(
-                georef_lucknow.latlon_to_pixel,
-                georef_lucknow.IMAGE_WIDTH,
-                georef_lucknow.IMAGE_HEIGHT,
-                georef_lucknow.CENTER_LAT,
-                georef_lucknow.CENTER_LON,
-                radius_km=150.0,
+                georef_lucknow.latlon_to_pixel, georef_lucknow.IMAGE_WIDTH,
+                georef_lucknow.IMAGE_HEIGHT, georef_lucknow.CENTER_LAT,
+                georef_lucknow.CENTER_LON, radius_km=150.0,
             )
             motion_frames = [p for p, _ in recent_frame_data[-4:]]
             ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
@@ -414,23 +377,22 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
                 gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
             if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    motion_frames, gap_mins=gap,
-                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                    motion_frames, gap_mins=gap, clutter_mask=clutter_mask,
+                    roi_mask=roi_mask, min_area_px=4,
                     pixel_to_latlon_fn=georef_lucknow.pixel_to_latlon,
                 )
-                print(f"  Lucknow per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
+                print(f"  Lucknow per-patch: {len(patches_motion)} patch(es) (gap={gap:.0f}m)")
         except Exception as _pe:
-            print(f"  Lucknow per-patch motion failed (non-fatal): {_pe}")
-            patches_motion, roi_mask = [], None
+            print(f"  Lucknow per-patch failed: {_pe}")
 
         decay_tracks = []
         try:
             decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
-            print(f"  Lucknow decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
+            print(f"  Lucknow decay tracks: {len(decay_tracks)} patch(es)")
         except Exception as _de:
-            print(f"  Lucknow decay tracking failed (non-fatal): {_de}")
+            print(f"  Lucknow decay tracking failed: {_de}")
 
-        lucknow_cache.update({
+        new_state = {
             "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
@@ -443,78 +405,64 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
             "decay_tracks": decay_tracks,
             "last_loaded": time.time(),
             "gif_mtime": os.path.getmtime(lk_gif) if os.path.exists(lk_gif) else None,
-        })
+        }
+        with _lucknow_state_lock:
+            lucknow_cache.update(new_state)
+        print("Lucknow radar: refresh complete")
+    except Exception as e:
+        print(f"Lucknow radar: refresh failed: {e}\n{traceback.format_exc()}")
+    finally:
+        _lucknow_ready.set()
+        _lucknow_bg_lock.release()
+
+
+def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    if not _lucknow_ready.is_set():
+        threading.Thread(target=_do_lucknow_refresh, args=(ttl_sec, True), daemon=True).start()
+        _lucknow_ready.wait(timeout=60)
         return lucknow_cache
+    if not force and _is_fresh(lucknow_cache, ttl_sec):
+        return lucknow_cache
+    threading.Thread(target=_do_lucknow_refresh, args=(ttl_sec, force), daemon=True).start()
+    return lucknow_cache
 
 
-# ── Patna radar cache ─────────────────────────────────────────────────────────
+# ── Patna ─────────────────────────────────────────────────────────────────────
 
-def _patna_cache_is_fresh(ttl_sec: float) -> bool:
-    last = patna_cache.get("last_loaded")
-    if not last:
-        return False
-    if (time.time() - float(last)) >= float(ttl_sec):
-        return False
-    if not patna_cache.get("frame_data"):
-        return False
-    if not patna_cache.get("movement"):
-        return False
-    if patna_cache.get("clutter_mask") is None:
-        return False
-    if not patna_cache.get("latest_frame"):
-        return False
-    return True
-
-
-def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
-    if (not force) and _patna_cache_is_fresh(ttl_sec):
-        return patna_cache
-
-    with _patna_state_lock:
-        if (not force) and _patna_cache_is_fresh(ttl_sec):
-            return patna_cache
-
-        now = time.time()
+def _do_patna_refresh(ttl_sec: float, force: bool = False) -> None:
+    if not _patna_bg_lock.acquire(blocking=False):
+        return
+    try:
+        print("Patna radar: refresh started")
         ptn_gif = radar_patna.GIF_SAVE_PATH
+        now = time.time()
         try:
             gif_fresh = os.path.exists(ptn_gif) and (now - os.path.getmtime(ptn_gif) < ttl_sec)
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = radar_patna.refresh_frames_if_stale(
-            ttl_sec=ttl_sec, force=force, clear_pngs=True
-        )
+        frame_data, did_refresh = radar_patna.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
         if did_refresh:
             all_frame_data = frame_data
         else:
-            if gif_fresh:
-                all_frame_data = radar_patna.extract_frames(ptn_gif, radar_patna.FRAMES_FOLDER)
-            else:
-                all_frame_data = radar_patna.get_all_frames()
+            all_frame_data = radar_patna.extract_frames(ptn_gif, radar_patna.FRAMES_FOLDER) if gif_fresh else radar_patna.get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
-        all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = None  # clutter mask disabled — testing without
-        del all_paths
+        clutter_mask = None
         gc.collect()
-        dx, dy, dir_from, dir_to, speed = get_movement_vector(
-            recent_frame_data, clutter_mask=clutter_mask
-        )
+
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(recent_frame_data, clutter_mask=clutter_mask)
         latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
         latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
         lag_info     = radar_patna.get_radar_lag_mins(latest_ts)
 
-        patches_motion = []
-        roi_mask = None
+        patches_motion, roi_mask = [], None
         try:
             roi_mask = build_roi_mask(
-                georef_patna.latlon_to_pixel,
-                georef_patna.IMAGE_WIDTH,
-                georef_patna.IMAGE_HEIGHT,
-                georef_patna.CENTER_LAT,
-                georef_patna.CENTER_LON,
-                radius_km=150.0,
+                georef_patna.latlon_to_pixel, georef_patna.IMAGE_WIDTH,
+                georef_patna.IMAGE_HEIGHT, georef_patna.CENTER_LAT,
+                georef_patna.CENTER_LON, radius_km=150.0,
             )
             motion_frames = [p for p, _ in recent_frame_data[-4:]]
             ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
@@ -524,23 +472,22 @@ def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool
                 gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
             if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    motion_frames, gap_mins=gap,
-                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                    motion_frames, gap_mins=gap, clutter_mask=clutter_mask,
+                    roi_mask=roi_mask, min_area_px=4,
                     pixel_to_latlon_fn=georef_patna.pixel_to_latlon,
                 )
-                print(f"  Patna per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
+                print(f"  Patna per-patch: {len(patches_motion)} patch(es) (gap={gap:.0f}m)")
         except Exception as _pe:
-            print(f"  Patna per-patch motion failed (non-fatal): {_pe}")
-            patches_motion, roi_mask = [], None
+            print(f"  Patna per-patch failed: {_pe}")
 
         decay_tracks = []
         try:
             decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
-            print(f"  Patna decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
+            print(f"  Patna decay tracks: {len(decay_tracks)} patch(es)")
         except Exception as _de:
-            print(f"  Patna decay tracking failed (non-fatal): {_de}")
+            print(f"  Patna decay tracking failed: {_de}")
 
-        patna_cache.update({
+        new_state = {
             "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
@@ -553,78 +500,64 @@ def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool
             "decay_tracks": decay_tracks,
             "last_loaded": time.time(),
             "gif_mtime": os.path.getmtime(ptn_gif) if os.path.exists(ptn_gif) else None,
-        })
+        }
+        with _patna_state_lock:
+            patna_cache.update(new_state)
+        print("Patna radar: refresh complete")
+    except Exception as e:
+        print(f"Patna radar: refresh failed: {e}\n{traceback.format_exc()}")
+    finally:
+        _patna_ready.set()
+        _patna_bg_lock.release()
+
+
+def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    if not _patna_ready.is_set():
+        threading.Thread(target=_do_patna_refresh, args=(ttl_sec, True), daemon=True).start()
+        _patna_ready.wait(timeout=60)
         return patna_cache
+    if not force and _is_fresh(patna_cache, ttl_sec):
+        return patna_cache
+    threading.Thread(target=_do_patna_refresh, args=(ttl_sec, force), daemon=True).start()
+    return patna_cache
 
 
-# ── Bhopal radar cache ────────────────────────────────────────────────────────
+# ── Bhopal ────────────────────────────────────────────────────────────────────
 
-def _bhopal_cache_is_fresh(ttl_sec: float) -> bool:
-    last = bhopal_cache.get("last_loaded")
-    if not last:
-        return False
-    if (time.time() - float(last)) >= float(ttl_sec):
-        return False
-    if not bhopal_cache.get("frame_data"):
-        return False
-    if not bhopal_cache.get("movement"):
-        return False
-    if bhopal_cache.get("clutter_mask") is None:
-        return False
-    if not bhopal_cache.get("latest_frame"):
-        return False
-    return True
-
-
-def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
-    if (not force) and _bhopal_cache_is_fresh(ttl_sec):
-        return bhopal_cache
-
-    with _bhopal_state_lock:
-        if (not force) and _bhopal_cache_is_fresh(ttl_sec):
-            return bhopal_cache
-
-        now = time.time()
+def _do_bhopal_refresh(ttl_sec: float, force: bool = False) -> None:
+    if not _bhopal_bg_lock.acquire(blocking=False):
+        return
+    try:
+        print("Bhopal radar: refresh started")
         bhp_gif = radar_bhopal.GIF_SAVE_PATH
+        now = time.time()
         try:
             gif_fresh = os.path.exists(bhp_gif) and (now - os.path.getmtime(bhp_gif) < ttl_sec)
         except Exception:
             gif_fresh = False
 
-        frame_data, did_refresh = radar_bhopal.refresh_frames_if_stale(
-            ttl_sec=ttl_sec, force=force, clear_pngs=True
-        )
+        frame_data, did_refresh = radar_bhopal.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=True)
         if did_refresh:
             all_frame_data = frame_data
         else:
-            if gif_fresh:
-                all_frame_data = radar_bhopal.extract_frames(bhp_gif, radar_bhopal.FRAMES_FOLDER)
-            else:
-                all_frame_data = radar_bhopal.get_all_frames()
+            all_frame_data = radar_bhopal.extract_frames(bhp_gif, radar_bhopal.FRAMES_FOLDER) if gif_fresh else radar_bhopal.get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
-        all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = None  # clutter mask disabled — testing without
-        del all_paths
+        clutter_mask = None
         gc.collect()
-        dx, dy, dir_from, dir_to, speed = get_movement_vector(
-            recent_frame_data, clutter_mask=clutter_mask
-        )
+
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(recent_frame_data, clutter_mask=clutter_mask)
         latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
         latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
         lag_info     = radar_bhopal.get_radar_lag_mins(latest_ts)
 
-        patches_motion = []
-        roi_mask = None
+        patches_motion, roi_mask = [], None
         try:
             roi_mask = build_roi_mask(
-                georef_bhopal.latlon_to_pixel,
-                georef_bhopal.IMAGE_WIDTH,
-                georef_bhopal.IMAGE_HEIGHT,
-                georef_bhopal.CENTER_LAT,
-                georef_bhopal.CENTER_LON,
-                radius_km=150.0,
+                georef_bhopal.latlon_to_pixel, georef_bhopal.IMAGE_WIDTH,
+                georef_bhopal.IMAGE_HEIGHT, georef_bhopal.CENTER_LAT,
+                georef_bhopal.CENTER_LON, radius_km=150.0,
             )
             motion_frames = [p for p, _ in recent_frame_data[-4:]]
             ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
@@ -634,23 +567,22 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
                 gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
             if len(motion_frames) >= 2:
                 patches_motion = compute_patch_motion(
-                    motion_frames, gap_mins=gap,
-                    clutter_mask=clutter_mask, roi_mask=roi_mask, min_area_px=4,
+                    motion_frames, gap_mins=gap, clutter_mask=clutter_mask,
+                    roi_mask=roi_mask, min_area_px=4,
                     pixel_to_latlon_fn=georef_bhopal.pixel_to_latlon,
                 )
-                print(f"  Bhopal per-patch: {len(patches_motion)} patch(es) detected (gap={gap:.0f}m, frames={len(motion_frames)})")
+                print(f"  Bhopal per-patch: {len(patches_motion)} patch(es) (gap={gap:.0f}m)")
         except Exception as _pe:
-            print(f"  Bhopal per-patch motion failed (non-fatal): {_pe}")
-            patches_motion, roi_mask = [], None
+            print(f"  Bhopal per-patch failed: {_pe}")
 
         decay_tracks = []
         try:
             decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
-            print(f"  Bhopal decay tracks: {len(decay_tracks)} patch(es) across {len(all_frame_data)} frames")
+            print(f"  Bhopal decay tracks: {len(decay_tracks)} patch(es)")
         except Exception as _de:
-            print(f"  Bhopal decay tracking failed (non-fatal): {_de}")
+            print(f"  Bhopal decay tracking failed: {_de}")
 
-        bhopal_cache.update({
+        new_state = {
             "frame_data": recent_frame_data,
             "recent_frame_data": recent_frame_data,
             "clutter_mask": clutter_mask,
@@ -663,9 +595,26 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
             "decay_tracks": decay_tracks,
             "last_loaded": time.time(),
             "gif_mtime": os.path.getmtime(bhp_gif) if os.path.exists(bhp_gif) else None,
-        })
-        print("Bhopal radar cache warmed.")
+        }
+        with _bhopal_state_lock:
+            bhopal_cache.update(new_state)
+        print("Bhopal radar: refresh complete")
+    except Exception as e:
+        print(f"Bhopal radar: refresh failed: {e}\n{traceback.format_exc()}")
+    finally:
+        _bhopal_ready.set()
+        _bhopal_bg_lock.release()
+
+
+def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    if not _bhopal_ready.is_set():
+        threading.Thread(target=_do_bhopal_refresh, args=(ttl_sec, True), daemon=True).start()
+        _bhopal_ready.wait(timeout=60)
         return bhopal_cache
+    if not force and _is_fresh(bhopal_cache, ttl_sec):
+        return bhopal_cache
+    threading.Thread(target=_do_bhopal_refresh, args=(ttl_sec, force), daemon=True).start()
+    return bhopal_cache
 
 
 # ENDPOINT 1: Health Check
@@ -682,21 +631,25 @@ def health():
 @app.get("/debug/cache")
 def debug_cache():
     """Inspect radar cache state. Used to diagnose slow-request issues."""
-    frame_data = radar_cache.get("frame_data") or []
-    last = radar_cache.get("last_loaded")
-    age = (time.time() - float(last)) if last else None
+    def _summary(cache, ready_event, gif_path):
+        last = cache.get("last_loaded")
+        age = round(time.time() - float(last), 1) if last else None
+        return {
+            "ready": ready_event.is_set(),
+            "fresh": _is_fresh(cache, RADAR_CACHE_TTL_SEC),
+            "frame_count": len(cache.get("frame_data") or []),
+            "has_movement": bool(cache.get("movement")),
+            "has_latest_frame": bool(cache.get("latest_frame")),
+            "cache_age_sec": age,
+            "gif_exists": os.path.exists(gif_path) if gif_path else False,
+        }
     return {
-        "has_frame_data": bool(frame_data),
-        "frame_data_len": len(frame_data),
-        "has_movement": bool(radar_cache.get("movement")),
-        "has_clutter_mask": radar_cache.get("clutter_mask") is not None,
-        "has_latest_frame": bool(radar_cache.get("latest_frame")),
-        "last_loaded": last,
-        "cache_age_sec": age,
         "ttl_sec": RADAR_CACHE_TTL_SEC,
-        "cache_is_fresh": _cache_is_fresh(RADAR_CACHE_TTL_SEC),
         "pid": os.getpid(),
-        "gif_path_exists": os.path.exists(GIF_SAVE_PATH),
+        "delhi":   _summary(radar_cache,   _delhi_ready,   GIF_SAVE_PATH),
+        "lucknow": _summary(lucknow_cache, _lucknow_ready, radar_lucknow.GIF_SAVE_PATH),
+        "patna":   _summary(patna_cache,   _patna_ready,   radar_patna.GIF_SAVE_PATH),
+        "bhopal":  _summary(bhopal_cache,  _bhopal_ready,  radar_bhopal.GIF_SAVE_PATH),
     }
 
 # ENDPOINT 2: Current Rain Movement
