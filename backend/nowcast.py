@@ -107,7 +107,7 @@ def _is_rain_near(rain_mask: np.ndarray, fx: float, fy: float, radius: int) -> b
 
 def _find_track_for_patch(patch: dict, patch_tracks) -> Optional[object]:
     """Return the PatchTrack whose latest-frame centroid is nearest to this patch's centroid."""
-    MATCH_RADIUS_PX = 35
+    MATCH_RADIUS_PX = 50
     cx, cy = patch["centroid_px"]
     best_track, best_dist = None, float(MATCH_RADIUS_PX)
     for track in (patch_tracks or []):
@@ -127,8 +127,8 @@ def _find_patch_track(orig_px: float, orig_py: float, patch_tracks) -> Optional[
         if track.mask_latest is None:
             continue
         h, w = track.mask_latest.shape
-        for dy in range(-4, 5):
-            for dx in range(-4, 5):
+        for dy in range(-10, 11):
+            for dx in range(-10, 11):
                 ny = int(orig_py) + dy
                 nx = int(orig_px) + dx
                 if 0 <= ny < h and 0 <= nx < w and track.mask_latest[ny, nx]:

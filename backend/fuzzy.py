@@ -32,7 +32,7 @@ def dbz_to_label(dbz):
         return "Very Light Rain", "#4169E1"
     elif dbz < 35:
         return "Light Rain", "#00BFFF"
-    elif dbz < 45:
+    elif dbz < 41:
         return "Moderate Rain", "#00FF00"
     elif dbz < 55:
         return "Heavy Rain", "#FFD700"
