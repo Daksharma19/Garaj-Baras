@@ -44,13 +44,10 @@ def isolate_rain(frame_path, clutter_mask=None, tolerance=65):
     _k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     rain_mask = cv2.morphologyEx(rain_mask, cv2.MORPH_OPEN, _k, iterations=1)
 
-    if clutter_mask is not None:
-        rain_mask = np.where(clutter_mask > 0, 0, rain_mask).astype(np.uint8)
-
     return rain_mask
 
 
-def build_clutter_mask(frames_list, threshold=0.9):
+def build_clutter_mask(frames_list, threshold=0.75):
     """
     Identifies permanent ground clutter pixels by analyzing all radar frames.
 

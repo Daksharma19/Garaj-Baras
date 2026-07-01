@@ -278,7 +278,7 @@ def _load_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = Fal
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = build_clutter_mask(all_paths)
+        clutter_mask = None  # clutter mask disabled — testing without
         del all_paths
         gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
@@ -385,7 +385,7 @@ def _load_lucknow_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = build_clutter_mask(all_paths)
+        clutter_mask = None  # clutter mask disabled — testing without
         del all_paths
         gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
@@ -495,7 +495,7 @@ def _load_patna_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = build_clutter_mask(all_paths)
+        clutter_mask = None  # clutter mask disabled — testing without
         del all_paths
         gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
@@ -605,7 +605,7 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         all_paths = [p for (p, _ts) in all_frame_data]
         del all_frame_data
-        clutter_mask = build_clutter_mask(all_paths)
+        clutter_mask = None  # clutter mask disabled — testing without
         del all_paths
         gc.collect()
         dx, dy, dir_from, dir_to, speed = get_movement_vector(
