@@ -7,7 +7,7 @@ import requests
 from PIL import Image, ImageSequence
 from datetime import datetime, timezone, timedelta
 
-GIF_URL = "https://mausam.imd.gov.in/Radar/animation/Converted/DELHI_MAXZ.gif"
+GIF_URL = "https://mausam.imd.gov.in/Radar/animation/Converted/DLH_MAXZ.gif"
 GIF_SAVE_PATH = os.path.join(os.path.dirname(__file__), "delhi_radar.gif")
 FRAMES_FOLDER = os.path.join(os.path.dirname(__file__), "frames")
 
