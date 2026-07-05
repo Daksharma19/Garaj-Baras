@@ -514,16 +514,32 @@ def is_rain_at_pixel(predicted_mask, px, py, radius=1):
     return bool(np.any(region > 0))
 
 
+def _mask_hit_no_clamp(mask, px, py, radius=1):
+    """
+    Neighborhood rain check that treats out-of-frame source pixels as a miss
+    (no clamping — a back-projected point outside the frame means the rain
+    that would arrive there is beyond radar knowledge, not at the edge).
+    """
+    h, w = mask.shape[:2]
+    x0 = max(0, px - radius)
+    x1 = min(w, px + radius + 1)
+    y0 = max(0, py - radius)
+    y1 = min(h, py + radius + 1)
+    if x0 >= x1 or y0 >= y1:
+        return False
+    return bool(np.any(mask[y0:y1, x0:x1]))
+
+
 def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
                      eta_minutes, clutter_mask=None, lag_mins=25.0,
-                     frame_rgb=None, base_rain_mask=None):
+                     frame_rgb=None, base_rain_mask=None, patches=None):
     """
     Checks each waypoint on a route for expected rain at its ETA,
     adjusted for radar lag.
 
     Args:
         waypoints_pixels   : list of (px, py, eta_mins) tuples
-        dx, dy             : rain movement vector (pixels per 10-min frame)
+        dx, dy             : GLOBAL rain movement vector (pixels per 10-min frame)
         latest_frame_path  : path to the most recent radar frame
         eta_minutes        : total trip duration (kept for API clarity)
         clutter_mask       : optional clutter mask to clean predictions
@@ -532,6 +548,13 @@ def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
                              (avoids re-opening the PIL image)
         base_rain_mask     : optional pre-computed rain mask for latest_frame
                              (avoids re-running ``isolate_rain`` per time offset)
+        patches            : optional list of patch dicts from compute_patch_motion
+                             (each with 'mask', 'dx_10', 'dy_10'). When provided,
+                             each patch is advected by its OWN motion vector
+                             instead of shifting the whole field by the global
+                             average — the global average of divergent monsoon
+                             cells is often near-zero, which made forecasts look
+                             like a static snapshot of current weather.
 
     For each waypoint, checks rain at (effective_eta), (effective_eta+5),
     and (effective_eta+10) minutes.
@@ -540,18 +563,42 @@ def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
     if base_rain_mask is None:
         base_rain_mask = isolate_rain(latest_frame_path, clutter_mask=clutter_mask)
 
-    mask_cache = {}
+    # --- Per-patch advection setup ---
+    # A waypoint is rainy at time t iff some patch, moved by its own velocity
+    # for t minutes, covers the waypoint. Equivalent (and cheaper) test:
+    # back-project the waypoint by that patch's vector and check the patch's
+    # CURRENT mask. Rain pixels not claimed by any patch (tiny components)
+    # fall back to the global vector against the leftover mask.
+    patch_list = []
+    leftover_mask = None
+    if patches:
+        union = None
+        for p in patches:
+            m = p.get("mask")
+            if m is None:
+                continue
+            mb = m.astype(bool)
+            patch_list.append((float(p.get("dx_10", 0.0)),
+                               float(p.get("dy_10", 0.0)),
+                               mb))
+            union = mb.copy() if union is None else (union | mb)
+        if patch_list:
+            leftover_mask = (base_rain_mask > 0) & ~union
 
-    def get_mask(t_mins):
-        # Round to nearest integer to help caching
-        t = int(max(0, round(t_mins)))
-        if t not in mask_cache:
-            mask_cache[t] = predict_rain_position(
-                latest_frame_path, dx, dy, t,
-                clutter_mask=clutter_mask,
-                base_rain_mask=base_rain_mask,
-            )
-        return mask_cache[t]
+    def rain_source_at(px, py, t_mins):
+        """Where is the rain NOW that will be over (px,py) at t_mins? -> (hit, sx, sy)."""
+        shifts = t_mins / 10.0
+        for pdx, pdy, pmask in patch_list:
+            sx = int(round(px - pdx * shifts))
+            sy = int(round(py - pdy * shifts))
+            if _mask_hit_no_clamp(pmask, sx, sy, radius=1):
+                return True, sx, sy
+        sx = int(round(px - dx * shifts))
+        sy = int(round(py - dy * shifts))
+        fb = leftover_mask if leftover_mask is not None else (base_rain_mask > 0)
+        if _mask_hit_no_clamp(fb, sx, sy, radius=1):
+            return True, sx, sy
+        return False, None, None
 
     # Load latest frame to check if waypoints start as green/background
     if frame_rgb is not None:
@@ -594,13 +641,16 @@ def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
             r, g, b = img_arr[spy, spx]
             is_center_green = (70 < r < 180) and (100 < g < 200) and (40 < b < 100)
 
+        src_px = src_py = None
         for t in check_times:
-            mask = get_mask(t)
             # Always use a small neighborhood check; being strict on "green"
             # backgrounds causes false negatives when the georef rounds a
             # waypoint onto an adjacent green pixel near a rain edge.
-            if is_rain_at_pixel(mask, px, py, radius=1):
+            hit, sx, sy = rain_source_at(px, py, max(0.0, t))
+            if hit:
                 hits += 1
+                if src_px is None:
+                    src_px, src_py = sx, sy
 
         if hits == 3:
             confidence = "high"
@@ -622,7 +672,12 @@ def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
             "effective_eta": effective_eta,
             "rain_expected": hits > 0,
             "confidence": confidence,
-            "lag_applied": lag_mins
+            "lag_applied": lag_mins,
+            # Pixel in the LATEST frame holding the rain that arrives at this
+            # waypoint at its ETA (per-patch back-projection). Lets enrichment
+            # sample intensity from the correct source cell.
+            "src_px": src_px,
+            "src_py": src_py,
         })
 
     return results

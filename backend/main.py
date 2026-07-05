@@ -236,6 +236,34 @@ def _is_fresh(cache: dict, ttl_sec: float) -> bool:
     return bool(cache.get("latest_frame") and cache.get("movement") and cache.get("frame_data"))
 
 
+DEFAULT_RADAR_LAG_MINS = 25.0
+
+def _fresh_lag_info(state: dict) -> dict:
+    """
+    Radar lag recomputed at REQUEST time.
+
+    The lag_info stored in the radar cache is computed once per refresh and
+    then frozen for the cache TTL, so predictions under-shift rain as minutes
+    pass. Recompute from the OCR'd frame timestamp against now; if OCR never
+    produced a timestamp, use a conservative 25-min default.
+    """
+    ts = state.get("latest_ts")
+    if ts is not None:
+        # get_radar_lag_mins computes against now() and falls through to its
+        # own 25-min default when the timestamp yields an impossible lag.
+        return get_radar_lag_mins(ts)
+    cached = state.get("lag_info") or {}
+    if cached.get("lag_mins") is not None:
+        return cached
+    return {
+        "lag_mins": DEFAULT_RADAR_LAG_MINS,
+        "freshness": "stale",
+        "method": "fallback_estimate",
+        "message": "Radar ~25 mins old (estimate)",
+        "radar_time": "Unknown",
+    }
+
+
 # ── Delhi ─────────────────────────────────────────────────────────────────────
 
 def _do_delhi_refresh(ttl_sec: float, force: bool = False) -> None:
@@ -727,7 +755,7 @@ def get_latest_frames(n: int = 6, force: bool = True):
     state = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=bool(force))
     frame_data = state.get("frame_data") or []
     latest_ts = state.get("latest_ts")
-    lag_info = state.get("lag_info") or {"lag_mins": 25.0, "freshness": "stale", "message": "Radar ~25 mins old (estimate)"}
+    lag_info = _fresh_lag_info(state)
 
     last_n = frame_data[-n:] if len(frame_data) > n else frame_data
     frames = []
@@ -795,7 +823,7 @@ def predict_waypoints(payload: PredictWaypointsRequest):
         clutter_mask = state["clutter_mask"]
         dx, dy, dir_from, dir_to, speed = state["movement"]
         latest_frame = state["latest_frame"]
-        lag_info = state["lag_info"]
+        lag_info = _fresh_lag_info(state)
         decay_tracks = state.get("decay_tracks") or []
 
         # Per-request shared work: open the latest frame + compute base rain
@@ -853,6 +881,7 @@ def predict_waypoints(payload: PredictWaypointsRequest):
             lag_mins=lag_info["lag_mins"],
             frame_rgb=frame_rgb,
             base_rain_mask=base_rain_mask,
+            patches=state.get("patches") or [],
         )
 
         enriched = enrich_results(
@@ -871,10 +900,15 @@ def predict_waypoints(payload: PredictWaypointsRequest):
             if e["rain_expected"] and decay_tracks:
                 lag = lag_info["lag_mins"]
                 effective_eta = e["eta_mins"] + lag
-                # Back-project pixel to its position in the latest frame
-                frames_ahead = effective_eta / 10.0
-                src_px = int(px - dx * frames_ahead)
-                src_py = int(py - dy * frames_ahead)
+                # Source pixel in the latest frame: prefer the per-patch
+                # back-projection from check_route_rain, else global vector.
+                if e.get("src_px") is not None and e.get("src_py") is not None:
+                    src_px = int(e["src_px"])
+                    src_py = int(e["src_py"])
+                else:
+                    frames_ahead = effective_eta / 10.0
+                    src_px = int(px - dx * frames_ahead)
+                    src_py = int(py - dy * frames_ahead)
                 decay_info = get_decay_status_at_pixel(src_px, src_py, effective_eta, decay_tracks)
                 e["decay_status"] = decay_info["decay_status"]
                 e["projected_dbz"] = decay_info["projected_dbz"]
@@ -939,7 +973,7 @@ def predict_rain(route: RouteRequest):
         clutter_mask = state["clutter_mask"]
         dx, dy, dir_from, dir_to, speed = state["movement"]
         latest_frame = state["latest_frame"]
-        lag_info = state["lag_info"]
+        lag_info = _fresh_lag_info(state)
 
         # Pre-load frame RGB + base rain mask once (see /predict_waypoints)
         frame_rgb = None
@@ -982,6 +1016,7 @@ def predict_rain(route: RouteRequest):
             lag_mins=lag_info["lag_mins"],
             frame_rgb=frame_rgb,
             base_rain_mask=base_rain_mask,
+            patches=state.get("patches") or [],
         )
 
         # Enrich with fuzzy intensity
@@ -1077,8 +1112,8 @@ def nowcast_location(req: NowcastRequest):
 
         dx, dy, _dir_from, _dir_to, _speed = state["movement"]
         latest_frame = state.get("latest_frame")
-        lag_info = state.get("lag_info") or {}
-        lag_mins = float(lag_info.get("lag_mins", 10.0))
+        lag_info = _fresh_lag_info(state)
+        lag_mins = float(lag_info.get("lag_mins", DEFAULT_RADAR_LAG_MINS))
         patch_tracks = state.get("decay_tracks") or []
         patches_motion = state.get("patches") or []
         clutter_mask = state.get("clutter_mask")

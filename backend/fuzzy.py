@@ -76,10 +76,16 @@ def enrich_results(results, waypoints_latlon,
 
         if r["rain_expected"]:
             effective_eta = eta + lag_mins
-            # Get shifted pixel position at effective_eta
-            frames_ahead = effective_eta / 10.0
-            shifted_px = int(px - dx * frames_ahead)
-            shifted_py = int(py - dy * frames_ahead)
+            if r.get("src_px") is not None and r.get("src_py") is not None:
+                # check_route_rain already back-projected via the hitting
+                # patch's own motion vector — use that source pixel.
+                shifted_px = int(r["src_px"])
+                shifted_py = int(r["src_py"])
+            else:
+                # Legacy fallback: back-project with the global vector
+                frames_ahead = effective_eta / 10.0
+                shifted_px = int(px - dx * frames_ahead)
+                shifted_py = int(py - dy * frames_ahead)
 
             # Clamp to image bounds
             h, w = arr.shape[:2]
@@ -110,7 +116,9 @@ def enrich_results(results, waypoints_latlon,
             "label": label,
             "color": color,
             "dbz": dbz,
-            "message": message
+            "message": message,
+            "src_px": r.get("src_px"),
+            "src_py": r.get("src_py"),
         })
 
     return enriched
