@@ -56,6 +56,37 @@ PATCH_SEARCH_RADIUS_PX: int = 120
 # Patches with |dx_10| < this AND |dy_10| < this are fresh pop-ups — skip forward projection
 FRESH_POPUP_VELOCITY_THRESH: float = 0.3
 
+# ── New-cell (single-observation) lifecycle ───────────────────────────────────
+# A cell seen in only ONE frame has no measured motion or intensity trend.
+# Previously it was assumed "stable" forever, so a fresh pop-up sitting on the
+# user predicted unchanged heavy rain for the full 2-h horizon. Small convective
+# pop-ups typically live 30–60 min, so give unobserved cells a synthetic
+# climatological decay instead. Tracked patches (>= 2 observations) are NEVER
+# touched by this — their measured decay_rate (≈0 for a consistent mover) wins.
+NEW_CELL_DECAY_DBZ_PER_10MIN: float = -2.5
+# Beyond this horizon a never-observed-moving cell is not asserted as rain
+NEW_CELL_MAX_ASSERT_MINS: float = 60.0
+# Projected dBZ below this → treat the new cell as rained out
+NEW_CELL_MIN_DBZ: float = 10.0
+
+
+def _track_has_history(track) -> bool:
+    """True if the decay track has >= 2 observations (measured trend exists)."""
+    return track is not None and len(getattr(track, "mean_dbzs", []) or []) >= 2
+
+
+def _new_cell_projection(raw_dbz: float, eff_mins: float, slot_mins: float):
+    """
+    Synthetic lifecycle for a cell with no observed history.
+    Returns (proj_dbz, decay_status, has_rain).
+    """
+    if slot_mins > NEW_CELL_MAX_ASSERT_MINS:
+        return 0.0, "new_cell", False
+    proj = max(0.0, float(raw_dbz) + NEW_CELL_DECAY_DBZ_PER_10MIN * (eff_mins / 10.0))
+    if proj < NEW_CELL_MIN_DBZ:
+        return proj, "new_cell", False
+    return proj, "new_cell", True
+
 
 @dataclass
 class NowcastEvent:
@@ -68,15 +99,10 @@ class NowcastEvent:
     decay_status: str      # stable | weakening | dying | dead
 
 
-# ── dBZ → probability ────────────────────────────────────────────────────────
+# ── dBZ → intensity probability (legacy, used by compute_nowcast events) ─────
 
 def dbz_to_probability(projected_dbz: float) -> int:
-    """
-    Map projected dBZ to rain probability (0–100).
-
-    Using projected dBZ (which already bakes in decay) means a weakening patch
-    naturally yields lower probability without any extra logic.
-    """
+    """Maps projected dBZ to a rough intensity-based probability (legacy path)."""
     d = max(0.0, float(projected_dbz))
     if d <  5:  return 0
     if d < 10:  return 8
@@ -89,6 +115,74 @@ def dbz_to_probability(projected_dbz: float) -> int:
     if d < 45:  return 92
     if d < 50:  return 96
     return 99
+
+
+# ── Arrival confidence — "will it actually reach me?" ────────────────────────
+
+def arrival_confidence(
+    slot_mins: float,
+    decay_status: str,
+    is_patch_hit: bool,
+    patch_dist_px: float = 0.0,
+) -> int:
+    """
+    Probability (0–100) that detected rain actually reaches the user.
+
+    Completely independent of rain intensity — a light drizzle sitting
+    directly on the user is 95% certain; a heavy cell 100px away at the
+    90-min horizon might be only 25% certain.
+
+    Factors:
+      slot_mins      — further ahead = more time for the storm to deviate/die
+      decay_status   — dying/weakening patches may not survive to arrival
+      is_patch_hit   — tracked cell (high confidence) vs global-flow fallback
+      patch_dist_px  — how far the patch centroid is from the user right now
+    """
+    # Base: degrades with time horizon
+    if slot_mins <= 0:
+        base = 95
+    elif slot_mins <= 15:
+        base = 88
+    elif slot_mins <= 30:
+        base = 78
+    elif slot_mins <= 45:
+        base = 67
+    elif slot_mins <= 60:
+        base = 56
+    elif slot_mins <= 75:
+        base = 46
+    elif slot_mins <= 90:
+        base = 37
+    else:
+        base = 29
+
+    # Source quality: tracked patch cell > global-flow guess
+    if is_patch_hit:
+        base = int(base * 1.08)
+    else:
+        base = int(base * 0.85)
+
+    # Distance penalty: farther patch has more room to miss
+    if is_patch_hit and patch_dist_px > 0:
+        if patch_dist_px > 80:
+            base = int(base * 0.78)
+        elif patch_dist_px > 50:
+            base = int(base * 0.87)
+        elif patch_dist_px > 25:
+            base = int(base * 0.94)
+
+    # Decay penalty: weakening/dying storm may not survive to arrival
+    if decay_status == "dead":
+        return 0
+    if decay_status == "dying":
+        base = int(base * 0.45)
+    elif decay_status == "weakening":
+        base = int(base * 0.75)
+    elif decay_status == "new_cell":
+        # Brand-new cell with no observed history — short-term confidence only
+        base = int(base * 0.8)
+
+    return max(0, min(99, base))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -258,37 +352,33 @@ def compute_nowcast_slots(
         proj_dbz = 0.0
         decay_status = "stable"
         patch_hit = None
+        is_patch_hit = False
+        patch_dist_px = 0.0
 
         # ── 1. PATCH-FORWARD PASS ─────────────────────────────────────────────
-        # For each patch in the search circle, forward-project its centroid using
-        # its own velocity and check if it reaches the user at this slot's time.
         for patch in _sorted_patches:
             cx, cy = patch["centroid_px"]
             vx = patch.get("dx_10", 0.0)
             vy = patch.get("dy_10", 0.0)
 
-            # Only consider patches currently inside the search circle
-            if math.sqrt((cx - user_px) ** 2 + (cy - user_py) ** 2) > search_radius_px:
+            cur_dist = math.sqrt((cx - user_px) ** 2 + (cy - user_py) ** 2)
+            if cur_dist > search_radius_px:
                 continue
-
-            # Skip fresh pop-ups — no reliable direction, handled by fallback below
             if abs(vx) < FRESH_POPUP_VELOCITY_THRESH and abs(vy) < FRESH_POPUP_VELOCITY_THRESH:
                 continue
 
-            # Where will this patch be at time `eff`?
             pred_cx = cx + vx * shifts
             pred_cy = cy + vy * shifts
-
-            # Hit test: patch edge (from area) + user location tolerance
             patch_radius = max(5, int(math.sqrt(patch.get("area_px", 25) / math.pi)))
             dist = math.sqrt((pred_cx - user_px) ** 2 + (pred_cy - user_py) ** 2)
             if dist <= (patch_radius + radius):
                 has_rain = True
                 patch_hit = patch
-                break  # closest patch wins for this slot
+                is_patch_hit = True
+                patch_dist_px = cur_dist
+                break
 
         # ── 2. GLOBAL-FLOW FALLBACK ───────────────────────────────────────────
-        # Catches diffuse rain, fresh pop-ups, and cases with no tracked patches.
         orig_px = orig_py = None
         if not has_rain:
             orig_px = user_px - dx * eff / 10.0
@@ -296,8 +386,6 @@ def compute_nowcast_slots(
             has_rain = _is_rain_near(rain_mask, orig_px, orig_py, radius)
 
         # ── 3. dBZ / decay lookup ─────────────────────────────────────────────
-        # Anchor decay to the actual sampled pixel dBZ (not track centroid mean)
-        # so the starting intensity is correct. Apply track.decay_rate on top.
         if has_rain and patch_hit is not None:
             track = _find_track_for_patch(patch_hit, patch_tracks)
             raw = float(patch_hit.get("max_dbz", 0))
@@ -310,18 +398,25 @@ def compute_nowcast_slots(
         elif has_rain:
             track = _find_patch_track(orig_px, orig_py, patch_tracks)
             raw = _sample_raw_dbz(rain_mask, rgb_arr, orig_px, orig_py, radius)
-            if track:
+            if _track_has_history(track):
                 proj_dbz = max(0.0, raw + track.decay_rate * (eff / 10.0))
                 decay_status = _classify(proj_dbz, track.decay_rate)
             else:
-                proj_dbz = raw
-                decay_status = "stable"
+                # Untracked / single-observation cell: synthetic lifecycle.
+                # Moving patches with a measured trend never reach this branch
+                # — they are handled by the patch-forward pass or the
+                # _track_has_history case above.
+                proj_dbz, decay_status, has_rain = _new_cell_projection(raw, eff, t)
 
-        prob = dbz_to_probability(proj_dbz) if has_rain else 0
-        if prob < MIN_PROBABILITY:
+        # ── 4. Two separate scores ────────────────────────────────────────────
+        # arrival_confidence: geometric + temporal — "will it reach me?"
+        # intensity:          dBZ label           — "how heavy is the rain?"
+        arr_conf = arrival_confidence(t, decay_status, is_patch_hit, patch_dist_px) if has_rain else 0
+
+        if arr_conf < MIN_PROBABILITY:
             has_rain = False
             proj_dbz = 0.0
-            prob = 0
+            arr_conf = 0
 
         intensity_label = "No Rain"
         if has_rain:
@@ -330,10 +425,12 @@ def compute_nowcast_slots(
         slots.append({
             "slot_mins": t,
             "has_rain": has_rain,
-            "probability": prob,
-            "intensity": intensity_label,
+            "probability": arr_conf,          # kept for backward compat (bar height)
+            "arrival_confidence": arr_conf,   # "will it reach me?" 0–100
+            "intensity": intensity_label,     # "how heavy?" IMD label
             "projected_dbz": round(proj_dbz, 1),
             "decay_status": decay_status,
+            "source": "patch" if is_patch_hit else ("fallback" if has_rain else "none"),
         })
 
     return slots

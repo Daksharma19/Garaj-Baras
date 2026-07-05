@@ -541,12 +541,14 @@ function NowcastSlots({ slots }) {
     <div className="nc-slots">
       {slots.map((slot, i) => {
         const timeIST = toIST(slot.slot_mins)
-        const filled = Math.round(slot.probability / 10)
+        const conf = slot.arrival_confidence ?? slot.probability ?? 0
+        const filled = Math.round(conf / 10)
         const hasRain = slot.has_rain
         const decayLabel =
           slot.decay_status === 'dying' ? 'Fading'
           : slot.decay_status === 'dead' ? 'Clearing'
           : slot.decay_status === 'weakening' ? 'Weakening'
+          : slot.decay_status === 'new_cell' ? 'New storm'
           : null
         const isNow = i === 0
 
@@ -570,7 +572,7 @@ function NowcastSlots({ slots }) {
               {hasRain ? (slot.intensity || 'Rain') : 'No Rain'}
             </span>
             <span className={`nc-slot__prob${!hasRain ? ' nc-slot__prob--clear' : ''}`}>
-              {hasRain ? `${slot.probability}%` : '—'}
+              {hasRain ? `${conf}%` : '—'}
             </span>
             {decayLabel && hasRain && (
               <span className={`decay-chip decay-chip--${slot.decay_status}`}>{decayLabel}</span>

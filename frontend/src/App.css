@@ -917,6 +917,12 @@
   color: rgba(148, 163, 184, 0.72);
 }
 
+.decay-chip--new_cell {
+  background: rgba(96, 165, 250, 0.14);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  color: #60A5FA;
+}
+
 /* ── Stats strip ─────────────────────────────────────────────── */
 
 .stats-strip {
