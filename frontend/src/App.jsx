@@ -584,11 +584,23 @@ function NowcastSlots({ slots }) {
   )
 }
 
-function ForecastRadarPlayer({ lat, lon, requestId }) {
+function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
   const [frames, setFrames] = useState(null)
   const [idx, setIdx] = useState(0)
   const [playing, setPlaying] = useState(true)
   const [fcError, setFcError] = useState(null)
+
+  // Frame whose slot time is nearest the traveller's ETA at this point.
+  // Only meaningful inside the 1-hour animation window.
+  const highlightIdx = useMemo(() => {
+    const eta = Number(highlightEta)
+    if (!frames?.length || !Number.isFinite(eta) || eta < 0 || eta > 60) return null
+    let best = 0
+    for (let i = 1; i < frames.length; i++) {
+      if (Math.abs(frames[i].slot_mins - eta) < Math.abs(frames[best].slot_mins - eta)) best = i
+    }
+    return best
+  }, [frames, highlightEta])
 
   useEffect(() => {
     let alive = true
@@ -598,6 +610,11 @@ function ForecastRadarPlayer({ lat, lon, requestId }) {
       .catch(() => { if (alive) setFcError('Forecast animation unavailable right now.') })
     return () => { alive = false }
   }, [lat, lon, requestId])
+
+  // When an ETA highlight exists, open the player on that frame
+  useEffect(() => {
+    if (frames?.length && highlightIdx != null) setIdx(highlightIdx)
+  }, [frames, highlightIdx])
 
   useEffect(() => {
     if (!playing || !frames?.length) return
@@ -638,14 +655,87 @@ function ForecastRadarPlayer({ lat, lon, requestId }) {
             type="button"
             role="tab"
             aria-selected={i === idx}
-            className={`nc-forecast-dot${i === idx ? ' nc-forecast-dot--active' : ''}`}
+            className={
+              `nc-forecast-dot${i === idx ? ' nc-forecast-dot--active' : ''}` +
+              (i === highlightIdx ? ' nc-forecast-dot--eta' : '')
+            }
             onClick={() => { setIdx(i); setPlaying(false) }}
           >
             {f.slot_mins === 0 ? 'Now' : `+${f.slot_mins}m`}
+            {i === highlightIdx && <span className="nc-forecast-dot__eta-badge">ETA</span>}
           </button>
         ))}
       </div>
     </>
+  )
+}
+
+function JourneyStopCard({ stop, onClose }) {
+  const [nc, setNc] = useState(null)
+  const [ncErr, setNcErr] = useState(null)
+  const [placeName, setPlaceName] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    setNc(null); setNcErr(null); setPlaceName(null)
+    axios.post(NOWCAST_URL, { lat: stop.lat, lon: stop.lon })
+      .then((r) => { if (alive) setNc(r.data) })
+      .catch(() => { if (alive) setNcErr('Nowcast unavailable for this point right now.') })
+    const ac = new AbortController()
+    reversePlaceName(stop.lat, stop.lon, ac.signal)
+      .then((n) => { if (alive && n) setPlaceName(n) })
+      .catch(() => {})
+    return () => { alive = false; ac.abort() }
+  }, [stop.lat, stop.lon, stop.requestId])
+
+  const etaRounded = Math.round(Number(stop.eta_mins) || 0)
+  return (
+    <div className="nc-forecast-card journey-stop-card">
+      <div className="journey-stop-card__head">
+        <div>
+          <div className="nc-section-label">RAIN STOP · {stop.label?.toUpperCase() || 'RAIN'}</div>
+          <div className="journey-stop-card__place">
+            {placeName || `${stop.lat.toFixed(3)}, ${stop.lon.toFixed(3)}`}
+          </div>
+          <div className="journey-stop-card__meta">
+            You arrive here ~{etaRounded} min into the trip · {toIST(stop.eta_mins)} IST
+          </div>
+        </div>
+        <button type="button" className="journey-chip__close" onClick={onClose} aria-label="Close">
+          ×
+        </button>
+      </div>
+
+      {ncErr && <p className="nc-forecast-note">{ncErr}</p>}
+      {!nc && !ncErr && <p className="nc-forecast-note">Scanning radar at this point…</p>}
+      {nc && nc.in_radar_bounds && (
+        <>
+          <div className={`banner banner--${(nc.rain_slots ?? 0) > 0 ? 'rain' : 'clear'}`} style={{ marginTop: 10 }}>
+            <p className="banner__head">{nc.summary}</p>
+          </div>
+          <NowcastSlots slots={nc.slots} />
+        </>
+      )}
+      {nc && !nc.in_radar_bounds && (
+        <p className="nc-forecast-note">This point is outside radar coverage.</p>
+      )}
+
+      <div className="nc-section-label" style={{ marginTop: 14 }}>
+        FORECAST RADAR AT THIS POINT
+        {etaRounded <= 60 ? ' · YOUR ETA FRAME MARKED' : ''}
+      </div>
+      <ForecastRadarPlayer
+        lat={stop.lat}
+        lon={stop.lon}
+        requestId={stop.requestId}
+        highlightEta={stop.eta_mins}
+      />
+      <p className="nc-forecast-note">
+        {etaRounded <= 60
+          ? 'The frame marked ETA shows the predicted radar at the time you reach this point.'
+          : 'Your arrival here is beyond the 1-hour animation window.'}
+      </p>
+    </div>
   )
 }
 
@@ -930,6 +1020,7 @@ export default function App() {
   const [routeCoords, setRouteCoords] = useState([])
   const [routeSegments, setRouteSegments] = useState([])
   const [activeSeg, setActiveSeg] = useState(null)
+  const [journeyStop, setJourneyStop] = useState(null)
   const [routeDistanceKm, setRouteDistanceKm] = useState(null)
   const [showBreakdown, setShowBreakdown] = useState(false)
   const [error, setError] = useState(null)
@@ -1051,6 +1142,7 @@ export default function App() {
       const sampled = sampleRouteEvery5Min(routeLonLat, speedNum, 5)
       if (!sampled.length) throw new Error('Could not sample route into waypoints.')
 
+      setJourneyStop(null)
       setRouteCoords(routeLonLat.map(([lon, lat]) => [lat, lon]))
       setResult({
         total_waypoints: sampled.length, rain_waypoints: 0, clear_waypoints: sampled.length,
@@ -1127,7 +1219,7 @@ export default function App() {
   }, [result])
 
   function handleBackToPlanner() {
-    setResult(null); setError(null); setActiveSeg(null)
+    setResult(null); setError(null); setActiveSeg(null); setJourneyStop(null)
     setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null); setShowBreakdown(false)
     setRadarDown(false)
   }
@@ -1443,9 +1535,11 @@ export default function App() {
                   <RouteMap
                     routeCoords={routeCoords}
                     routeSegments={routeSegments}
+                    waypoints={result?._pending ? [] : (result?.waypoints || [])}
                     activeSeg={activeSeg}
                     setActiveSeg={setActiveSeg}
                     openSegmentPopup={openSegmentPopup}
+                    onStopDetails={(stop) => setJourneyStop({ ...stop, requestId: Date.now() })}
                   />
                 </Suspense>
                 {scanning && (
@@ -1458,6 +1552,14 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {/* Rain-stop detail: nowcast + forecast radar at the tapped stop */}
+              {journeyStop && !result._pending && (
+                <JourneyStopCard
+                  stop={journeyStop}
+                  onClose={() => setJourneyStop(null)}
+                />
+              )}
 
               {/* Legend */}
               <div className="legend">

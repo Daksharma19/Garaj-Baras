@@ -1005,6 +1005,197 @@
   color: #60A5FA;
 }
 
+/* ── Car journey animation (route map) ───────────────────────── */
+.car-marker-wrap,
+.stop-marker-wrap {
+  background: none;
+  border: none;
+}
+
+.car-marker {
+  font-size: 22px;
+  line-height: 30px;
+  text-align: center;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.7));
+  transform: scaleX(-1); /* face direction of most Indian routes (west->east varies; cosmetic) */
+}
+
+.stop-marker {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  border-radius: 999px;
+  background: rgba(5, 16, 31, 0.9);
+  border: 2px solid var(--stop-color, #38BDF8);
+  box-shadow: 0 0 10px 1px var(--stop-color, #38BDF8);
+  cursor: pointer;
+  animation: stopPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes stopPulse {
+  0%, 100% { box-shadow: 0 0 6px 0 var(--stop-color, #38BDF8); }
+  50%      { box-shadow: 0 0 14px 3px var(--stop-color, #38BDF8); }
+}
+
+.journey-chip {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 12px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(5, 16, 31, 0.92);
+  border: 1px solid var(--stop-color, #38BDF8);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  animation: chipIn 0.18s ease-out;
+}
+
+@keyframes chipIn {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0);   opacity: 1; }
+}
+
+.journey-chip__icon {
+  font-size: 20px;
+}
+
+.journey-chip__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.journey-chip__title {
+  font-size: 13px;
+  font-weight: 900;
+  color: #F1F5F9;
+}
+
+.journey-chip__sub {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+.journey-chip__close {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: transparent;
+  color: rgba(203, 213, 225, 0.9);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.journeyBtn {
+  position: absolute;
+  top: 12px;
+  left: 60px; /* clear of the Leaflet zoom control */
+  z-index: 1000;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  background: rgba(5, 16, 31, 0.88);
+  color: #60A5FA;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.journeyBtn:hover {
+  background: rgba(15, 26, 46, 0.95);
+  transform: scale(1.04);
+}
+
+.journey-chip__view {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--stop-color, #38BDF8);
+  background: rgba(56, 189, 248, 0.12);
+  color: #E2E8F0;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.journey-chip__view + .journey-chip__close {
+  margin-left: 8px;
+}
+
+/* Journey stop detail card */
+.journey-stop-card {
+  margin-top: 14px;
+}
+
+.journey-stop-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.journey-stop-card__head > div:first-child {
+  min-width: 0;
+}
+
+.journey-stop-card__head .journey-chip__close {
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.journey-stop-card__place {
+  margin-top: 6px;
+  font-size: 15px;
+  font-weight: 900;
+  color: #F1F5F9;
+}
+
+.journey-stop-card__meta {
+  margin-top: 3px;
+  font-size: 12px;
+  color: rgba(148, 163, 184, 0.9);
+}
+
+/* ETA-highlighted forecast frame button */
+.nc-forecast-dot--eta {
+  position: relative;
+  border-color: rgba(251, 191, 36, 0.65);
+  color: #FBBF24;
+  overflow: visible;
+}
+
+.nc-forecast-dot--eta.nc-forecast-dot--active {
+  background: rgba(251, 191, 36, 0.16);
+  color: #FBBF24;
+}
+
+.nc-forecast-dot__eta-badge {
+  position: absolute;
+  top: -8px;
+  right: -4px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: #FBBF24;
+  color: #05101F;
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
 /* ── Stats strip ─────────────────────────────────────────────── */
 
 .stats-strip {
