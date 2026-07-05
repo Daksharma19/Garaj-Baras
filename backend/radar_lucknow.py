@@ -3,10 +3,15 @@
 # Mirrors the radar.py public interface; reuses parameterized helpers from radar.py.
 #
 # Lucknow GIF is 704x594 (NOT the standard 880x720).
-# OCR crop measured from full 704x594 frame: timestamp at ~(530,165,704,270).
+#
+# OCR crop must start BELOW the "Max Range:250 km" line — including it makes
+# Tesseract drop the timestamp lines entirely (verified live: the old
+# (530,165,...) crop OCR'd as just '= Max Range:250 km' and every frame's
+# timestamp came back Unknown, forcing the 25-min default lag).
 
-# Lucknow-specific OCR crop (x0,y0,x1,y1) in full-GIF coordinates (704x594)
-_OCR_CROP = (530, 165, 704, 270)
+# Lucknow-specific OCR crop (x0,y0,x1,y1) in full-GIF coordinates (704x594):
+# captures the '14:22:10Z / 5 JUL 2026 UTC / 19:52:10 IST' block only.
+_OCR_CROP = (540, 175, 704, 268)
 
 import os
 import threading
@@ -35,6 +40,11 @@ def get_all_frames():
     success, _ = download_gif(GIF_URL, GIF_SAVE_PATH)
     if success:
         return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
+    # IMD unreachable: serve the last GIF we have — the lag system will
+    # honestly report its age. Stale radar beats an empty state.
+    if os.path.exists(GIF_SAVE_PATH):
+        print("Lucknow radar: download failed — using last GIF on disk")
+        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
     print("Lucknow radar: GIF download failed.")
     return []
 
@@ -49,6 +59,10 @@ def refresh_frames_if_stale(*, ttl_sec=RADAR_TTL_SEC, force=False, clear_pngs=Tr
 
         success, _ = download_gif(GIF_URL, GIF_SAVE_PATH)
         if not success:
+            if os.path.exists(GIF_SAVE_PATH):
+                print("Lucknow radar: download failed — using last GIF on disk")
+                frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
+                return (frame_data, True)
             print("Lucknow radar: GIF download failed.")
             return ([], False)
 

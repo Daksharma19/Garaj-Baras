@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
-from fastapi.responses import FileResponse  # type: ignore
+from fastapi.responses import FileResponse, Response  # type: ignore
 from fastapi.staticfiles import StaticFiles  # type: ignore
 from pydantic import BaseModel  # type: ignore
 from typing import List
@@ -1210,6 +1210,102 @@ def nowcast_location(req: NowcastRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Nowcast failed: {str(e)}\n{traceback.format_exc()}"
+        )
+
+
+# ENDPOINT: 1-hour Forecast Radar Animation (visualizes the prediction engine)
+
+def _forecast_render_args(lat: float, lon: float) -> dict:
+    """Shared setup for the forecast animation endpoints."""
+    if not (6 < lat < 38 and 68 < lon < 98):
+        raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
+
+    radar = _detect_radar(lat, lon)
+    if radar == "lucknow":
+        _georef = georef_lucknow
+        state   = _load_lucknow_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+    elif radar == "patna":
+        _georef = georef_patna
+        state   = _load_patna_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+    elif radar == "bhopal":
+        _georef = georef_bhopal
+        state   = _load_bhopal_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+    else:
+        _georef = _georef_delhi
+        state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+
+    _touch_radar_and_evict(radar)
+
+    if not _georef.is_within_radar(lat, lon):
+        raise HTTPException(status_code=404, detail="Location outside radar coverage.")
+
+    latest_frame = state.get("latest_frame")
+    if not latest_frame:
+        raise HTTPException(status_code=503, detail="Radar data not yet loaded. Try again in a moment.")
+
+    dx, dy, _f, _t, _s = state["movement"]
+    lag_info = _fresh_lag_info(state)
+    user_px, user_py = _georef.latlon_to_pixel(lat, lon)
+    return dict(
+        frame_rgb=np.array(Image.open(latest_frame).convert("RGB")),
+        rain_mask=isolate_rain(latest_frame, clutter_mask=state.get("clutter_mask")),
+        patches=state.get("patches") or [],
+        tracks=state.get("decay_tracks") or [],
+        gdx=float(dx), gdy=float(dy),
+        lag_mins=float(lag_info.get("lag_mins", DEFAULT_RADAR_LAG_MINS)),
+        user_px=user_px, user_py=user_py,
+    )
+
+
+@app.get("/nowcast/forecast_gif")
+def nowcast_forecast_gif(lat: float, lon: float):
+    """
+    Animated GIF: latest radar + forecast frames at +15/+30/+45/+60 min around
+    (lat, lon), cropped to the nowcast patch-search circle. Each patch moves
+    with its own measured velocity and fades with its decay trend — the exact
+    simulation behind the nowcast slots.
+    """
+    try:
+        args = _forecast_render_args(lat, lon)
+        from forecast_gif import render_forecast_gif  # type: ignore
+        gif_bytes = render_forecast_gif(
+            args["frame_rgb"], args["rain_mask"], args["patches"], args["tracks"],
+            args["gdx"], args["gdy"], args["lag_mins"], args["user_px"], args["user_py"],
+        )
+        return Response(
+            content=gif_bytes,
+            media_type="image/gif",
+            headers={"Cache-Control": "no-store"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Forecast GIF failed: {str(e)}\n{traceback.format_exc()}",
+        )
+
+
+@app.get("/nowcast/forecast_frames")
+def nowcast_forecast_frames(lat: float, lon: float):
+    """
+    Same forecast animation as /nowcast/forecast_gif but as individual
+    base64-PNG frames with labels, so the frontend player can pause/play/scrub.
+    """
+    try:
+        args = _forecast_render_args(lat, lon)
+        from forecast_gif import render_forecast_frames_payload  # type: ignore
+        payload = render_forecast_frames_payload(
+            args["frame_rgb"], args["rain_mask"], args["patches"], args["tracks"],
+            args["gdx"], args["gdy"], args["lag_mins"], args["user_px"], args["user_py"],
+        )
+        return payload
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Forecast frames failed: {str(e)}\n{traceback.format_exc()}",
         )
 
 

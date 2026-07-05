@@ -584,6 +584,71 @@ function NowcastSlots({ slots }) {
   )
 }
 
+function ForecastRadarPlayer({ lat, lon, requestId }) {
+  const [frames, setFrames] = useState(null)
+  const [idx, setIdx] = useState(0)
+  const [playing, setPlaying] = useState(true)
+  const [fcError, setFcError] = useState(null)
+
+  useEffect(() => {
+    let alive = true
+    setFrames(null); setIdx(0); setPlaying(true); setFcError(null)
+    axios.get(`${API_BASE}/nowcast/forecast_frames`, { params: { lat, lon, _: requestId } })
+      .then((r) => { if (alive && Array.isArray(r.data?.frames) && r.data.frames.length) setFrames(r.data.frames) })
+      .catch(() => { if (alive) setFcError('Forecast animation unavailable right now.') })
+    return () => { alive = false }
+  }, [lat, lon, requestId])
+
+  useEffect(() => {
+    if (!playing || !frames?.length) return
+    const iv = setInterval(() => setIdx((i) => (i + 1) % frames.length), 1000)
+    return () => clearInterval(iv)
+  }, [playing, frames])
+
+  if (fcError) return <p className="nc-forecast-note">{fcError}</p>
+  if (!frames) return <p className="nc-forecast-note">Rendering forecast animation…</p>
+
+  const cur = frames[idx]
+  return (
+    <>
+      <div className="nc-forecast-stage">
+        <img className="nc-forecast-gif" src={cur.data} alt={cur.label} />
+        <button
+          type="button"
+          className="nc-forecast-playbtn"
+          onClick={() => setPlaying((p) => !p)}
+          aria-label={playing ? 'Pause animation' : 'Play animation'}
+        >
+          {playing ? (
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden>
+              <rect x="4" y="3" width="4.5" height="14" rx="1" />
+              <rect x="11.5" y="3" width="4.5" height="14" rx="1" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden>
+              <path d="M6 3.5v13l11-6.5-11-6.5z" />
+            </svg>
+          )}
+        </button>
+      </div>
+      <div className="nc-forecast-scrub" role="tablist" aria-label="Forecast frames">
+        {frames.map((f, i) => (
+          <button
+            key={f.slot_mins}
+            type="button"
+            role="tab"
+            aria-selected={i === idx}
+            className={`nc-forecast-dot${i === idx ? ' nc-forecast-dot--active' : ''}`}
+            onClick={() => { setIdx(i); setPlaying(false) }}
+          >
+            {f.slot_mins === 0 ? 'Now' : `+${f.slot_mins}m`}
+          </button>
+        ))}
+      </div>
+    </>
+  )
+}
+
 function NowcastPage({ userLoc, activeTab, onChangeTab }) {
   const [ncLat, setNcLat] = useState(null)
   const [ncLon, setNcLon] = useState(null)
@@ -601,6 +666,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
   const [ncError, setNcError] = useState(null)
   const [ncScanStatus, setNcScanStatus] = useState('')
   const [radarDown, setRadarDown] = useState(false)
+  const [forecastGif, setForecastGif] = useState(null)  // { url, loading }
 
   useEffect(() => {
     if (userLoc && !ncLat) {
@@ -646,6 +712,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
     setNcError(null)
     setNcLoading(true)
     setNcResult(null)
+    setForecastGif(null)
     setNcScanStatus('Scanning radar…')
     try {
       const res = await postWithWarmup(
@@ -655,6 +722,9 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
         (msg) => setNcScanStatus(msg),
       )
       setNcResult(res.data)
+      if (res.data?.in_radar_bounds) {
+        setForecastGif({ lat: ncLat, lon: ncLon, requestId: Date.now() })
+      }
       if ((res.data?.lag_mins ?? 0) > 75) {
         setRadarDown(true)
       }
@@ -807,6 +877,21 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
                 <p className="banner__head">{ncResult.summary}</p>
               </div>
               <NowcastSlots slots={ncResult.slots} />
+              {forecastGif && (
+                <div className="nc-forecast-card">
+                  <div className="nc-section-label">FORECAST RADAR · NEXT 1 HOUR</div>
+                  <ForecastRadarPlayer
+                    lat={forecastGif.lat}
+                    lon={forecastGif.lon}
+                    requestId={forecastGif.requestId}
+                  />
+                  <p className="nc-forecast-note">
+                    Live simulation behind the predictions above — each rain patch moves
+                    with its own measured velocity and fades with its decay trend.
+                    Blue circle = radar scan zone around you.
+                  </p>
+                </div>
+              )}
             </>
           )}
         </div>
