@@ -1,6 +1,7 @@
 # Garaj Baras - radar.py
 
 import os
+import re
 import threading
 import time
 import requests
@@ -12,6 +13,60 @@ GIF_SAVE_PATH = os.path.join(os.path.dirname(__file__), "delhi_radar.gif")
 FRAMES_FOLDER = os.path.join(os.path.dirname(__file__), "frames")
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+# HH:MM:SS tolerant of Tesseract artifacts: stray spaces around separators
+# ("08: 22:24Z") and colon misread as ';' or '.'
+_TIME_TOKEN = r'(\d{1,2})\s*[:;.]\s*(\d{2})\s*[:;.]\s*(\d{2})'
+
+
+def parse_radar_timestamp_text(text):
+    """
+    Parse OCR'd radar info-panel text into a tz-aware IST datetime, or None.
+
+    Tolerates the misreads we've actually seen from the IMD panel:
+      - stray whitespace around colons ('al 08: 22:24Z')
+      - ':' misread as ';' or '.'
+      - zero misread as letter 'O' (safe to normalize: Z/IST/UTC contain no O)
+      - trailing 'Z' of the UTC line misread as '2' or 'S'
+
+    Priority: UTC line (HH:MM:SSZ) > explicit IST line > any time token
+    (timezone chosen by presence of the word UTC).
+    """
+    if not text:
+        return None
+    up = text.upper().replace('O', '0')
+
+    def _hms(match):
+        h, m, s = (int(g) for g in match.groups())
+        if 0 <= h < 24 and 0 <= m < 60 and 0 <= s < 60:
+            return h, m, s
+        return None
+
+    def _to_ist(h, m, s, tz):
+        today = datetime.now(tz).date()
+        dt = datetime(today.year, today.month, today.day, h, m, s, tzinfo=tz)
+        return dt.astimezone(IST)
+
+    utc_match = re.search(_TIME_TOKEN + r'\s*[Z2S]', up)
+    if utc_match:
+        v = _hms(utc_match)
+        if v:
+            return _to_ist(*v, tz=timezone.utc)
+
+    ist_match = re.search(_TIME_TOKEN + r'\s*IST', up)
+    if ist_match:
+        v = _hms(ist_match)
+        if v:
+            return _to_ist(*v, tz=IST)
+
+    any_match = re.search(_TIME_TOKEN, up)
+    if any_match:
+        v = _hms(any_match)
+        if v:
+            return _to_ist(*v, tz=timezone.utc if 'UTC' in up else IST)
+
+    return None
+
 
 RADAR_TTL_SEC = 10 * 60  # 10 minutes
 _refresh_lock = threading.Lock()
@@ -114,8 +169,6 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
 
     frame_data = []
     try:
-        import re
-
         # OCR init (slow first time; cached by Tesseract/pytesseract)
         ocr_available = False
         pytesseract = None
@@ -151,9 +204,6 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
         # Pass 2: OCR last unique frame, save all unique frames as PNGs.
         # Perf: OCR is expensive (~hundreds of ms). We only need the last frame's
         # timestamp; the repair loop below back-fills the rest at cadence.
-        def valid_hms(hh, mm, ss):
-            return 0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60
-
         for idx, (full, frame_cropped) in enumerate(unique_frames):
             timestamp = None
             is_last = (idx == len(unique_frames) - 1)
@@ -175,60 +225,9 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
                         config='--psm 6'
                     ).strip()
 
-                    upper = text.upper()
-
-                    # Prefer UTC time; OCR sometimes misreads trailing Z as 2 or S.
-                    utc_match = re.search(
-                        r'(\d{1,2}):(\d{2}):(\d{2})\s*[Z2S]',
-                        upper
-                    )
-                    # IST line: anchored to "IST" keyword to avoid matching the UTC line
-                    ist_match = re.search(
-                        r'(\d{1,2}):(\d{2}):(\d{2})\s+IST',
-                        upper
-                    )
-
-                    if utc_match:
-                        h_t, m_t, s_t = map(int, utc_match.groups())
-                        if valid_hms(h_t, m_t, s_t):
-                            today = datetime.now(timezone.utc).date()
-                            dt_utc = datetime(
-                                today.year, today.month, today.day,
-                                h_t, m_t, s_t,
-                                tzinfo=timezone.utc
-                            )
-                            timestamp = dt_utc.astimezone(IST)
-                    elif ist_match:
-                        h_t, m_t, s_t = map(int, ist_match.groups())
-                        if valid_hms(h_t, m_t, s_t):
-                            today = datetime.now(IST).date()
-                            timestamp = datetime(
-                                today.year, today.month, today.day,
-                                h_t, m_t, s_t,
-                                tzinfo=IST
-                            )
-                    else:
-                        # Fallback: parse the first HH:MM:SS token.
-                        # Decide timezone by presence of the 'UTC' word.
-                        t_match = re.search(r'(\d{1,2}):(\d{2}):(\d{2})', upper)
-                        if t_match:
-                            h_t, m_t, s_t = map(int, t_match.groups())
-                            if valid_hms(h_t, m_t, s_t):
-                                today_utc = datetime.now(timezone.utc).date()
-                                today_ist = datetime.now(IST).date()
-                                if 'UTC' in upper:
-                                    dt_utc = datetime(
-                                        today_utc.year, today_utc.month, today_utc.day,
-                                        h_t, m_t, s_t,
-                                        tzinfo=timezone.utc
-                                    )
-                                    timestamp = dt_utc.astimezone(IST)
-                                else:
-                                    timestamp = datetime(
-                                        today_ist.year, today_ist.month, today_ist.day,
-                                        h_t, m_t, s_t,
-                                        tzinfo=IST
-                                    )
+                    timestamp = parse_radar_timestamp_text(text)
+                    if timestamp is None:
+                        print(f"OCR parse failed for last frame: {repr(text)}")
                 except Exception:
                     timestamp = None
 
@@ -407,35 +406,9 @@ def extract_timestamp_from_gif():
 
         print(f"OCR raw text: {repr(text)}")
 
-        # 1. Try UTC line: HH:MM:SSZ  (OCR sometimes misreads Z as 2 or S)
-        utc_match = re.search(
-            r'(\d{1,2}):(\d{2}):(\d{2})\s*[Zz2S]',
-            text,
-        )
-        if utc_match:
-            h, m, s = map(int, utc_match.groups())
-            today = datetime.now(timezone.utc).date()
-            dt_utc = datetime(
-                today.year, today.month, today.day,
-                h, m, s, tzinfo=timezone.utc
-            )
-            dt_ist = dt_utc.astimezone(IST)
-            print(f"Timestamp extracted (UTC->IST): {dt_ist.strftime('%H:%M:%S IST')}")
-            return dt_ist
-
-        # 2. Try IST line explicitly: HH:MM:SS IST
-        ist_match = re.search(
-            r'(\d{1,2}):(\d{2}):(\d{2})\s+[Ii][Ss][Tt]',
-            text
-        )
-        if ist_match:
-            h, m, s = map(int, ist_match.groups())
-            today = datetime.now(IST).date()
-            dt_ist = datetime(
-                today.year, today.month, today.day,
-                h, m, s, tzinfo=IST
-            )
-            print(f"Timestamp extracted (IST): {dt_ist.strftime('%H:%M:%S IST')}")
+        dt_ist = parse_radar_timestamp_text(text)
+        if dt_ist is not None:
+            print(f"Timestamp extracted: {dt_ist.strftime('%H:%M:%S IST')}")
             return dt_ist
 
         print("OCR failed - using 25 min fallback")
