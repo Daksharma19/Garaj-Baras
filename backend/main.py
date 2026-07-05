@@ -47,14 +47,15 @@ def _detect_radar(lat: float, lon: float) -> str:
     in_delhi  = _georef_delhi.is_within_radar(lat, lon)
     in_lck    = georef_lucknow.is_within_radar(lat, lon)
     in_patna  = georef_patna.is_within_radar(lat, lon)
-    # Bhopal disabled on Render free tier (512MB OOM) — re-enable on paid plan
-    # in_bhopal = georef_bhopal.is_within_radar(lat, lon)
+    # Re-enabled: bbox-compressed patch masks + LRU state eviction keep peak
+    # RSS flat regardless of radar count (was OOM on 512MB with full masks).
+    in_bhopal = georef_bhopal.is_within_radar(lat, lon)
 
     candidates = []
     if in_delhi:  candidates.append(('delhi',   haversine_km(lat, lon, 28.5562, 77.1000)))
     if in_lck:    candidates.append(('lucknow', haversine_km(lat, lon, 26.8467, 80.9462)))
     if in_patna:  candidates.append(('patna',   haversine_km(lat, lon, 25.5913, 85.0956)))
-    # if in_bhopal: candidates.append(('bhopal',  haversine_km(lat, lon, 23.2875, 77.3374)))
+    if in_bhopal: candidates.append(('bhopal',  haversine_km(lat, lon, 23.2875, 77.3374)))
 
     if not candidates:
         return 'delhi'   # fallback
@@ -237,6 +238,45 @@ def _is_fresh(cache: dict, ttl_sec: float) -> bool:
 
 
 DEFAULT_RADAR_LAG_MINS = 25.0
+
+# ── LRU radar-state eviction ──────────────────────────────────────────────────
+# Keep at most this many radar states fully loaded. Evicted radars rebuild
+# from the on-disk GIF on their next request (a few seconds of CPU), so peak
+# RSS stays flat no matter how many radars the app grows to.
+MAX_RADARS_IN_MEMORY = 2
+
+_HEAVY_STATE_KEYS = (
+    "patches", "decay_tracks", "roi_mask", "frame_data", "recent_frame_data",
+    "movement", "latest_frame", "clutter_mask", "latest_ts", "lag_info",
+)
+
+
+def _touch_radar_and_evict(name: str) -> None:
+    """Mark `name` most-recently-used; drop heavy state of radars beyond the cap."""
+    entries = {
+        "delhi":   (radar_cache,   _radar_state_lock,   _delhi_ready),
+        "lucknow": (lucknow_cache, _lucknow_state_lock, _lucknow_ready),
+        "patna":   (patna_cache,   _patna_state_lock,   _patna_ready),
+        "bhopal":  (bhopal_cache,  _bhopal_state_lock,  _bhopal_ready),
+    }
+    cache, lock, _evt = entries.get(name, entries["delhi"])
+    with lock:
+        cache["last_used"] = time.time()
+
+    loaded = [(n, c, l, e) for n, (c, l, e) in entries.items() if c.get("last_loaded")]
+    loaded.sort(key=lambda t: t[1].get("last_used") or t[1].get("last_loaded") or 0,
+                reverse=True)
+    for n, c, l, e in loaded[MAX_RADARS_IN_MEMORY:]:
+        with l:
+            for k in _HEAVY_STATE_KEYS:
+                c[k] = None
+            c["last_loaded"] = None
+        # Back to cold-start semantics: the next request for this radar must
+        # BLOCK on a rebuild instead of being served the gutted state via the
+        # stale-cache fast path.
+        e.clear()
+        gc.collect()
+        print(f"{n} radar: state evicted (LRU, cap={MAX_RADARS_IN_MEMORY})")
 
 def _fresh_lag_info(state: dict) -> dict:
     """
@@ -819,6 +859,7 @@ def predict_waypoints(payload: PredictWaypointsRequest):
 
         _latlon_to_pixel = _georef.latlon_to_pixel
         _is_within_radar = _georef.is_within_radar
+        _touch_radar_and_evict(radar)
 
         clutter_mask = state["clutter_mask"]
         dx, dy, dir_from, dir_to, speed = state["movement"]
@@ -970,6 +1011,7 @@ def predict_rain(route: RouteRequest):
 
         # Load radar state with TTL lazy-cache (no download/re-extract if GIF fresh)
         state = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        _touch_radar_and_evict("delhi")
         clutter_mask = state["clutter_mask"]
         dx, dy, dir_from, dir_to, speed = state["movement"]
         latest_frame = state["latest_frame"]
@@ -1099,6 +1141,7 @@ def nowcast_location(req: NowcastRequest):
 
         _latlon_to_pixel = _georef.latlon_to_pixel
         _is_within_radar = _georef.is_within_radar
+        _touch_radar_and_evict(radar)
 
         if not _is_within_radar(req.lat, req.lon):
             return {

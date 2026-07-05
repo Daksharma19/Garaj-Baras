@@ -572,17 +572,18 @@ def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
     patch_list = []
     leftover_mask = None
     if patches:
-        union = None
+        from bbox_mask import as_bbox_mask
         for p in patches:
             m = p.get("mask")
             if m is None:
                 continue
-            mb = m.astype(bool)
             patch_list.append((float(p.get("dx_10", 0.0)),
                                float(p.get("dy_10", 0.0)),
-                               mb))
-            union = mb.copy() if union is None else (union | mb)
+                               as_bbox_mask(m)))
         if patch_list:
+            union = np.zeros(base_rain_mask.shape[:2], dtype=bool)
+            for _pdx, _pdy, bm in patch_list:
+                bm.paint_into(union)
             leftover_mask = (base_rain_mask > 0) & ~union
 
     def rain_source_at(px, py, t_mins):
@@ -591,7 +592,7 @@ def check_route_rain(waypoints_pixels, dx, dy, latest_frame_path,
         for pdx, pdy, pmask in patch_list:
             sx = int(round(px - pdx * shifts))
             sy = int(round(py - pdy * shifts))
-            if _mask_hit_no_clamp(pmask, sx, sy, radius=1):
+            if pmask.hit(sx, sy, radius=1):
                 return True, sx, sy
         sx = int(round(px - dx * shifts))
         sy = int(round(py - dy * shifts))

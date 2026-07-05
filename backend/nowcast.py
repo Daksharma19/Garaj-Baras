@@ -220,13 +220,8 @@ def _find_patch_track(orig_px: float, orig_py: float, patch_tracks) -> Optional[
     for track in (patch_tracks or []):
         if track.mask_latest is None:
             continue
-        h, w = track.mask_latest.shape
-        for dy in range(-10, 11):
-            for dx in range(-10, 11):
-                ny = int(orig_py) + dy
-                nx = int(orig_px) + dx
-                if 0 <= ny < h and 0 <= nx < w and track.mask_latest[ny, nx]:
-                    return track
+        if track.mask_latest.hit(int(orig_px), int(orig_py), radius=10):
+            return track
     return None
 
 

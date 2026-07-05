@@ -33,9 +33,17 @@ def isolate_rain(frame_path, clutter_mask=None, tolerance=65):
     h, w, _ = img.shape
     flat = img.reshape(-1, 3)  # (H*W, 3)
 
-    diff = flat[:, None, :] - RAIN_PALETTE[None, :, :]       # (N, P, 3)
-    dist2 = np.sum(diff.astype(np.int32) ** 2, axis=2)       # (N, P)
-    is_rain = dist2.min(axis=1) <= (tolerance ** 2)           # (N,)
+    # Chunked nearest-palette distance: the full (N, P, 3) int32 tensor peaks
+    # at ~35 MB per call, which matters on 512 MB dynos. Row bands keep the
+    # transient under ~2 MB with identical results.
+    tol2 = tolerance ** 2
+    is_rain = np.empty(flat.shape[0], dtype=bool)
+    CHUNK = 16384
+    for i in range(0, flat.shape[0], CHUNK):
+        part = flat[i:i + CHUNK]
+        diff = part[:, None, :] - RAIN_PALETTE[None, :, :]    # (chunk, P, 3)
+        dist2 = np.sum(diff.astype(np.int32) ** 2, axis=2)    # (chunk, P)
+        is_rain[i:i + CHUNK] = dist2.min(axis=1) <= tol2
 
     rain_mask = np.where(is_rain, 255, 0).astype(np.uint8).reshape(h, w)
 

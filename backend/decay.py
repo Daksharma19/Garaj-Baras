@@ -17,6 +17,8 @@ import cv2
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
+from bbox_mask import BBoxMask
+
 
 # ── dBZ threshold below which a patch is considered gone ──────────────────────
 DEAD_DBZ_THRESHOLD = 8      # < 8 dBZ = effectively no rain
@@ -39,7 +41,7 @@ class PatchTrack:
     frame_indices: List[int] = field(default_factory=list)
     centroids: List[Tuple[float, float]] = field(default_factory=list)
     mean_dbzs: List[float] = field(default_factory=list)
-    mask_latest: Optional[np.ndarray] = None   # bool mask (H×W) in last frame
+    mask_latest: Optional[BBoxMask] = None   # blob mask in last frame (bbox crop)
     decay_rate: float = 0.0     # dBZ per 10-min frame (negative = dying)
     dbz_latest: float = 0.0
     status: str = "stable"      # stable | weakening | dying | dead
@@ -60,15 +62,15 @@ def _frame_blobs(rain_mask: np.ndarray, rgb_arr: np.ndarray) -> List[dict]:
         area = int(stats[lbl, cv2.CC_STAT_AREA])
         if area < MIN_BLOB_AREA_PX:
             continue
-        mask = (label_img == lbl)
-        ys, xs = np.where(mask)
+        bm = BBoxMask.from_labels(label_img, lbl, stats[lbl])
+        ys, xs = bm.nonzero_full()
         dbzs = [rgb_to_dbz(int(rgb_arr[y, x, 0]),
                             int(rgb_arr[y, x, 1]),
                             int(rgb_arr[y, x, 2])) for y, x in zip(ys, xs)]
         mean_dbz = float(np.mean([d for d in dbzs if d > 0]) if any(d > 0 for d in dbzs) else 0.0)
         cx, cy = float(centroids[lbl][0]), float(centroids[lbl][1])
         blobs.append({"centroid": (cx, cy), "mean_dbz": mean_dbz,
-                      "area_px": area, "mask": mask})
+                      "area_px": area, "mask": bm})
     return blobs
 
 
@@ -235,8 +237,7 @@ def get_decay_status_at_pixel(
     for track in patch_tracks:
         if track.mask_latest is None:
             continue
-        h, w = track.mask_latest.shape
-        if 0 <= py < h and 0 <= px < w and track.mask_latest[py, px]:
+        if track.mask_latest.hit(px, py, radius=0):
             proj = project_dbz(track, eta_mins)
             status = _classify(proj, track.decay_rate)
             return {

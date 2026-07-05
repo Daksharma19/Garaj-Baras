@@ -8,6 +8,7 @@ from PIL import Image
 from georef import IMAGE_WIDTH, IMAGE_HEIGHT, latlon_to_pixel, pixel_to_latlon, CENTER_LAT, CENTER_LON
 from optical_flow import isolate_rain, get_direction_string
 from fuzzy import COLOR_TABLE
+from bbox_mask import BBoxMask
 
 _roi_cache = {}
 _roi_cache_generic = {}
@@ -92,8 +93,8 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
     visible in the last frame) naturally get a dampened velocity because earlier
     pairs show near-zero flow at those pixels.
 
-    Returns a list of patch dicts. Each dict includes a 'mask' key (numpy bool
-    array) that must be stripped before JSON serialization (_patch_to_public).
+    Returns a list of patch dicts. Each dict includes a 'mask' key (BBoxMask)
+    that must be stripped before JSON serialization (_patch_to_public).
     """
     if len(frame_paths) < 2:
         return []
@@ -133,10 +134,14 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
 
     patches = []
     for comp_id in range(1, int(labels.max()) + 1):
-        px_mask = labels == comp_id
-        area = int(px_mask.sum())
+        area = int(_stats[comp_id, cv2.CC_STAT_AREA])
         if area < min_area_px:
             continue
+
+        bm = BBoxMask.from_labels(labels, comp_id, _stats[comp_id])
+        bx0, by0 = bm.x0, bm.y0
+        bh, bw = bm.crop.shape
+        crop = bm.crop
 
         # centroids[comp_id] = (cx_col, cy_row)
         cx_f = float(centroids[comp_id][0])
@@ -158,8 +163,8 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
             if old_mask[r0:r1, c0:c1].any():
                 valid_flows.append(flows[k])
 
-        dx = float(np.mean([np.mean(f[:, :, 0][px_mask]) for f in valid_flows]))
-        dy = float(np.mean([np.mean(f[:, :, 1][px_mask]) for f in valid_flows]))
+        dx = float(np.mean([np.mean(f[by0:by0 + bh, bx0:bx0 + bw, 0][crop]) for f in valid_flows]))
+        dy = float(np.mean([np.mean(f[by0:by0 + bh, bx0:bx0 + bw, 1][crop]) for f in valid_flows]))
 
         magnitude = (dx ** 2 + dy ** 2) ** 0.5
         speed_kmh = (magnitude * _KM_PER_PX / gap) * 60.0
@@ -177,7 +182,7 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
             else:
                 in_ncr = False
 
-        max_dbz = _patch_max_dbz(img_rgb, px_mask)
+        max_dbz = _patch_max_dbz(img_rgb[by0:by0 + bh, bx0:bx0 + bw], crop)
         _ptl = pixel_to_latlon_fn if pixel_to_latlon_fn is not None else pixel_to_latlon
         lat, lon = _ptl(int(round(cx_f)), int(round(cy_f)))
 
@@ -193,7 +198,7 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
             "direction_to": direction_to,
             "max_dbz": max_dbz,
             "in_ncr": in_ncr,
-            "mask": px_mask,
+            "mask": bm,   # BBoxMask — tight crop, ~1/1000th of a full-frame array
         })
 
     return patches
