@@ -165,15 +165,30 @@ CROP_BOTTOM = 650          # top=125 → height 525
 
 def ocr_timestamp_from_image(full_rgb_img, ocr_crop=None):
     """
-    OCR the info-panel timestamp from a FULL (uncropped) radar image.
+    Read the info-panel timestamp from a FULL (uncropped) radar image.
     Returns a tz-aware IST datetime or None. Never raises.
+
+    Primary: deterministic digit template matching (timestamp_match) — exact
+    on the fixed IMD font, no external binary, works on Render. Fallback:
+    Tesseract OCR where available (validated 58/58 agreement; the matcher
+    additionally read 6 frames Tesseract garbled).
     """
+    box = ocr_crop if ocr_crop is not None else (635, 215, 875, 355)
+
+    try:
+        from timestamp_match import match_timestamp
+        ts = match_timestamp(full_rgb_img, box)
+        if ts is not None:
+            return ts
+    except Exception:
+        pass
+
     try:
         import pytesseract
         from PIL import ImageEnhance
-        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        if os.name == "nt":
+            pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-        box = ocr_crop if ocr_crop is not None else (635, 215, 875, 355)
         ts_crop = full_rgb_img.crop(box)
         w, h = ts_crop.size
         ts_ready = ImageEnhance.Contrast(
@@ -256,17 +271,6 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
 
     frame_data = []
     try:
-        # OCR init (slow first time; cached by Tesseract/pytesseract)
-        ocr_available = False
-        pytesseract = None
-        try:
-            import pytesseract as _pytesseract
-            pytesseract = _pytesseract
-            pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-            ocr_available = True
-        except Exception:
-            ocr_available = False
-
         # Pass 1: decode every GIF frame and drop byte-identical consecutive duplicates.
         # IMD regularly pads the GIF with repeated frames; feeding them to optical flow
         # produces zero-motion vectors and wastes OCR time.
@@ -296,11 +300,9 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
         ocr_fail = 0
         timestamped = []   # (full, crop, ts)
         for idx, (full, frame_cropped) in enumerate(unique_frames):
-            timestamp = None
-            if ocr_available and pytesseract is not None:
-                timestamp = ocr_timestamp_from_image(full, ocr_crop)
-                if timestamp is None:
-                    ocr_fail += 1
+            timestamp = ocr_timestamp_from_image(full, ocr_crop)
+            if timestamp is None:
+                ocr_fail += 1
             timestamped.append((full, frame_cropped, timestamp))
         if ocr_fail:
             print(f"OCR failed on {ocr_fail}/{len(unique_frames)} frame(s)")
@@ -419,63 +421,21 @@ def refresh_frames_if_stale(
 
 def extract_timestamp_from_gif():
     """
-    Extracts timestamp directly from radar GIF.
-    Timestamp is at exact location:
-    X: 614-820, Y: 230-310
-    In full 880x720 frame (BEFORE cropping)
+    Reads the timestamp of the LAST frame of the Delhi GIF on disk.
+    Template matching first, Tesseract fallback (see ocr_timestamp_from_image).
     """
     try:
-        import pytesseract
-    except ImportError:
-        # Render Linux won't have pytesseract installed (or it may be missing).
-        print("pytesseract not available - using fallback")
-        return None
-
-    import re
-    from datetime import datetime, timezone, timedelta
-    from PIL import ImageEnhance
-
-    IST = timezone(timedelta(hours=5, minutes=30))
-
-    try:
-        # On Windows we can point to the bundled/installed tesseract binary.
-        # On Render Linux there is no binary; in that case the OCR call will fail,
-        # and we must fall back safely.
-        if os.name == "nt":
-            pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-
-        # Load GIF and get LAST frame (most recent)
         gif = Image.open(GIF_SAVE_PATH)
         frames = list(ImageSequence.Iterator(gif))
         last_frame = frames[-1].convert('RGB')
-
-        # Crop the right info panel — wide enough to capture full timestamp text
-        ts_crop = last_frame.crop((635, 215, 875, 355))
-
-        # Scale up 3x for better OCR accuracy
-        w, h = ts_crop.size
-        ts_large = ts_crop.resize((w * 3, h * 3), Image.LANCZOS)
-        ts_gray = ts_large.convert('L')
-        enhancer = ImageEnhance.Contrast(ts_gray)
-        ts_ready = enhancer.enhance(2.0)
-
-        # Read text
-        text = pytesseract.image_to_string(
-            ts_ready,
-            config='--psm 6'
-        ).strip()
-
-        print(f"OCR raw text: {repr(text)}")
-
-        dt_ist = parse_radar_timestamp_text(text)
+        dt_ist = ocr_timestamp_from_image(last_frame)
         if dt_ist is not None:
             print(f"Timestamp extracted: {dt_ist.strftime('%H:%M:%S IST')}")
             return dt_ist
-
-        print("OCR failed - using 25 min fallback")
+        print("Timestamp read failed - using 25 min fallback")
         return None
     except Exception as e:
-        print(f"OCR failed: {e} - using fallback")
+        print(f"Timestamp read failed: {e} - using fallback")
         return None
 
 

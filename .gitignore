@@ -33,3 +33,6 @@ Thumbs.db
 
 # Prediction verification database (runtime data)
 backend/verification.db*
+
+# Timestamp glyph templates (required at runtime, tiny)
+!backend/ts_templates/*.png
