@@ -27,6 +27,7 @@ from prediction import (generate_waypoints, check_route_rain,   # type: ignore
 from georef import latlon_to_pixel, is_within_radar  # type: ignore
 from fuzzy import enrich_results  # type: ignore
 from decay import compute_decay_tracks, get_decay_status_at_pixel  # type: ignore
+import verification  # type: ignore
 from patches import (  # type: ignore
     compute_patch_motion,
     score_patches_for_route,
@@ -431,6 +432,7 @@ def _do_lucknow_refresh(ttl_sec: float, force: bool = False) -> None:
             all_frame_data = radar_lucknow.extract_frames(lk_gif, radar_lucknow.FRAMES_FOLDER) if gif_fresh else radar_lucknow.get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        verification.verify_pending("lucknow", all_frame_data, isolate_rain, clutter_mask=None)
         del all_frame_data
         clutter_mask = None
         gc.collect()
@@ -526,6 +528,7 @@ def _do_patna_refresh(ttl_sec: float, force: bool = False) -> None:
             all_frame_data = radar_patna.extract_frames(ptn_gif, radar_patna.FRAMES_FOLDER) if gif_fresh else radar_patna.get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        verification.verify_pending("patna", all_frame_data, isolate_rain, clutter_mask=None)
         del all_frame_data
         clutter_mask = None
         gc.collect()
@@ -621,6 +624,7 @@ def _do_bhopal_refresh(ttl_sec: float, force: bool = False) -> None:
             all_frame_data = radar_bhopal.extract_frames(bhp_gif, radar_bhopal.FRAMES_FOLDER) if gif_fresh else radar_bhopal.get_all_frames()
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        verification.verify_pending("bhopal", all_frame_data, isolate_rain, clutter_mask=None)
         del all_frame_data
         clutter_mask = None
         gc.collect()
@@ -969,6 +973,23 @@ def predict_waypoints(payload: PredictWaypointsRequest):
                 e["projected_dbz"] = None
                 e["current_dbz_patch"] = None
 
+        # Log every waypoint claim for automated hit-rate verification
+        try:
+            verification.log_predictions(
+                radar, "route",
+                [{
+                    "lat": e["lat"], "lon": e["lon"],
+                    "px": pxy[0], "py": pxy[1],
+                    "eta_mins": e["eta_mins"],
+                    "rain_expected": e["rain_expected"],
+                    "label": e["label"], "dbz": e["dbz"],
+                    "confidence": e["confidence"],
+                } for e, pxy in zip(enriched, waypoints_pixels)],
+                lag_mins=lag_info.get("lag_mins"),
+            )
+        except Exception as _ve:
+            print(f"verification logging failed: {_ve}")
+
         rain_wps = [e for e in enriched if e["rain_expected"]]
         clear_wps = [e for e in enriched if not e["rain_expected"]]
         first_rain = next((e for e in enriched if e["rain_expected"]), None)
@@ -1195,6 +1216,24 @@ def nowcast_location(req: NowcastRequest):
 
         as_of = latest_ts.strftime("%H:%M IST") if latest_ts else "unknown"
 
+        # Log every slot claim for automated hit-rate verification
+        try:
+            verification.log_predictions(
+                radar, "nowcast",
+                [{
+                    "lat": req.lat, "lon": req.lon,
+                    "px": user_px, "py": user_py,
+                    "eta_mins": s["slot_mins"],
+                    "rain_expected": s["has_rain"],
+                    "label": s.get("intensity"),
+                    "dbz": s.get("projected_dbz"),
+                    "confidence": s.get("arrival_confidence"),
+                } for s in slots],
+                lag_mins=lag_mins,
+            )
+        except Exception as _ve:
+            print(f"verification logging failed: {_ve}")
+
         first_rain = next((s for s in slots if s["has_rain"]), None)
         if not first_rain:
             summary = "No rains for the next 2 hours"
@@ -1316,6 +1355,24 @@ def nowcast_forecast_frames(lat: float, lon: float):
         raise HTTPException(
             status_code=500,
             detail=f"Forecast frames failed: {str(e)}\n{traceback.format_exc()}",
+        )
+
+
+# ENDPOINT: Verified prediction accuracy (automated hit-rate tracking)
+
+@app.get("/stats/accuracy")
+def stats_accuracy(days: int = 30):
+    """
+    Aggregated verified accuracy of past predictions, graded automatically
+    against later radar frames. POD/FAR/CSI computed from outcome counts.
+    """
+    try:
+        days = max(1, min(int(days), 365))
+        return verification.accuracy_stats(days=days)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Accuracy stats failed: {str(e)}\n{traceback.format_exc()}",
         )
 
 

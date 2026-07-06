@@ -30,3 +30,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Prediction verification database (runtime data)
+backend/verification.db*
