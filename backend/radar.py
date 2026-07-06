@@ -8,9 +8,19 @@ import requests
 from PIL import Image, ImageSequence
 from datetime import datetime, timezone, timedelta
 
-GIF_URL = "https://mausam.imd.gov.in/Radar/animation/Converted/DLH_MAXZ.gif"
+# DELHI_MAXZ and DLH_MAXZ are BOTH products of DWRDELHI(PALAM); DELHI_MAXZ is
+# the actively maintained one (18 frames, fresh), DLH_MAXZ rebuilds lazily and
+# was observed lagging it by 60+ minutes.
+GIF_URL = "https://mausam.imd.gov.in/Radar/animation/Converted/DELHI_MAXZ.gif"
 GIF_SAVE_PATH = os.path.join(os.path.dirname(__file__), "delhi_radar.gif")
 FRAMES_FOLDER = os.path.join(os.path.dirname(__file__), "frames")
+
+# IMD's single "current radar" image (same 880x720 MAX-Z product) updates
+# every ~10 min, while the animation GIF is rebuilt lazily and can lag it by
+# an hour. After extracting GIF frames we fetch this and append it as the
+# newest frame when its OCR timestamp is strictly newer (never duplicated).
+CURRENT_IMG_URL = "https://mausam.imd.gov.in/Radar/caz_delhi.gif"
+CURRENT_IMG_SAVE_PATH = os.path.join(os.path.dirname(__file__), "delhi_current.gif")
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -153,6 +163,83 @@ CROP_RIGHT  = 527          # left=0 → width 527 (Delhi radar circle, matches g
 CROP_BOTTOM = 650          # top=125 → height 525
 
 
+def ocr_timestamp_from_image(full_rgb_img, ocr_crop=None):
+    """
+    OCR the info-panel timestamp from a FULL (uncropped) radar image.
+    Returns a tz-aware IST datetime or None. Never raises.
+    """
+    try:
+        import pytesseract
+        from PIL import ImageEnhance
+        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+        box = ocr_crop if ocr_crop is not None else (635, 215, 875, 355)
+        ts_crop = full_rgb_img.crop(box)
+        w, h = ts_crop.size
+        ts_ready = ImageEnhance.Contrast(
+            ts_crop.resize((w * 3, h * 3), Image.LANCZOS).convert('L')
+        ).enhance(2.0)
+        text = pytesseract.image_to_string(ts_ready, config='--psm 6').strip()
+        return parse_radar_timestamp_text(text)
+    except Exception:
+        return None
+
+
+def augment_with_current_image(frame_data, output_folder,
+                               current_url=CURRENT_IMG_URL,
+                               current_save_path=CURRENT_IMG_SAVE_PATH,
+                               ocr_crop=None,
+                               crop_box=(0, CROP_TOP, CROP_RIGHT, CROP_BOTTOM)):
+    """
+    IMD's "current radar" image often updates before the animation GIF.
+    If its OCR timestamp is STRICTLY newer than the last GIF frame, crop and
+    append it as the newest frame. Duplicates (same timestamp or identical
+    pixels) are skipped; an unreadable timestamp skips augmentation entirely —
+    we never guess ordering.
+
+    Returns possibly-extended frame_data.
+    """
+    if not frame_data:
+        return frame_data
+    try:
+        ok, _ = download_gif(current_url, current_save_path)
+        if not ok:
+            return frame_data
+
+        cur_full = Image.open(current_save_path).convert('RGB')
+        cur_crop = cur_full.crop(crop_box)
+
+        # Duplicate content check against the last extracted frame
+        last_path, last_ts = frame_data[-1]
+        try:
+            last_img = Image.open(last_path).convert('RGB')
+            if cur_crop.tobytes() == last_img.tobytes():
+                return frame_data
+        except Exception:
+            pass
+
+        cur_ts = ocr_timestamp_from_image(cur_full, ocr_crop)
+        if cur_ts is None:
+            # Without a readable timestamp we can't order it honestly — skip.
+            print("current-image: timestamp unreadable, skipping augmentation")
+            return frame_data
+
+        if last_ts is not None and cur_ts <= last_ts + timedelta(minutes=1):
+            # Equal or older than the animation's last frame — GIF wins.
+            return frame_data
+
+        idx = len(frame_data)
+        frame_path = os.path.join(output_folder, f"frame_{idx:02d}.png")
+        cur_crop.save(frame_path)
+        gain = (cur_ts - last_ts).total_seconds() / 60.0 if last_ts else float('nan')
+        print(f"current-image: appended as frame {idx:02d} @ "
+              f"{cur_ts.strftime('%H:%M:%S IST')} (+{gain:.0f} min vs animation)")
+        return frame_data + [(frame_path, cur_ts)]
+    except Exception as e:
+        print(f"current-image augmentation failed: {e}")
+        return frame_data
+
+
 def extract_frames(gif_path, output_folder, ocr_crop=None):
     """
     Extract all frames from animated GIF.
@@ -201,88 +288,62 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
         if skipped:
             print(f"Dropped {skipped} byte-identical duplicate frame(s) ({len(unique_frames)} unique)")
 
-        # Pass 2: OCR last unique frame, save all unique frames as PNGs.
-        # Perf: OCR is expensive (~hundreds of ms). We only need the last frame's
-        # timestamp; the repair loop below back-fills the rest at cadence.
+        # Pass 2: OCR EVERY unique frame. IMD's animation cadence is nominally
+        # 10 min but slips badly (observed gaps of 20 and 70 min in one GIF),
+        # so back-filling from the last frame at an assumed cadence can
+        # mislabel frames by up to an hour. Real per-frame OCR keeps motion
+        # speeds honest; ~15 frames costs a few seconds in a background thread.
+        ocr_fail = 0
+        timestamped = []   # (full, crop, ts)
         for idx, (full, frame_cropped) in enumerate(unique_frames):
             timestamp = None
-            is_last = (idx == len(unique_frames) - 1)
+            if ocr_available and pytesseract is not None:
+                timestamp = ocr_timestamp_from_image(full, ocr_crop)
+                if timestamp is None:
+                    ocr_fail += 1
+            timestamped.append((full, frame_cropped, timestamp))
+        if ocr_fail:
+            print(f"OCR failed on {ocr_fail}/{len(unique_frames)} frame(s)")
 
-            if is_last and ocr_available and pytesseract is not None:
-                try:
-                    from PIL import ImageEnhance
+        # Reject non-monotonic reads (an OCR misread, not time travel) and
+        # drop same-timestamp duplicates (IMD re-renders; keep the later one).
+        last_ok = None
+        for i, (full, crop, ts) in enumerate(timestamped):
+            if ts is None:
+                continue
+            if last_ok is not None and ts < last_ok:
+                timestamped[i] = (full, crop, None)
+                continue
+            last_ok = ts
+        deduped = []
+        for full, crop, ts in timestamped:
+            if (ts is not None and deduped and deduped[-1][2] is not None
+                    and ts == deduped[-1][2]):
+                deduped[-1] = (full, crop, ts)   # later render wins
+                continue
+            deduped.append((full, crop, ts))
 
-                    _ocr_box = ocr_crop if ocr_crop is not None else (635, 215, 875, 355)
-                    ts_crop = full.crop(_ocr_box)
-                    w, h = ts_crop.size
-                    ts_large = ts_crop.resize((w * 3, h * 3), Image.LANCZOS)
-                    ts_gray = ts_large.convert('L')
-                    enhancer = ImageEnhance.Contrast(ts_gray)
-                    ts_ready = enhancer.enhance(2.0)
+        # Fill ONLY frames whose OCR failed, anchored to the nearest valid
+        # neighbor at the nominal 10-min step. Valid reads are trusted as-is
+        # even when their gaps are irregular.
+        assumed_step_mins = 10.0
+        ts_list = [ts for (_f, _c, ts) in deduped]
+        n = len(ts_list)
+        for i in range(n - 2, -1, -1):          # backward from next valid
+            if ts_list[i] is None and ts_list[i + 1] is not None:
+                ts_list[i] = ts_list[i + 1] - timedelta(minutes=assumed_step_mins)
+        for i in range(1, n):                    # forward from prev valid
+            if ts_list[i] is None and ts_list[i - 1] is not None:
+                ts_list[i] = ts_list[i - 1] + timedelta(minutes=assumed_step_mins)
 
-                    text = pytesseract.image_to_string(
-                        ts_ready,
-                        config='--psm 6'
-                    ).strip()
-
-                    timestamp = parse_radar_timestamp_text(text)
-                    if timestamp is None:
-                        print(f"OCR parse failed for last frame: {repr(text)}")
-                except Exception:
-                    timestamp = None
-
-            frame_filename = f"frame_{idx:02d}.png"
-            frame_path = os.path.join(output_folder, frame_filename)
+        for idx, (full, frame_cropped, _ts) in enumerate(deduped):
+            frame_path = os.path.join(output_folder, f"frame_{idx:02d}.png")
             frame_cropped.save(frame_path)
-
-            frame_data.append((frame_path, timestamp))
-
+            frame_data.append((frame_path, ts_list[idx]))
             if idx == 0:
                 print("Delhi crop frame size: %s" % (frame_cropped.size,))
     except Exception as e:
         print(f"Error extracting frames: {e}")
-
-    # Post-process timestamps to make them usable for motion estimation.
-    # OCR can occasionally misread minutes/hours and create huge or zero gaps,
-    # which would otherwise cause optical-flow to skip too many frame pairs.
-    # IMD radar scans are ~10 minutes apart, so we enforce a ~10-min cadence.
-    assumed_step_mins = 10.0
-    try:
-        timestamps = [ts for (_fp, ts) in frame_data]
-        if any(ts is not None for ts in timestamps):
-            # Find last frame with a timestamp
-            last_valid = max(i for i, ts in enumerate(timestamps) if ts is not None)
-
-            # Backward fill/repair up to first frame
-            for i in range(last_valid - 1, -1, -1):
-                next_ts = timestamps[i + 1]
-                if next_ts is None:
-                    continue
-                if timestamps[i] is None:
-                    timestamps[i] = next_ts - timedelta(minutes=assumed_step_mins)
-                    continue
-                gap_mins = (next_ts - timestamps[i]).total_seconds() / 60.0
-                # Accept only reasonable gaps; otherwise enforce ~10 minutes
-                if gap_mins < 5 or gap_mins > 20:
-                    timestamps[i] = next_ts - timedelta(minutes=assumed_step_mins)
-
-            # Forward fill/repair after last_valid
-            for i in range(last_valid + 1, len(timestamps)):
-                prev_ts = timestamps[i - 1]
-                if prev_ts is None:
-                    continue
-                if timestamps[i] is None:
-                    timestamps[i] = prev_ts + timedelta(minutes=assumed_step_mins)
-                    continue
-                gap_mins = (timestamps[i] - prev_ts).total_seconds() / 60.0
-                if gap_mins < 5 or gap_mins > 20:
-                    timestamps[i] = prev_ts + timedelta(minutes=assumed_step_mins)
-
-            # Write repaired timestamps back
-            frame_data = [(fp, timestamps[i]) for i, (fp, _ts) in enumerate(frame_data)]
-    except Exception:
-        # If repair fails, keep original OCR timestamps.
-        pass
 
     for i, (_fp, ts) in enumerate(frame_data):
         ts_str = ts.strftime('%H:%M:%S') if ts else 'Unknown'

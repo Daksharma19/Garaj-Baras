@@ -64,8 +64,10 @@ FRESH_POPUP_VELOCITY_THRESH: float = 0.3
 # climatological decay instead. Tracked patches (>= 2 observations) are NEVER
 # touched by this — their measured decay_rate (≈0 for a consistent mover) wins.
 NEW_CELL_DECAY_DBZ_PER_10MIN: float = -2.5
-# Beyond this horizon a never-observed-moving cell is not asserted as rain
-NEW_CELL_MAX_ASSERT_MINS: float = 60.0
+# A never-observed-moving cell is asserted for THREE checkpoints only
+# (now, +15, +30). Beyond that, only tracked motion / measured decay logic
+# may claim rain — a pop-up we've never seen move earns no longer horizon.
+NEW_CELL_MAX_ASSERT_MINS: float = 30.0
 # Projected dBZ below this → treat the new cell as rained out
 NEW_CELL_MIN_DBZ: float = 10.0
 
@@ -403,10 +405,29 @@ def compute_nowcast_slots(
                 # _track_has_history case above.
                 proj_dbz, decay_status, has_rain = _new_cell_projection(raw, eff, t)
 
+        # ── 3b. Background rain override (slot 0 only) ────────────────────────
+        # If the latest frame OBSERVES rain at the user's location, "now" must
+        # say rain — light background drizzle is real weather, and neither the
+        # thresholds above nor a fast global vector may erase an observation.
+        is_observed_now = False
+        if t == 0 and not has_rain and _is_rain_near(rain_mask, user_px, user_py, radius):
+            raw = _sample_raw_dbz(rain_mask, rgb_arr, user_px, user_py, radius)
+            if raw > 0:
+                has_rain = True
+                is_observed_now = True
+                proj_dbz = raw
+                track = _find_patch_track(user_px, user_py, patch_tracks)
+                decay_status = (_classify(raw, track.decay_rate)
+                                if _track_has_history(track) else "stable")
+
         # ── 4. Two separate scores ────────────────────────────────────────────
         # arrival_confidence: geometric + temporal — "will it reach me?"
         # intensity:          dBZ label           — "how heavy is the rain?"
-        arr_conf = arrival_confidence(t, decay_status, is_patch_hit, patch_dist_px) if has_rain else 0
+        if is_observed_now:
+            # Not a projection — the radar sees it (modulo lag)
+            arr_conf = 90
+        else:
+            arr_conf = arrival_confidence(t, decay_status, is_patch_hit, patch_dist_px) if has_rain else 0
 
         if arr_conf < MIN_PROBABILITY:
             has_rain = False
@@ -425,7 +446,9 @@ def compute_nowcast_slots(
             "intensity": intensity_label,     # "how heavy?" IMD label
             "projected_dbz": round(proj_dbz, 1),
             "decay_status": decay_status,
-            "source": "patch" if is_patch_hit else ("fallback" if has_rain else "none"),
+            "source": ("observed" if is_observed_now
+                       else "patch" if is_patch_hit
+                       else "fallback" if has_rain else "none"),
         })
 
     return slots

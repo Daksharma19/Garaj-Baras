@@ -325,7 +325,17 @@ def _do_delhi_refresh(ttl_sec: float, force: bool = False) -> None:
             from radar import extract_frames, FRAMES_FOLDER as _FF  # type: ignore
             all_frame_data = extract_frames(GIF_SAVE_PATH, _FF) if gif_fresh else get_all_frames()
 
+        # IMD's single "current radar" image often updates before the
+        # animation GIF (observed 60 min newer). Append it as the newest
+        # frame when its OCR timestamp is strictly newer — never duplicated.
+        try:
+            from radar import augment_with_current_image, FRAMES_FOLDER as _FF2  # type: ignore
+            all_frame_data = augment_with_current_image(all_frame_data, _FF2)
+        except Exception as _ae:
+            print(f"Delhi current-image augmentation failed: {_ae}")
+
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        verification.verify_pending("delhi", all_frame_data, isolate_rain, clutter_mask=None)
         del all_frame_data
         clutter_mask = None
         gc.collect()

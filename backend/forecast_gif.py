@@ -25,7 +25,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_DECAY_DBZ_PER_10MIN,
-                     NEW_CELL_MIN_DBZ, _find_track_for_patch)
+                     NEW_CELL_MIN_DBZ, NEW_CELL_MAX_ASSERT_MINS,
+                     _find_track_for_patch)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -35,12 +36,13 @@ UPSCALE = 2
 MIN_FADE = 0.30  # never fade surviving rain below this visibility
 
 
-def _patch_fade(patch, tracks, eff_mins):
+def _patch_fade(patch, tracks, eff_mins, slot_mins=0.0):
     """
     Visibility multiplier for a patch at eff_mins after the frame time.
     Returns 0.0 when the prediction system considers the cell dead.
     Mirrors nowcast: measured decay trend when the track has history,
-    synthetic new-cell lifecycle otherwise.
+    synthetic new-cell lifecycle otherwise. Never-observed-moving cells are
+    only drawn for the first three checkpoints (now/+15/+30).
     """
     raw = float(patch.get("max_dbz", 0) or 0)
     if raw <= 0:
@@ -51,6 +53,8 @@ def _patch_fade(patch, tracks, eff_mins):
         if proj < 8.0:       # DEAD_DBZ_THRESHOLD
             return 0.0
     else:
+        if slot_mins > NEW_CELL_MAX_ASSERT_MINS:
+            return 0.0
         proj = raw + NEW_CELL_DECAY_DBZ_PER_10MIN * (eff_mins / 10.0)
         if proj < NEW_CELL_MIN_DBZ:
             return 0.0
@@ -129,7 +133,7 @@ def render_forecast_frames(frame_rgb, rain_mask, patches, tracks,
             bm = p.get("mask")
             if bm is None:
                 continue
-            fade = _patch_fade(p, tracks, eff)
+            fade = _patch_fade(p, tracks, eff, slot_mins=t)
             if fade <= 0.0:
                 continue
             vx = float(p.get("dx_10", 0.0))
