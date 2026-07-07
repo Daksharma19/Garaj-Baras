@@ -9,3 +9,4 @@ scipy
 python-dotenv
 httpx
 pytesseract
+pywebpush

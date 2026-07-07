@@ -1,0 +1,19 @@
+name: Keep Render awake
+
+# Rain alerts only fire if the server is awake to refresh radar data.
+# Render's free tier sleeps after ~15 idle minutes, so ping /health every
+# 10 minutes. (GitHub cron can drift a few minutes under load — fine here.)
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          curl -s -m 60 -o /dev/null -w "health: %{http_code}\n" \
+            "https://garaj-baras-api.onrender.com/health" || true

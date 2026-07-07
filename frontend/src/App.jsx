@@ -670,6 +670,111 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
   )
 }
 
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const raw = window.atob(base64)
+  const arr = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i)
+  return arr
+}
+
+function RainAlertsCard({ lat, lon, label }) {
+  const [status, setStatus] = useState('idle') // idle|working|enabled|unsupported|denied|error
+  const [note, setNote] = useState(null)
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setStatus('unsupported')
+      return
+    }
+    navigator.serviceWorker.getRegistration().then(async (reg) => {
+      try {
+        const sub = reg && (await reg.pushManager.getSubscription())
+        if (sub && localStorage.getItem('gb_alerts_endpoint') === sub.endpoint) {
+          setStatus('enabled')
+          setNote(localStorage.getItem('gb_alerts_label') || null)
+        }
+      } catch {}
+    }).catch(() => {})
+  }, [])
+
+  async function enable() {
+    setStatus('working'); setNote(null)
+    try {
+      const reg = await navigator.serviceWorker.register('/sw.js')
+      const perm = await Notification.requestPermission()
+      if (perm !== 'granted') { setStatus('denied'); return }
+      const { data } = await axios.get(`${API_BASE}/alerts/vapid_public_key`)
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(data.public_key),
+      })
+      await axios.post(`${API_BASE}/alerts/subscribe`, {
+        subscription: sub.toJSON(), lat, lon, label: label || null,
+      })
+      localStorage.setItem('gb_alerts_endpoint', sub.endpoint)
+      localStorage.setItem('gb_alerts_label', label || '')
+      setStatus('enabled')
+      setNote(label || null)
+    } catch (e) {
+      setStatus('error')
+    }
+  }
+
+  async function disable() {
+    setStatus('working')
+    try {
+      const reg = await navigator.serviceWorker.getRegistration()
+      const sub = reg && (await reg.pushManager.getSubscription())
+      if (sub) {
+        try { await axios.post(`${API_BASE}/alerts/unsubscribe`, { endpoint: sub.endpoint }) } catch {}
+        await sub.unsubscribe()
+      }
+      localStorage.removeItem('gb_alerts_endpoint')
+      localStorage.removeItem('gb_alerts_label')
+      setStatus('idle')
+    } catch {
+      setStatus('idle')
+    }
+  }
+
+  if (status === 'unsupported') return null
+
+  return (
+    <div className="alerts-card">
+      <div className="alerts-card__row">
+        <div className="alerts-card__text">
+          <span className="alerts-card__title">🔔 Rain alerts</span>
+          <span className="alerts-card__sub">
+            {status === 'enabled'
+              ? `Watching ${note || 'your saved location'} — you'll be notified when rain is here or ~15 min away.`
+              : status === 'denied'
+                ? 'Notifications are blocked in your browser settings.'
+                : status === 'error'
+                  ? 'Could not enable alerts — try again in a moment.'
+                  : 'Get notified when rain reaches this location, or is ~15 min away (radar-based estimate).'}
+          </span>
+        </div>
+        {status === 'enabled' ? (
+          <button type="button" className="alerts-card__btn alerts-card__btn--off" onClick={disable}>
+            Disable
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="alerts-card__btn"
+            disabled={status === 'working' || lat == null || lon == null}
+            onClick={enable}
+          >
+            {status === 'working' ? 'Enabling…' : 'Enable'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function JourneyStopCard({ stop, onClose }) {
   const [nc, setNc] = useState(null)
   const [ncErr, setNcErr] = useState(null)
@@ -940,6 +1045,10 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
           )}
         </button>
       </div>
+
+      {hasLocation && (
+        <RainAlertsCard lat={ncLat} lon={ncLon} label={ncName || null} />
+      )}
 
       {ncError && (
         <div className="error-toast" role="alert" aria-live="polite">

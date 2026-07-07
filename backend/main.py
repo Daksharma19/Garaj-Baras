@@ -28,6 +28,7 @@ from georef import latlon_to_pixel, is_within_radar  # type: ignore
 from fuzzy import enrich_results  # type: ignore
 from decay import compute_decay_tracks, get_decay_status_at_pixel  # type: ignore
 import verification  # type: ignore
+import alerts  # type: ignore
 from patches import (  # type: ignore
     compute_patch_motion,
     score_patches_for_route,
@@ -388,6 +389,10 @@ def _do_delhi_refresh(ttl_sec: float, force: bool = False) -> None:
         with _radar_state_lock:
             radar_cache.update(new_state)
         print("Delhi radar: refresh complete")
+        try:
+            alerts.process_alerts("delhi", new_state, _georef_delhi.is_within_radar, _georef_delhi.latlon_to_pixel)
+        except Exception as _al:
+            print(f"alerts hook failed: {_al}")
     except Exception as e:
         print(f"Delhi radar: refresh failed: {e}\n{traceback.format_exc()}")
     finally:
@@ -489,6 +494,10 @@ def _do_lucknow_refresh(ttl_sec: float, force: bool = False) -> None:
         with _lucknow_state_lock:
             lucknow_cache.update(new_state)
         print("Lucknow radar: refresh complete")
+        try:
+            alerts.process_alerts("lucknow", new_state, georef_lucknow.is_within_radar, georef_lucknow.latlon_to_pixel)
+        except Exception as _al:
+            print(f"alerts hook failed: {_al}")
     except Exception as e:
         print(f"Lucknow radar: refresh failed: {e}\n{traceback.format_exc()}")
     finally:
@@ -585,6 +594,10 @@ def _do_patna_refresh(ttl_sec: float, force: bool = False) -> None:
         with _patna_state_lock:
             patna_cache.update(new_state)
         print("Patna radar: refresh complete")
+        try:
+            alerts.process_alerts("patna", new_state, georef_patna.is_within_radar, georef_patna.latlon_to_pixel)
+        except Exception as _al:
+            print(f"alerts hook failed: {_al}")
     except Exception as e:
         print(f"Patna radar: refresh failed: {e}\n{traceback.format_exc()}")
     finally:
@@ -681,6 +694,10 @@ def _do_bhopal_refresh(ttl_sec: float, force: bool = False) -> None:
         with _bhopal_state_lock:
             bhopal_cache.update(new_state)
         print("Bhopal radar: refresh complete")
+        try:
+            alerts.process_alerts("bhopal", new_state, georef_bhopal.is_within_radar, georef_bhopal.latlon_to_pixel)
+        except Exception as _al:
+            print(f"alerts hook failed: {_al}")
     except Exception as e:
         print(f"Bhopal radar: refresh failed: {e}\n{traceback.format_exc()}")
     finally:
@@ -1356,6 +1373,57 @@ def nowcast_forecast_frames(lat: float, lon: float):
             status_code=500,
             detail=f"Forecast frames failed: {str(e)}\n{traceback.format_exc()}",
         )
+
+
+# ENDPOINTS: Rain alerts (web push for saved locations)
+
+class AlertSubscribeRequest(BaseModel):
+    subscription: dict
+    lat: float
+    lon: float
+    label: str | None = None
+
+
+class AlertEndpointRequest(BaseModel):
+    endpoint: str
+
+
+@app.get("/alerts/vapid_public_key")
+def alerts_vapid_public_key():
+    key = alerts.public_key()
+    if not key:
+        raise HTTPException(status_code=503, detail="Push not configured (no VAPID keys).")
+    return {"public_key": key}
+
+
+@app.post("/alerts/subscribe")
+def alerts_subscribe(req: AlertSubscribeRequest):
+    if not (6 < req.lat < 38 and 68 < req.lon < 98):
+        raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
+    ok = alerts.subscribe(req.subscription, req.lat, req.lon, req.label)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid subscription.")
+    return {"ok": True, "message": "Rain alerts enabled for this location."}
+
+
+@app.post("/alerts/unsubscribe")
+def alerts_unsubscribe(req: AlertEndpointRequest):
+    return {"ok": alerts.unsubscribe(req.endpoint)}
+
+
+@app.post("/alerts/test")
+def alerts_test(req: AlertEndpointRequest):
+    """Fire a test notification to one subscription (for setup verification)."""
+    import sqlite3 as _sq
+    alerts.init_db()
+    with _sq.connect(alerts.DB_PATH) as c:
+        row = c.execute("SELECT sub_json, label FROM subscriptions WHERE endpoint=?",
+                        (req.endpoint,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Subscription not found.")
+    alive = alerts._send_push(row[0], "🔔 Garaj Baras test",
+                              f"Rain alerts are working for {row[1] or 'your location'}.")
+    return {"ok": bool(alive)}
 
 
 # ENDPOINT: Verified prediction accuracy (automated hit-rate tracking)
