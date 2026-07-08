@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
-from fastapi.responses import FileResponse, Response  # type: ignore
+from fastapi.responses import FileResponse, Response, StreamingResponse  # type: ignore
 from fastapi.staticfiles import StaticFiles  # type: ignore
 from pydantic import BaseModel  # type: ignore
 from typing import List
@@ -1442,6 +1442,68 @@ def stats_accuracy(days: int = 30):
             status_code=500,
             detail=f"Accuracy stats failed: {str(e)}\n{traceback.format_exc()}",
         )
+
+
+# ENDPOINT: AI Rain Chatbot (Gemini 2.5 Flash + function calling)
+
+import chatbot  # type: ignore
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" | "model"
+    text: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+
+
+# Wire the chatbot's tools to the existing in-process endpoint logic.
+# Each wrapper mirrors an existing endpoint so tools reuse the real radar engine.
+def _tool_get_nowcast(lat: float, lon: float):
+    return nowcast_location(NowcastRequest(lat=lat, lon=lon))
+
+
+def _tool_get_route_rain(start_lat, start_lon, end_lat, end_lon):
+    return predict_rain(RouteRequest(
+        start_lat=start_lat, start_lon=start_lon,
+        end_lat=end_lat, end_lon=end_lon,
+    ))
+
+
+def _tool_get_rain_movement():
+    return get_movement()
+
+
+def _tool_get_accuracy_stats(days: int = 30):
+    return stats_accuracy(days=days)
+
+
+chatbot.register_tools({
+    "get_nowcast": _tool_get_nowcast,
+    "get_route_rain": _tool_get_route_rain,
+    "get_rain_movement": _tool_get_rain_movement,
+    "get_accuracy_stats": _tool_get_accuracy_stats,
+})
+
+
+@app.post("/chat")
+def chat(req: ChatRequest):
+    """
+    AI rain assistant. Streams Server-Sent Events:
+    {"type":"text","delta"} | {"type":"tool","name"} | {"type":"done"} | {"type":"error","message"}
+    """
+    if not chatbot.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Chatbot not configured (GEMINI_API_KEY missing on server).",
+        )
+    messages = [{"role": m.role, "text": m.text} for m in req.messages]
+    return StreamingResponse(
+        chatbot.chat_stream(messages),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # RUN INSTRUCTIONS:

@@ -10,3 +10,4 @@ python-dotenv
 httpx
 pytesseract
 pywebpush
+google-genai

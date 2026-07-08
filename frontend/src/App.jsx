@@ -457,6 +457,190 @@ function TabBar({ activeTab, onChangeTab }) {
       >
         Nowcast
       </button>
+      <button
+        role="tab"
+        aria-selected={activeTab === 'chat'}
+        className={`tab-bar__btn${activeTab === 'chat' ? ' tab-bar__btn--active' : ''}`}
+        onClick={() => onChangeTab('chat')}
+      >
+        Ask AI
+      </button>
+    </div>
+  )
+}
+
+// ── Ask AI (rain chatbot) ──────────────────────────────────────────────────────
+const CHAT_URL = `${API_BASE}/chat`
+
+const TOOL_LABELS = {
+  geocode_place: 'Finding location…',
+  get_nowcast: 'Checking radar…',
+  get_route_rain: 'Scanning your route…',
+  get_rain_movement: 'Reading rain movement…',
+  get_accuracy_stats: 'Fetching accuracy stats…',
+}
+
+const CHAT_SUGGESTIONS = [
+  'Will it rain in Connaught Place in the next hour?',
+  'Kya abhi nikalna theek rahega ya 30 min ruk jaun?',
+  'Noida se Gurgaon route pe baarish hai kya?',
+]
+
+function ChatPage({ activeTab, onChangeTab }) {
+  const [messages, setMessages] = useState([])   // {role:'user'|'model', text}
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const [toolStatus, setToolStatus] = useState('')
+  const scrollRef = useRef(null)
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages, toolStatus, sending])
+
+  async function send(text) {
+    const trimmed = (text ?? input).trim()
+    if (!trimmed || sending) return
+    setInput('')
+    setToolStatus('')
+
+    // Optimistically add the user message + an empty model bubble to stream into.
+    const history = [...messages, { role: 'user', text: trimmed }]
+    setMessages([...history, { role: 'model', text: '' }])
+    setSending(true)
+
+    // Warm the backend (Render cold start) without blocking the request.
+    warmBackend()
+
+    try {
+      const resp = await fetch(CHAT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history }),
+      })
+
+      if (resp.status === 503) {
+        appendToModel('⚠️ The AI assistant isn’t configured yet on the server (missing API key).')
+        return
+      }
+      if (!resp.ok || !resp.body) {
+        appendToModel(`⚠️ Something went wrong (HTTP ${resp.status}). Please try again.`)
+        return
+      }
+
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE frames are separated by a blank line.
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() || ''
+        for (const frame of frames) {
+          const line = frame.split('\n').find((l) => l.startsWith('data:'))
+          if (!line) continue
+          let evt
+          try { evt = JSON.parse(line.slice(5).trim()) } catch { continue }
+
+          if (evt.type === 'text') {
+            setToolStatus('')
+            appendToModel(evt.delta)
+          } else if (evt.type === 'tool') {
+            setToolStatus(TOOL_LABELS[evt.name] || 'Working…')
+          } else if (evt.type === 'error') {
+            setToolStatus('')
+            appendToModel((prev) => (prev ? prev + '\n\n' : '') + `⚠️ ${evt.message}`)
+          } else if (evt.type === 'done') {
+            setToolStatus('')
+          }
+        }
+      }
+    } catch (err) {
+      appendToModel('⚠️ Couldn’t reach the server. Check your connection and try again.')
+    } finally {
+      setSending(false)
+      setToolStatus('')
+    }
+  }
+
+  // Append text (string) or transform (fn) into the last model bubble.
+  function appendToModel(deltaOrFn) {
+    setMessages((prev) => {
+      const next = [...prev]
+      const last = next[next.length - 1]
+      if (!last || last.role !== 'model') return prev
+      const add = typeof deltaOrFn === 'function' ? deltaOrFn(last.text) : last.text + deltaOrFn
+      next[next.length - 1] = { ...last, text: add }
+      return next
+    })
+  }
+
+  const isEmpty = messages.length === 0
+
+  return (
+    <div className="pg-chat">
+      <nav className="nav">
+        <span className="nav__brand">GARAJ BARAS</span>
+        <span className="nav__live" aria-hidden>
+          <span className="nav__live-dot" />
+          LIVE
+        </span>
+      </nav>
+
+      <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
+
+      <div className="chat" ref={scrollRef}>
+        {isEmpty && (
+          <div className="chat__intro">
+            <div className="chat__intro-title">Ask about the rain 🌧️</div>
+            <p className="chat__intro-sub">
+              I read live IMD radar for Delhi NCR, Lucknow, Patna &amp; Bhopal — up to ~105 minutes ahead.
+            </p>
+            <div className="chat__suggestions">
+              {CHAT_SUGGESTIONS.map((s) => (
+                <button key={s} className="chat__chip" type="button" onClick={() => send(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} className={`chat__row chat__row--${m.role}`}>
+            <div className={`chat__bubble chat__bubble--${m.role}`}>
+              {m.text || (m.role === 'model' && sending ? <span className="chat__dots"><i /><i /><i /></span> : '')}
+            </div>
+          </div>
+        ))}
+
+        {toolStatus && (
+          <div className="chat__row chat__row--model">
+            <div className="chat__tool-pill">{toolStatus}</div>
+          </div>
+        )}
+      </div>
+
+      <form
+        className="chat__inputbar"
+        onSubmit={(e) => { e.preventDefault(); send() }}
+      >
+        <input
+          className="chat__input"
+          type="text"
+          placeholder="Ask about rain… (English / हिंदी / Hinglish)"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          disabled={sending}
+        />
+        <button className="chat__send" type="submit" disabled={sending || !input.trim()}>
+          {sending ? '…' : 'Send'}
+        </button>
+      </form>
     </div>
   )
 }
@@ -702,14 +886,33 @@ function RainAlertsCard({ lat, lon, label }) {
   async function enable() {
     setStatus('working'); setNote(null)
     try {
-      const reg = await navigator.serviceWorker.register('/sw.js')
+      await navigator.serviceWorker.register('/sw.js')
+      // Wait until the worker is ACTIVE — subscribing on a fresh, still-
+      // installing registration throws InvalidStateError.
+      const reg = await navigator.serviceWorker.ready
       const perm = await Notification.requestPermission()
       if (perm !== 'granted') { setStatus('denied'); return }
       const { data } = await axios.get(`${API_BASE}/alerts/vapid_public_key`)
-      const sub = await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(data.public_key),
-      })
+      const key = urlBase64ToUint8Array(data.public_key)
+      let sub
+      try {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: key,
+        })
+      } catch (e) {
+        // An old subscription with a different server key blocks resubscribe
+        const old = await reg.pushManager.getSubscription()
+        if (old) {
+          await old.unsubscribe()
+          sub = await reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: key,
+          })
+        } else {
+          throw e
+        }
+      }
       await axios.post(`${API_BASE}/alerts/subscribe`, {
         subscription: sub.toJSON(), lat, lon, label: label || null,
       })
@@ -718,7 +921,9 @@ function RainAlertsCard({ lat, lon, label }) {
       setStatus('enabled')
       setNote(label || null)
     } catch (e) {
+      console.error('rain alerts enable failed:', e)
       setStatus('error')
+      setNote(`${e?.name || 'Error'}: ${(e?.message || String(e)).slice(0, 140)}`)
     }
   }
 
@@ -752,7 +957,7 @@ function RainAlertsCard({ lat, lon, label }) {
               : status === 'denied'
                 ? 'Notifications are blocked in your browser settings.'
                 : status === 'error'
-                  ? 'Could not enable alerts — try again in a moment.'
+                  ? `Could not enable alerts${note ? ` — ${note}` : ' — try again in a moment.'}`
                   : 'Get notified when rain reaches this location, or is ~15 min away (radar-based estimate).'}
           </span>
         </div>
@@ -1345,6 +1550,14 @@ export default function App() {
       {activeTab === 'nowcast' && (
         <NowcastPage
           userLoc={userLoc}
+          activeTab={activeTab}
+          onChangeTab={handleTabChange}
+        />
+      )}
+
+      {/* ── ASK AI (CHAT) PAGE ── */}
+      {activeTab === 'chat' && (
+        <ChatPage
           activeTab={activeTab}
           onChangeTab={handleTabChange}
         />
