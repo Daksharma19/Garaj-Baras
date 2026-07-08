@@ -597,9 +597,6 @@ function ChatPage({ activeTab, onChangeTab }) {
         {isEmpty && (
           <div className="chat__intro">
             <div className="chat__intro-title">Ask about the rain 🌧️</div>
-            <p className="chat__intro-sub">
-              I read live IMD radar for Delhi NCR, Lucknow, Patna &amp; Bhopal — up to ~105 minutes ahead.
-            </p>
             <div className="chat__suggestions">
               {CHAT_SUGGESTIONS.map((s) => (
                 <button key={s} className="chat__chip" type="button" onClick={() => send(s)}>
