@@ -7,8 +7,9 @@ so tools run in-process (no HTTP self-calls). Provider-specific code is kept
 inside chat_stream() so the LLM can be swapped later.
 
 Keys (free — set any/all of these as env vars):
-  - GEMINI_API_KEY       — a single Gemini key, OR
-  - GEMINI_API_KEYS      — several Gemini keys, comma-separated, to spread load.
+  - GEMINI_API_KEY, GEMINI_API_KEY2, GEMINI_API_KEY3, ... — numbered keys, OR
+  - GEMINI_API_KEYS      — several Gemini keys in one comma-separated var.
+    (Both forms are merged; use whichever is convenient.)
   - GROQ_API_KEY         — optional fallback (https://console.groq.com), used
                            automatically when all Gemini keys hit quota.
 Multiple Gemini keys only add quota if each comes from a SEPARATE Google Cloud
@@ -18,8 +19,12 @@ project (free-tier limits are per-project, not per-key).
 import itertools
 import json
 import os
+import re
 
 import httpx  # type: ignore
+
+# Matches GEMINI_API_KEY, GEMINI_API_KEY2, GEMINI_API_KEY_3, etc. (not GEMINI_API_KEYS)
+_KEY_NAME_RE = re.compile(r"^GEMINI_API_KEY(?:_?(\d+))?$")
 
 GEMINI_MODEL = "gemini-2.5-flash"
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -41,14 +46,34 @@ def register_tools(fn_map):
 
 
 def get_api_keys():
-    """All configured Gemini keys, from GEMINI_API_KEYS (csv) and/or GEMINI_API_KEY."""
+    """
+    All configured Gemini keys, de-duplicated, from any of:
+      - GEMINI_API_KEYS  — comma-separated list, OR
+      - GEMINI_API_KEY, GEMINI_API_KEY2, GEMINI_API_KEY3, ... — numbered vars.
+    """
     keys = []
-    multi = os.environ.get("GEMINI_API_KEYS", "")
-    if multi:
-        keys.extend(k.strip() for k in multi.split(",") if k.strip())
-    single = os.environ.get("GEMINI_API_KEY", "").strip()
-    if single and single not in keys:
-        keys.append(single)
+    seen = set()
+
+    def _add(val):
+        val = (val or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            keys.append(val)
+
+    # 1) Comma-separated form
+    for k in os.environ.get("GEMINI_API_KEYS", "").split(","):
+        _add(k)
+
+    # 2) Single + numbered forms (GEMINI_API_KEY, GEMINI_API_KEY2, ...), in order
+    numbered = []
+    for name, val in os.environ.items():
+        m = _KEY_NAME_RE.match(name)
+        if m:
+            idx = int(m.group(1)) if m.group(1) else 0
+            numbered.append((idx, val))
+    for _idx, val in sorted(numbered, key=lambda x: x[0]):
+        _add(val)
+
     return keys
 
 
