@@ -6,15 +6,24 @@ engine. main.py registers the internal endpoint functions via register_tools()
 so tools run in-process (no HTTP self-calls). Provider-specific code is kept
 inside chat_stream() so the LLM can be swapped later.
 
-Requires env var GEMINI_API_KEY (free key from https://aistudio.google.com).
+Keys (free — set any/all of these as env vars):
+  - GEMINI_API_KEY       — a single Gemini key, OR
+  - GEMINI_API_KEYS      — several Gemini keys, comma-separated, to spread load.
+  - GROQ_API_KEY         — optional fallback (https://console.groq.com), used
+                           automatically when all Gemini keys hit quota.
+Multiple Gemini keys only add quota if each comes from a SEPARATE Google Cloud
+project (free-tier limits are per-project, not per-key).
 """
 
+import itertools
 import json
 import os
 
 import httpx  # type: ignore
 
 GEMINI_MODEL = "gemini-2.5-flash"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MAX_TOOL_ITERATIONS = 6
 MAX_HISTORY_MESSAGES = 12
 MAX_MESSAGE_CHARS = 2000
@@ -23,18 +32,37 @@ MAX_OUTPUT_TOKENS = 2048
 # Filled by main.py at import time: name -> python callable
 _TOOL_FNS = {}
 
+# Round-robin cursor so consecutive requests start on different keys.
+_rr = itertools.count()
+
 
 def register_tools(fn_map):
     _TOOL_FNS.update(fn_map)
 
 
+def get_api_keys():
+    """All configured Gemini keys, from GEMINI_API_KEYS (csv) and/or GEMINI_API_KEY."""
+    keys = []
+    multi = os.environ.get("GEMINI_API_KEYS", "")
+    if multi:
+        keys.extend(k.strip() for k in multi.split(",") if k.strip())
+    single = os.environ.get("GEMINI_API_KEY", "").strip()
+    if single and single not in keys:
+        keys.append(single)
+    return keys
+
+
+def _groq_key() -> str:
+    return os.environ.get("GROQ_API_KEY", "").strip()
+
+
 def is_configured() -> bool:
-    return bool(os.environ.get("GEMINI_API_KEY"))
+    return bool(get_api_keys()) or bool(_groq_key())
 
 
 SYSTEM_PROMPT = """You are Garaj Baras Assistant, the AI helper inside Garaj Baras — an Indian rain nowcasting app that reads live IMD doppler radar.
 
-LANGUAGE: Reply in the same language the user writes — English, Hindi, or Hinglish. Keep the tone friendly and desi-casual, never robotic.
+LANGUAGE: Always reply in clear, friendly English, even if the user writes in Hindi or Hinglish. Keep the tone warm and conversational, never robotic.
 
 WHAT YOU CAN DO:
 - Tell whether it will rain at a place within the next ~105 minutes (radar nowcast, 15-minute slots).
@@ -52,7 +80,7 @@ OTHER LIMITS — be honest about these:
 
 WORKFLOW:
 1. When the user names a place, call geocode_place first to get coordinates, then get_nowcast — do this even if you're unsure the place is in range; let get_nowcast's in_radar_bounds decide. If geocoding returns several matches, pick the most likely Indian city-area match; only ask the user if it's genuinely ambiguous.
-2. For "should I leave now or wait?" questions: compare slot probabilities across the timeline and recommend a concrete time (IST), e.g. "nikal jao abhi — 30 min baad 78% chance hai".
+2. For "should I leave now or wait?" questions: compare slot probabilities across the timeline and recommend a concrete time (IST), e.g. "Leave now — there's a 78% chance of rain in about 30 minutes.".
 3. For route questions, geocode both ends, then call get_route_rain.
 
 ANSWER STYLE: Verdict first, then the why. 2–5 sentences. Use the probabilities and timings from the tools. A little personality is good (umbrella jokes allowed), fabricated data is not."""
@@ -215,29 +243,23 @@ def _sse(obj) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 
-def chat_stream(messages):
-    """
-    Sync generator of SSE strings for POST /chat.
-
-    messages: [{"role": "user"|"model", "text": "..."}, ...] (newest last)
-    Events: {"type":"text","delta"} | {"type":"tool","name"} | {"type":"done"} | {"type":"error","message"}
-    """
-    from google import genai  # imported lazily so the app boots without the package/key
-    from google.genai import types, errors
-
-    if not is_configured():
-        yield _sse({"type": "error", "message": "Chatbot is not configured (GEMINI_API_KEY missing)."})
-        return
-
-    client = genai.Client()  # reads GEMINI_API_KEY
-
+def _build_contents(types, messages):
+    """Fresh Gemini contents list from the client-supplied history."""
     contents = []
     for m in messages[-MAX_HISTORY_MESSAGES:]:
         role = "model" if m.get("role") == "model" else "user"
         text = str(m.get("text", ""))[:MAX_MESSAGE_CHARS]
         if text:
             contents.append(types.Content(role=role, parts=[types.Part(text=text)]))
+    return contents
 
+
+def _run_once(client, types, contents):
+    """
+    Run the full tool-calling conversation on one client.
+    Yields SSE strings. Raises the SDK's APIError (e.g. 429) so the caller
+    can fail over to another key before any text has been streamed.
+    """
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
         tools=[types.Tool(function_declarations=TOOL_DECLARATIONS)],
@@ -246,48 +268,164 @@ def chat_stream(messages):
         temperature=0.6,
     )
 
-    try:
-        for _ in range(MAX_TOOL_ITERATIONS):
-            model_parts = []
-            function_calls = []
+    for _ in range(MAX_TOOL_ITERATIONS):
+        model_parts = []
+        function_calls = []
 
-            stream = client.models.generate_content_stream(
-                model=GEMINI_MODEL, contents=contents, config=config,
-            )
-            for chunk in stream:
-                if not chunk.candidates:
-                    continue
-                content = chunk.candidates[0].content
-                if not content or not content.parts:
-                    continue
-                for part in content.parts:
-                    model_parts.append(part)
-                    if part.text:
-                        yield _sse({"type": "text", "delta": part.text})
-                    if part.function_call:
-                        function_calls.append(part.function_call)
+        stream = client.models.generate_content_stream(
+            model=GEMINI_MODEL, contents=contents, config=config,
+        )
+        for chunk in stream:
+            if not chunk.candidates:
+                continue
+            content = chunk.candidates[0].content
+            if not content or not content.parts:
+                continue
+            for part in content.parts:
+                model_parts.append(part)
+                if part.text:
+                    yield _sse({"type": "text", "delta": part.text})
+                if part.function_call:
+                    function_calls.append(part.function_call)
 
-            if not function_calls:
-                yield _sse({"type": "done"})
-                return
+        if not function_calls:
+            yield _sse({"type": "done"})
+            return
 
-            contents.append(types.Content(role="model", parts=model_parts))
-            response_parts = []
-            for fc in function_calls:
-                yield _sse({"type": "tool", "name": fc.name})
-                result = execute_tool(fc.name, dict(fc.args or {}))
-                response_parts.append(types.Part.from_function_response(
-                    name=fc.name, response={"result": result},
-                ))
-            # Gemini expects function responses under role="user" (matches the
-            # SDK's own automatic-function-calling behavior).
-            contents.append(types.Content(role="user", parts=response_parts))
+        contents.append(types.Content(role="model", parts=model_parts))
+        response_parts = []
+        for fc in function_calls:
+            yield _sse({"type": "tool", "name": fc.name})
+            result = execute_tool(fc.name, dict(fc.args or {}))
+            response_parts.append(types.Part.from_function_response(
+                name=fc.name, response={"result": result},
+            ))
+        # Gemini expects function responses under role="user" (matches the
+        # SDK's own automatic-function-calling behavior).
+        contents.append(types.Content(role="user", parts=response_parts))
 
-        yield _sse({"type": "error", "message": "Took too many steps — please rephrase your question."})
-    except errors.APIError as e:
-        if getattr(e, "code", None) == 429:
-            yield _sse({"type": "error", "message": "AI assistant is resting (free quota hit). Try again in a minute. 🌧️"})
-        else:
-            yield _sse({"type": "error", "message": f"AI error: {getattr(e, 'message', str(e))[:200]}"})
-    except Exception as e:
-        yield _sse({"type": "error", "message": f"Chat failed: {str(e)[:200]}"})
+    yield _sse({"type": "error", "message": "Took too many steps — please rephrase your question."})
+
+
+def _run_groq(api_key, messages):
+    """
+    Fallback runner using Groq's OpenAI-compatible API (Llama 3.3, non-streaming
+    per turn). Same tool-calling loop; yields the same SSE event shape.
+    """
+    oai_msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in messages[-MAX_HISTORY_MESSAGES:]:
+        role = "assistant" if m.get("role") == "model" else "user"
+        text = str(m.get("text", ""))[:MAX_MESSAGE_CHARS]
+        if text:
+            oai_msgs.append({"role": role, "content": text})
+
+    tools = [{"type": "function", "function": d} for d in TOOL_DECLARATIONS]
+
+    for _ in range(MAX_TOOL_ITERATIONS):
+        r = httpx.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": oai_msgs,
+                "tools": tools,
+                "max_tokens": MAX_OUTPUT_TOKENS,
+                "temperature": 0.6,
+            },
+            timeout=60.0,
+        )
+        r.raise_for_status()
+        msg = r.json()["choices"][0]["message"]
+        tool_calls = msg.get("tool_calls")
+
+        if not tool_calls:
+            content = msg.get("content") or ""
+            if content:
+                yield _sse({"type": "text", "delta": content})
+            yield _sse({"type": "done"})
+            return
+
+        oai_msgs.append(msg)  # assistant turn carrying the tool_calls
+        for tc in tool_calls:
+            name = tc.get("function", {}).get("name", "")
+            yield _sse({"type": "tool", "name": name})
+            try:
+                args = json.loads(tc.get("function", {}).get("arguments") or "{}")
+            except Exception:
+                args = {}
+            result = execute_tool(name, args)
+            oai_msgs.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id"),
+                "content": json.dumps({"result": result}, ensure_ascii=False),
+            })
+
+    yield _sse({"type": "error", "message": "Took too many steps — please rephrase your question."})
+
+
+def chat_stream(messages):
+    """
+    Sync generator of SSE strings for POST /chat.
+
+    Tries all Gemini keys first (round-robin start, fail over on 429 while no
+    text has streamed yet). If every Gemini key is quota-exhausted, falls back
+    to Groq (Llama) when GROQ_API_KEY is set.
+
+    messages: [{"role": "user"|"model", "text": "..."}, ...] (newest last)
+    Events: {"type":"text","delta"} | {"type":"tool","name"} | {"type":"done"} | {"type":"error","message"}
+    """
+    from google import genai  # imported lazily so the app boots without the package/key
+    from google.genai import types, errors
+
+    gemini_keys = get_api_keys()
+    groq_key = _groq_key()
+
+    if not gemini_keys and not groq_key:
+        yield _sse({"type": "error", "message": "Chatbot is not configured (no Gemini/Groq API key)."})
+        return
+
+    gemini_exhausted = not gemini_keys  # if no Gemini keys, go straight to Groq
+
+    if gemini_keys:
+        # Rotate the starting key each request to spread load across keys/projects.
+        start = next(_rr) % len(gemini_keys)
+        order = gemini_keys[start:] + gemini_keys[:start]
+
+        for i, key in enumerate(order):
+            client = genai.Client(api_key=key)
+            contents = _build_contents(types, messages)  # fresh per attempt
+            emitted_text = False
+            try:
+                for evt in _run_once(client, types, contents):
+                    if '"type": "text"' in evt:
+                        emitted_text = True
+                    yield evt
+                return  # completed on this key
+            except errors.APIError as e:
+                is_429 = getattr(e, "code", None) == 429
+                if emitted_text:
+                    # already streaming to the user — can't cleanly fail over
+                    yield _sse({"type": "error", "message": f"AI error: {getattr(e, 'message', str(e))[:200]}"})
+                    return
+                if is_429 and i < len(order) - 1:
+                    continue  # quota on this key — try the next Gemini key
+                if is_429:
+                    gemini_exhausted = True  # all Gemini keys quota'd — try Groq
+                    break
+                # Non-429 Gemini failure with nothing streamed yet — try Groq too
+                gemini_exhausted = True
+                break
+            except Exception:
+                gemini_exhausted = True
+                break
+
+    # Groq fallback
+    if gemini_exhausted and groq_key:
+        try:
+            yield from _run_groq(groq_key, messages)
+            return
+        except Exception as e:
+            yield _sse({"type": "error", "message": f"Fallback AI error: {str(e)[:200]}"})
+            return
+
+    yield _sse({"type": "error", "message": "AI assistant is resting (quota hit). Try again in a minute. 🌧️"})

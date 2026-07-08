@@ -482,8 +482,8 @@ const TOOL_LABELS = {
 
 const CHAT_SUGGESTIONS = [
   'Will it rain in Connaught Place in the next hour?',
-  'Kya abhi nikalna theek rahega ya 30 min ruk jaun?',
-  'Noida se Gurgaon route pe baarish hai kya?',
+  'Should I leave now or wait 30 minutes?',
+  'Is it raining on the route from Noida to Gurgaon?',
 ]
 
 function ChatPage({ activeTab, onChangeTab }) {
@@ -629,7 +629,7 @@ function ChatPage({ activeTab, onChangeTab }) {
         <input
           className="chat__input"
           type="text"
-          placeholder="Ask about rain… (English / हिंदी / Hinglish)"
+          placeholder="Ask about the rain…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={sending}
