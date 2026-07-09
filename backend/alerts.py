@@ -106,16 +106,22 @@ def unsubscribe(endpoint: str) -> bool:
 def _send_push(sub_json: str, title: str, body: str) -> bool:
     """Send one push. Returns False if the subscription is dead (prune it)."""
     from pywebpush import webpush, WebPushException
+    from py_vapid import Vapid
     v = load_vapid()
     if not v.get("private_key_pem"):
         print("alerts: no VAPID keys configured — cannot push")
         return True  # don't prune; config problem, not a dead subscription
     try:
+        # pywebpush treats a plain string as a raw base64url key, so a PEM
+        # string fails to parse — hand it a Vapid instance instead.
         webpush(
             subscription_info=json.loads(sub_json),
             data=json.dumps({"title": title, "body": body}),
-            vapid_private_key=v["private_key_pem"],
+            vapid_private_key=Vapid.from_pem(v["private_key_pem"].encode()),
             vapid_claims={"sub": VAPID_CLAIMS_SUB},
+            # WNS (Edge on Windows) rejects the default TTL of 0 with a 400;
+            # an hour also matches how long a rain alert stays relevant.
+            ttl=3600,
         )
         return True
     except WebPushException as e:
