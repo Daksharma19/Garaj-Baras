@@ -950,12 +950,12 @@ function RainAlertsCard({ lat, lon, label }) {
           <span className="alerts-card__title">🔔 Rain alerts</span>
           <span className="alerts-card__sub">
             {status === 'enabled'
-              ? `Watching ${note || 'your saved location'} — you'll be notified when rain is here or ~15 min away.`
+              ? `Watching ${note || 'your saved location'} — you'll be notified when rain is here or up to ~45 min away.`
               : status === 'denied'
                 ? 'Notifications are blocked in your browser settings.'
                 : status === 'error'
                   ? `Could not enable alerts${note ? ` — ${note}` : ' — try again in a moment.'}`
-                  : 'Get notified when rain reaches this location, or is ~15 min away (radar-based estimate).'}
+                  : 'Get notified when rain reaches this location, or is up to ~45 min away (radar-based estimate).'}
           </span>
         </div>
         {status === 'enabled' ? (

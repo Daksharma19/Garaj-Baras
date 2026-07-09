@@ -4,10 +4,10 @@
 #
 # Flow: the frontend saves a push subscription + a location. After every
 # radar refresh (the same hook verification uses), each saved location inside
-# that radar's coverage gets a two-slot nowcast check:
-#   slot 0 rainy      -> "Rain right now" alert
-#   slot 0 clear but
-#   +15 slot rainy    -> "Rain approaching (~15 min)" alert
+# that radar's coverage gets a nowcast check over slots 0/+15/+30/+45 min:
+#   slot 0 rainy          -> "Rain right now" alert
+#   slot 0 clear but a
+#   later slot rainy      -> "Rain approaching (~N min)" alert (earliest slot)
 #
 # Cooldown state machine (no spam): an alert fires only on the CLEAR->RAIN
 # transition; the location must be observed clear again before it can fire
@@ -195,27 +195,27 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                     rain_mask=rain_mask, rgb_arr=rgb_arr,
                     patch_tracks=state.get("decay_tracks") or [],
                     lag_mins=lag,
-                    num_slots=2, slot_interval=15,   # slot 0 (now) and +15 only
+                    num_slots=4, slot_interval=15,   # now, +15, +30, +45
                     patches_motion=state.get("patches") or [],
                 )
-                now_rain = bool(slots[0]["has_rain"])
-                soon_rain = bool(slots[1]["has_rain"]) if len(slots) > 1 else False
+                first_rainy = next((s for s in slots if s["has_rain"]), None)
 
                 place = label or f"{lat:.3f}, {lon:.3f}"
                 new_state, title, body = sub_state, None, None
 
-                if now_rain:
+                if first_rainy is None:
+                    new_state = "clear"
+                elif first_rainy["slot_mins"] == 0:
                     new_state = "raining"
                     title = f"⛈ Rain right now at {place}"
-                    body = (f"{slots[0]['intensity']} observed by radar. "
+                    body = (f"{first_rainy['intensity']} observed by radar. "
                             f"(Radar data ~{lag:.0f} min old.)")
-                elif soon_rain:
-                    new_state = "raining"
-                    title = f"🌧 Rain approaching {place}"
-                    body = (f"{slots[1]['intensity']} expected in roughly 15 minutes "
-                            f"(radar-based estimate, ±10 min).")
                 else:
-                    new_state = "clear"
+                    new_state = "raining"
+                    eta = int(first_rainy["slot_mins"])
+                    title = f"🌧 Rain approaching {place}"
+                    body = (f"{first_rainy['intensity']} expected in roughly {eta} minutes "
+                            f"(radar-based estimate, ±10 min).")
 
                 should_notify = (
                     title is not None
