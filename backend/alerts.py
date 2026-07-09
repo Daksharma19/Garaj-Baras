@@ -57,13 +57,24 @@ def init_db():
         """)
 
 
+def _clean_env(val):
+    """Tolerate common paste mistakes in env vars: surrounding quotes and
+    literal \\n sequences instead of real newlines (breaks PEM parsing)."""
+    if not val:
+        return val
+    val = val.strip()
+    while len(val) > 1 and val[0] == val[-1] and val[0] in "\"'":
+        val = val[1:-1].strip()
+    return val.replace("\\n", "\n")
+
+
 def load_vapid():
     """VAPID credentials: env vars first (production), local file for dev."""
     global _vapid
     if _vapid is not None:
         return _vapid
-    priv = os.environ.get("VAPID_PRIVATE_KEY_PEM")
-    pub = os.environ.get("VAPID_PUBLIC_KEY")
+    priv = _clean_env(os.environ.get("VAPID_PRIVATE_KEY_PEM"))
+    pub = _clean_env(os.environ.get("VAPID_PUBLIC_KEY"))
     if not (priv and pub):
         try:
             with open(VAPID_KEYS_PATH) as f:
