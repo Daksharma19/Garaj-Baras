@@ -4,17 +4,23 @@
 #
 # Flow: the frontend saves a push subscription + a location. After every
 # radar refresh (the same hook verification uses), each saved location inside
-# that radar's coverage gets a nowcast check over slots 0/+15/+30/+45 min:
-#   slot 0 rainy          -> "Rain right now" alert
-#   slot 0 clear but a
-#   later slot rainy      -> "Rain approaching (~N min)" alert (earliest slot)
+# that radar's coverage gets a nowcast check over slots 0/+15/+30/+45 min.
 #
-# Cooldown state machine (no spam): an alert fires only on the CLEAR->RAIN
-# transition; the location must be observed clear again before it can fire
-# again, and never more than once per MIN_RENOTIFY_MINS regardless.
+# State machine (clear -> approaching -> raining) with two alert moments:
+#   clear -> approaching   "Rain approaching (~N min)"   heads-up, earliest slot
+#   -> raining             "Rain right now"              arrival / escalation ping
+# The arrival ping fires whether rain came straight out of a clear sky OR after
+# an earlier heads-up (the approaching->raining escalation) — so a user who was
+# told "rain in ~15 min" still gets pinged the moment it actually lands. When it
+# is raining now and the +15 slot is clear, the arrival copy adds "likely to
+# ease within ~15 min".
+#
+# Anti-spam: heads-up and arrival each have their own MIN_RENOTIFY_MINS cooldown
+# (last_notified_at / last_rain_alert_at), so a rain edge flickering across the
+# location can't spam, yet a heads-up never blocks the arrival ping that follows.
 #
 # Honesty notes baked into the copy: radar carries 10-30 min of lag, so the
-# "+15 min" message says "approaching, ~15 min" — an estimate, not a countdown.
+# "+N min" message says "approaching" — an estimate, not a countdown.
 
 import json
 import os
@@ -51,10 +57,15 @@ def init_db():
                 lon REAL NOT NULL,
                 label TEXT,
                 created_at TEXT NOT NULL,
-                state TEXT NOT NULL DEFAULT 'clear',   -- clear | raining
-                last_notified_at TEXT
+                state TEXT NOT NULL DEFAULT 'clear',   -- clear | approaching | raining
+                last_notified_at TEXT,
+                last_rain_alert_at TEXT               -- cooldown for the "rain now" ping
             )
         """)
+        # Migrate older DBs that predate last_rain_alert_at.
+        cols = {r[1] for r in c.execute("PRAGMA table_info(subscriptions)")}
+        if "last_rain_alert_at" not in cols:
+            c.execute("ALTER TABLE subscriptions ADD COLUMN last_rain_alert_at TEXT")
 
 
 def _clean_env(val):
@@ -156,14 +167,15 @@ def _mins_since(iso: str) -> float:
 def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixel):
     """
     Run after a radar refresh. `state` is the freshly-built radar state dict.
-    Checks each saved location in this radar's coverage and pushes on
-    clear->rain transitions. Best-effort: never raises.
+    Checks each saved location in this radar's coverage and pushes a heads-up
+    when rain is approaching and again when it arrives. Best-effort: never raises.
     """
     try:
         init_db()
         with _db_lock, _conn() as c:
             subs = c.execute(
-                "SELECT id, endpoint, sub_json, lat, lon, label, state, last_notified_at "
+                "SELECT id, endpoint, sub_json, lat, lon, label, state, "
+                "last_notified_at, last_rain_alert_at "
                 "FROM subscriptions").fetchall()
         if not subs:
             return
@@ -186,7 +198,7 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
         rain_mask = isolate_rain(latest_frame, clutter_mask=state.get("clutter_mask"))
         rgb_arr = np.array(Image.open(latest_frame).convert("RGB"))
 
-        for sid, endpoint, sub_json, lat, lon, label, sub_state, last_at in covered:
+        for sid, endpoint, sub_json, lat, lon, label, sub_state, last_at, last_rain_at in covered:
             try:
                 px, py = latlon_to_pixel(lat, lon)
                 slots = compute_nowcast_slots(
@@ -199,44 +211,65 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                     patches_motion=state.get("patches") or [],
                 )
                 first_rainy = next((s for s in slots if s["has_rain"]), None)
-
                 place = label or f"{lat:.3f}, {lon:.3f}"
-                new_state, title, body = sub_state, None, None
 
                 if first_rainy is None:
-                    new_state = "clear"
+                    desired = "clear"
                 elif first_rainy["slot_mins"] == 0:
-                    new_state = "raining"
-                    title = f"⛈ Rain right now at {place}"
-                    body = (f"{first_rainy['intensity']} observed by radar. "
-                            f"(Radar data ~{lag:.0f} min old.)")
+                    desired = "raining"
                 else:
-                    new_state = "raining"
-                    eta = int(first_rainy["slot_mins"])
-                    title = f"🌧 Rain approaching {place}"
-                    body = (f"{first_rainy['intensity']} expected in roughly {eta} minutes "
-                            f"(radar-based estimate, ±10 min).")
+                    desired = "approaching"
 
-                should_notify = (
-                    title is not None
-                    and sub_state == "clear"           # only on clear->rain transition
-                    and (last_at is None or _mins_since(last_at) >= MIN_RENOTIFY_MINS)
-                )
+                now_iso = datetime.now(timezone.utc).isoformat()
+                title = body = None
 
+                if desired == "raining" and sub_state != "raining":
+                    # Rain has arrived — fire whether it came out of a clear sky
+                    # or after an earlier heads-up (approaching->raining escalation).
+                    # Own cooldown so a rain edge flickering across the pixel can't
+                    # spam; a prior heads-up does NOT count against this cooldown.
+                    if last_rain_at is None or _mins_since(last_rain_at) >= MIN_RENOTIFY_MINS:
+                        title = f"⛈ Rain right now at {place}"
+                        body = f"{first_rainy['intensity']} observed by radar."
+                        if len(slots) > 1 and not slots[1]["has_rain"]:
+                            body += " Likely to ease within ~15 min."
+                        body += f" (Radar data ~{lag:.0f} min old.)"
+                elif desired == "approaching" and sub_state == "clear":
+                    # First heads-up for incoming rain.
+                    if last_at is None or _mins_since(last_at) >= MIN_RENOTIFY_MINS:
+                        eta = int(first_rainy["slot_mins"])
+                        title = f"🌧 Rain approaching {place}"
+                        body = (f"{first_rainy['intensity']} expected in roughly {eta} minutes "
+                                f"(radar-based estimate, ±10 min).")
+
+                log_msg = None
                 with _db_lock, _conn() as c:
-                    if should_notify:
+                    if title is not None:
                         alive = _send_push(sub_json, title, body)
                         if not alive:
                             c.execute("DELETE FROM subscriptions WHERE id=?", (sid,))
-                            print(f"alerts: pruned dead subscription {sid}")
-                            continue
-                        c.execute(
-                            "UPDATE subscriptions SET state=?, last_notified_at=? WHERE id=?",
-                            (new_state, datetime.now(timezone.utc).isoformat(), sid))
-                        print(f"alerts: notified sub {sid} ({place}): {title}")
-                    elif new_state != sub_state:
+                            log_msg = f"alerts: pruned dead subscription {sid}"
+                        elif desired == "raining":
+                            c.execute(
+                                "UPDATE subscriptions SET state=?, last_notified_at=?, "
+                                "last_rain_alert_at=? WHERE id=?",
+                                (desired, now_iso, now_iso, sid))
+                            log_msg = f"alerts: notified sub {sid} ({place}): {title}"
+                        else:
+                            c.execute(
+                                "UPDATE subscriptions SET state=?, last_notified_at=? WHERE id=?",
+                                (desired, now_iso, sid))
+                            log_msg = f"alerts: notified sub {sid} ({place}): {title}"
+                    elif desired != sub_state:
                         c.execute("UPDATE subscriptions SET state=? WHERE id=?",
-                                  (new_state, sid))
+                                  (desired, sid))
+                # Log outside the transaction: a console that can't encode the
+                # emoji title must not roll back a committed state update.
+                if log_msg:
+                    try:
+                        print(log_msg)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"alerts: check failed for sub {sid}: {e}")
     except Exception as e:
