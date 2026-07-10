@@ -29,12 +29,25 @@ saved places.**
 
 ## Before deploying to Render (do NOT skip)
 
-- Set **`SUPABASE_JWT_SECRET`** on Render (dashboard → Settings → API →
-  JWT Secret). Without it the backend trusts unsigned tokens — fine locally,
-  unacceptable in prod.
+Backend token verification supports BOTH of Supabase's signing schemes and
+auto-picks per token, so set whichever your project uses (setting both is fine):
+
+- **`SUPABASE_URL`** = `https://<project-ref>.supabase.co`
+  — covers projects using **asymmetric JWT signing keys** (ES256/RS256, the
+  newer default; verified via the public JWKS endpoint). Safe to always set.
+- **`SUPABASE_JWT_SECRET`** = Settings → JWT Keys → JWT/Legacy secret
+  — covers projects still signing with **HS256** (shared secret).
+
+If NEITHER is set, the backend trusts unsigned tokens (dev mode) — fine on
+localhost, **unacceptable in production**. Recommended: set **`SUPABASE_URL`**
+always, and add `SUPABASE_JWT_SECRET` too if unsure — the right one is used
+automatically based on each token's `alg`.
+
+Also:
 - Add the production frontend URL to Supabase's Redirect URLs.
-- Set `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` in the frontend build env.
-- `pip install pyjwt` happens via requirements.txt on deploy.
+- Set `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` in the frontend build env
+  (the **Publishable** key is the anon key on newer projects).
+- `pyjwt` + `cryptography` install via requirements.txt on deploy.
 
 ## What was built (reference)
 

@@ -319,17 +319,20 @@ CORS: allow all. Validation: coordinates must be inside rough India bounds
 
 **Auth (auth.py + accounts.py):** Supabase Auth (Google OAuth + email OTP) on
 the frontend via `@supabase/supabase-js`; the backend verifies the Supabase
-JWT locally (HS256, `SUPABASE_JWT_SECRET`, pyjwt) — no per-request network
-call. **Policy: route + nowcast are fully public; sign-in gates only the
+JWT locally (pyjwt) — no per-request network call. Verification auto-picks by
+the token's `alg`: **HS256** (shared `SUPABASE_JWT_SECRET`) or **ES256/RS256**
+(asymmetric signing keys, verified via the project JWKS at
+`SUPABASE_URL/auth/v1/.well-known/jwks.json`, cached). **Policy: route +
+nowcast are fully public; sign-in gates only the
 extras** — Ask AI tab, rain alerts, saved places. `get_current_user` (401
 without token) / `get_optional_user` FastAPI deps. `accounts.py` owns `users`
 (id = Supabase uid) and `saved_locations` tables (Postgres in prod,
 `accounts.db` SQLite in dev, same `db.py` switch). `alerts.subscriptions`
 gained a nullable `user_id` column: subscriptions from signed-in users are
 tied to the account, anonymous ones keep working (`user_id NULL`). Dev
-fallback: with `SUPABASE_JWT_SECRET` unset, tokens are decoded WITHOUT
-signature verification (loud warning) so localhost works before Supabase is
-wired; never run prod like that.
+fallback: with NEITHER `SUPABASE_JWT_SECRET` nor `SUPABASE_URL` set, tokens are
+decoded WITHOUT signature verification (loud warning) so localhost works before
+Supabase is wired; never run prod like that.
 
 ## 10. Frontend (frontend/src)
 
@@ -390,7 +393,7 @@ anywhere**; ignore it. `dist/` is a committed production build.
 - All timestamps IST-aware (`UTC+5:30`); DB rows store UTC ISO.
 - Deploy version = `RENDER_GIT_COMMIT` env (verification's `engine_version`).
 - Env vars: `DATABASE_URL` (Supabase Postgres; unset = SQLite dev mode),
-  `SUPABASE_JWT_SECRET` (auth; unset = dev no-verify mode),
+  `SUPABASE_URL` + / or `SUPABASE_JWT_SECRET` (auth; neither set = dev no-verify mode),
   `VAPID_PRIVATE_KEY_PEM`, `VAPID_PUBLIC_KEY`, `GEMINI_API_KEY*`,
   `GEMINI_API_KEYS`, `GROQ_API_KEY`; frontend: `VITE_API_BASE`,
   `VITE_ORS_API_KEY`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
