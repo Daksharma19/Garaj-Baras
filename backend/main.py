@@ -1320,6 +1320,9 @@ def _forecast_render_args(lat: float, lon: float) -> dict:
         gdx=float(dx), gdy=float(dy),
         lag_mins=float(lag_info.get("lag_mins", DEFAULT_RADAR_LAG_MINS)),
         user_px=user_px, user_py=user_py,
+        frame_data=state.get("frame_data") or [],
+        radar_name=radar,
+        latlon_to_pixel_fn=_georef.latlon_to_pixel,
     )
 
 
@@ -1372,6 +1375,33 @@ def nowcast_forecast_frames(lat: float, lon: float):
         raise HTTPException(
             status_code=500,
             detail=f"Forecast frames failed: {str(e)}\n{traceback.format_exc()}",
+        )
+
+
+@app.get("/nowcast/radar_scene")
+def nowcast_radar_scene(lat: float, lon: float):
+    """
+    v2 radar animation scene: compact JSON with dBZ history grids (real frame
+    timestamps, ~10-min cadence) + per-patch motion/decay parameters. The
+    frontend canvas player renders it and interpolates motion continuously
+    from -60ish to +60 min. Replaces the base64-PNG forecast_frames payload.
+    """
+    try:
+        args = _forecast_render_args(lat, lon)
+        from radar_scene import build_radar_scene  # type: ignore
+        return build_radar_scene(
+            args["frame_data"], args["rain_mask"], args["patches"],
+            args["tracks"], args["gdx"], args["gdy"], args["lag_mins"],
+            args["user_px"], args["user_py"],
+            radar_name=args["radar_name"],
+            latlon_to_pixel_fn=args["latlon_to_pixel_fn"],
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Radar scene failed: {str(e)}\n{traceback.format_exc()}",
         )
 
 

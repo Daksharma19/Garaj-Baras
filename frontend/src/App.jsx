@@ -851,6 +851,338 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
   )
 }
 
+// ── Radar v2: canvas player driven by /nowcast/radar_scene ─────────────────
+// History = real cached frames (10-min cadence, true timestamps), placed on
+// the timeline lag-corrected (latest frame sits at t = -lag). Future = the
+// nowcast simulation advected continuously: each rain cell moves with its
+// owner patch's velocity and fades with its decay trend.
+
+const DBZ_RAMP = [
+  [20, [43, 79, 132]], [25, [47, 127, 194]], [30, [53, 163, 201]],
+  [35, [47, 185, 140]], [38, [127, 201, 90]], [41, [227, 193, 75]],
+  [44, [224, 161, 63]], [50, [224, 134, 63]], [55, [209, 80, 80]],
+  [60, [180, 90, 214]],
+]
+function dbzToRgb(dbz) {
+  let c = DBZ_RAMP[0][1]
+  for (const [d, rgb] of DBZ_RAMP) { if (dbz >= d) c = rgb; else break }
+  return c
+}
+function b64ToBytes(b64) {
+  const raw = atob(b64)
+  const arr = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i)
+  return arr
+}
+
+function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
+  const [scene, setScene] = useState(null)
+  const [error, setError] = useState(null)
+  const [playing, setPlaying] = useState(true)
+  const canvasRef = useRef(null)
+  const trackRef = useRef(null)
+  const tRef = useRef(null)          // current timeline minute
+  const playingRef = useRef(true)
+  const [badge, setBadge] = useState({ time: '', mode: '' })
+
+  useEffect(() => {
+    let alive = true
+    setScene(null); setError(null); setPlaying(true); playingRef.current = true; tRef.current = null
+    axios.get(`${API_BASE}/nowcast/radar_scene`, { params: { lat, lon, _: requestId } })
+      .then((r) => { if (alive && r.data?.history?.length) setScene(r.data) })
+      .catch(() => { if (alive) setError('Radar animation unavailable right now.') })
+    return () => { alive = false }
+  }, [lat, lon, requestId])
+
+  // Decode grids + prebuild offscreen canvases once per scene
+  const model = useMemo(() => {
+    if (!scene) return null
+    const { w: gw, h: gh } = scene.grid
+    const lag = scene.lag_mins
+    const mkGridCanvas = (dbz) => {
+      const c = document.createElement('canvas')
+      c.width = gw; c.height = gh
+      const g = c.getContext('2d')
+      const img = g.createImageData(gw, gh)
+      for (let i = 0; i < dbz.length && i < gw * gh; i++) {
+        if (dbz[i] > 0) {
+          const [r, gr, b] = dbzToRgb(dbz[i])
+          img.data[i * 4] = r; img.data[i * 4 + 1] = gr; img.data[i * 4 + 2] = b
+          img.data[i * 4 + 3] = dbz[i] >= 41 ? 235 : dbz[i] >= 30 ? 205 : 165
+        }
+      }
+      g.putImageData(img, 0, 0)
+      return c
+    }
+    const history = scene.history.map((h) => ({
+      t: h.mins - lag,               // lag-corrected timeline position
+      timeIst: h.time_ist,
+      dbz: b64ToBytes(h.dbz),
+      canvas: null,                  // built lazily below
+    }))
+    history.forEach((h) => { h.canvas = mkGridCanvas(h.dbz) })
+    const patchById = {}
+    for (const p of scene.patches) patchById[p.id] = p
+    return {
+      gw, gh, lag,
+      history,
+      tMin: history[0].t,
+      nowDbz: history[history.length - 1].dbz,
+      owner: b64ToBytes(scene.owner),
+      patchById,
+      global: scene.global,
+      cellPx: scene.grid.cell_px,
+      userGx: scene.crop.user_gx, userGy: scene.crop.user_gy,
+      radiusCells: scene.crop.radius_cells,
+      places: scene.places || [],
+      // scratch canvas for the simulated (t > -lag) half
+      sim: (() => { const c = document.createElement('canvas'); c.width = gw; c.height = gh; return c })(),
+    }
+  }, [scene])
+
+  // Mirrors backend _patch_fade / forecast_gif rules
+  const patchFade = (p, eff, slotMins) => {
+    if (!p) return { fade: 0.9, ddbz: 0 } // unclaimed rain: global drift, gentle fade
+    const raw = p.raw_dbz || 0
+    if (raw <= 0) return { fade: 1, ddbz: 0 }
+    if (p.decay_mode === 'new' && slotMins > p.max_assert_mins) return null
+    const proj = raw + p.decay_rate * (eff / 10)
+    if (proj < p.min_dbz) return null
+    return { fade: Math.max(0.3, Math.min(1, proj / raw)), ddbz: p.decay_rate * (eff / 10) }
+  }
+
+  const drawFrame = (t) => {
+    const m = model
+    const cv = canvasRef.current
+    if (!m || !cv) return
+    const ctx = cv.getContext('2d')
+    const S = cv.width
+    const scale = S / m.gw
+    // basemap
+    ctx.fillStyle = '#08101f'
+    ctx.fillRect(0, 0, S, S)
+    ctx.strokeStyle = '#16233c'
+    ctx.lineWidth = 1
+    const cx = m.userGx * scale, cy = m.userGy * scale
+    for (const rr of [0.33, 0.66, 1.0]) {
+      ctx.beginPath(); ctx.arc(cx, cy, m.radiusCells * scale * rr, 0, 7); ctx.stroke()
+    }
+    ctx.imageSmoothingEnabled = true
+    // two-pass draw: wide blur = smooth heatmap body, light blur = definition
+    const drawRain = (src, alpha = 1) => {
+      ctx.globalAlpha = alpha
+      ctx.filter = 'blur(4px)'
+      ctx.drawImage(src, 0, 0, S, S)
+      ctx.filter = 'blur(1px)'
+      ctx.globalAlpha = alpha * 0.6
+      ctx.drawImage(src, 0, 0, S, S)
+      ctx.filter = 'none'
+      ctx.globalAlpha = 1
+    }
+    if (t <= -m.lag + 0.01 && m.history.length) {
+      // observed half: cross-fade between the two neighboring real frames
+      let i = 0
+      while (i < m.history.length - 1 && m.history[i + 1].t <= t) i++
+      const a = m.history[i]
+      const b = m.history[Math.min(i + 1, m.history.length - 1)]
+      const w = b.t > a.t ? Math.min(1, Math.max(0, (t - a.t) / (b.t - a.t))) : 0
+      drawRain(a.canvas, 1)
+      if (w > 0) drawRain(b.canvas, w)
+    } else {
+      // simulated half: advect the latest frame's cells forward by eff mins
+      const eff = t + m.lag                 // minutes since the latest frame
+      const slotMins = Math.max(0, t)
+      const shifts = eff / 10
+      const g = m.sim.getContext('2d')
+      const img = g.createImageData(m.gw, m.gh)
+      for (let gy = 0; gy < m.gh; gy++) {
+        for (let gx = 0; gx < m.gw; gx++) {
+          const i = gy * m.gw + gx
+          const dbz = m.nowDbz[i]
+          if (!dbz) continue
+          const p = m.patchById[m.owner[i]] || null
+          const f = patchFade(p, eff, slotMins)
+          if (!f) continue
+          const vx = p ? p.vx : m.global.vx
+          const vy = p ? p.vy : m.global.vy
+          const nx = Math.round(gx + (vx * shifts) / m.cellPx)
+          const ny = Math.round(gy + (vy * shifts) / m.cellPx)
+          if (nx < 0 || nx >= m.gw || ny < 0 || ny >= m.gh) continue
+          const pd = Math.max(10, dbz + f.ddbz)
+          const [r, gr, b] = dbzToRgb(pd)
+          const j = (ny * m.gw + nx) * 4
+          img.data[j] = r; img.data[j + 1] = gr; img.data[j + 2] = b
+          img.data[j + 3] = Math.round((pd >= 41 ? 235 : pd >= 30 ? 205 : 165) * f.fade)
+        }
+      }
+      g.putImageData(img, 0, 0)
+      drawRain(m.sim, t > 0 ? 0.92 : 1)
+    }
+    // place labels (like IMD's city abbreviations, but readable)
+    ctx.font = '600 10px ui-monospace, Consolas, monospace'
+    for (const pl of m.places) {
+      const px2 = pl.gx * scale, py2 = pl.gy * scale
+      if (Math.hypot(px2 - cx, py2 - cy) < 16) continue
+      ctx.fillStyle = 'rgba(226,232,240,0.9)'
+      ctx.fillRect(px2 - 1.5, py2 - 1.5, 3, 3)
+      ctx.fillStyle = 'rgba(5,16,31,0.75)'
+      ctx.fillText(pl.name, px2 + 6, py2 + 4)
+      ctx.fillText(pl.name, px2 + 5, py2 + 3)
+      ctx.fillStyle = 'rgba(196,209,230,0.95)'
+      ctx.fillText(pl.name, px2 + 5.5, py2 + 3.5)
+    }
+    // scan-zone ring + user marker
+    ctx.strokeStyle = t > 0 ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.5)'
+    if (t > 0) ctx.setLineDash([6, 5])
+    ctx.lineWidth = 1.6
+    ctx.beginPath(); ctx.arc(cx, cy, m.radiusCells * scale - 2, 0, 7); ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = '#fff'
+    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 7); ctx.fill()
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 2
+    ctx.beginPath(); ctx.arc(cx, cy, 10, 0, 7); ctx.stroke()
+    // badge + thumb
+    const tt = Math.round(t)
+    let timeLabel
+    if (t <= -m.lag) {
+      let nearest = m.history[0]
+      for (const h of m.history) if (Math.abs(h.t - t) < Math.abs(nearest.t - t)) nearest = h
+      timeLabel = `${nearest.timeIst} IST`
+    } else {
+      timeLabel = tt === 0 ? 'NOW' : (tt > 0 ? `+${tt} MIN` : `−${-tt} MIN`)
+    }
+    const mode = t <= -m.lag ? 'OBSERVED' : t <= 0 ? 'RADAR LAG · EST' : 'FORECAST'
+    setBadge((old) => (old.time === timeLabel && old.mode === mode ? old : { time: timeLabel, mode }))
+    const track = trackRef.current
+    if (track) {
+      const pct = ((t - m.tMin) / (60 - m.tMin)) * 100
+      track.style.setProperty('--pos', `${pct}%`)
+    }
+  }
+
+  // playback loop
+  useEffect(() => {
+    if (!model) return
+    if (tRef.current == null) tRef.current = model.tMin
+    let raf, last = performance.now()
+    const loop = (now) => {
+      const dt = now - last; last = now
+      if (playingRef.current) {
+        tRef.current += dt * 0.014           // ~14 timeline-min per second
+        if (tRef.current > 60) tRef.current = model.tMin
+      }
+      drawFrame(tRef.current)
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [model]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const seek = (e) => {
+    const m = model
+    const el = trackRef.current
+    if (!m || !el) return
+    const r = el.getBoundingClientRect()
+    const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+    tRef.current = m.tMin + frac * (60 - m.tMin)
+    playingRef.current = false; setPlaying(false)
+  }
+
+  if (error) return <p className="nc-forecast-note">{error}</p>
+  if (!scene) return <p className="nc-forecast-note">Loading radar scene…</p>
+
+  const m = model
+  const jumpTargets = [
+    ...m.history.map((h) => ({ t: h.t, label: h.timeIst })),
+    { t: 0, label: 'Now' },
+    ...[15, 30, 45, 60].map((x) => ({ t: x, label: `+${x}m` })),
+  ]
+  const etaNum = Number(highlightEta)
+  const etaPct = Number.isFinite(etaNum) && etaNum >= 0 && etaNum <= 60
+    ? ((etaNum - m.tMin) / (60 - m.tMin)) * 100 : null
+
+  return (
+    <>
+      <div className="nc-forecast-stage rsp-stage">
+        <canvas ref={canvasRef} width={480} height={480} className="rsp-canvas" aria-label="Radar animation" />
+        <span className="rsp-badge rsp-badge--time">{badge.time}</span>
+        <span className={`rsp-badge rsp-badge--mode rsp-mode-${badge.mode === 'FORECAST' ? 'fc' : badge.mode === 'OBSERVED' ? 'obs' : 'est'}`}>
+          {badge.mode}
+        </span>
+        <button
+          type="button"
+          className="nc-forecast-playbtn"
+          onClick={() => { playingRef.current = !playingRef.current; setPlaying(playingRef.current) }}
+          aria-label={playing ? 'Pause animation' : 'Play animation'}
+        >
+          {playing ? (
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden>
+              <rect x="4" y="3" width="4.5" height="14" rx="1" />
+              <rect x="11.5" y="3" width="4.5" height="14" rx="1" />
+            </svg>
+          ) : (
+            <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden>
+              <path d="M6 3.5v13l11-6.5-11-6.5z" />
+            </svg>
+          )}
+        </button>
+      </div>
+      <div
+        ref={trackRef}
+        className="rsp-track"
+        onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); seek(e) }}
+        onPointerMove={(e) => { if (e.buttons) seek(e) }}
+        role="slider"
+        aria-label="Timeline"
+        tabIndex={0}
+      >
+        <div className="rsp-rail" style={{ '--zero': `${((0 - m.tMin) / (60 - m.tMin)) * 100}%` }} />
+        {jumpTargets.map((j) => (
+          <span
+            key={j.label}
+            className={`rsp-tick${j.t === 0 ? ' rsp-tick--zero' : ''}`}
+            style={{ left: `${((j.t - m.tMin) / (60 - m.tMin)) * 100}%` }}
+          />
+        ))}
+        {etaPct != null && <span className="rsp-tick rsp-tick--eta" style={{ left: `${etaPct}%` }} title="Your ETA" />}
+        <div className="rsp-thumb" />
+      </div>
+      <div className="nc-forecast-scrub">
+        {jumpTargets.filter((j) => j.t >= 0 || m.history.length <= 6).map((j) => (
+          <button
+            key={j.label}
+            type="button"
+            className="nc-forecast-dot"
+            onClick={() => { tRef.current = j.t; playingRef.current = false; setPlaying(false) }}
+          >
+            {j.label}
+          </button>
+        ))}
+      </div>
+      <div className="rsp-legend" aria-label="Rain intensity colors">
+        {[
+          ['#2f7fc2', 'Drizzle'],
+          ['#2fb98c', 'Light'],
+          ['#e3c14b', 'Moderate'],
+          ['#e0863f', 'Heavy'],
+          ['#d15050', 'Very heavy'],
+          ['#b45ad6', 'Extreme'],
+        ].map(([c, label]) => (
+          <span key={label} className="rsp-legend__item">
+            <span className="rsp-legend__chip" style={{ background: c }} />
+            {label}
+          </span>
+        ))}
+      </div>
+      <p className="nc-forecast-note">
+        Rendered from extracted radar data — amber ticks are real observed frames
+        (latest is ~{Math.round(m.lag)} min old), the blue half is our motion + decay
+        simulation. Blue circle = the zone we scan around you.
+      </p>
+    </>
+  )
+}
+
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
@@ -1031,7 +1363,7 @@ function JourneyStopCard({ stop, onClose }) {
         FORECAST RADAR AT THIS POINT
         {etaRounded <= 60 ? ' · YOUR ETA FRAME MARKED' : ''}
       </div>
-      <ForecastRadarPlayer
+      <RadarScenePlayer
         lat={stop.lat}
         lon={stop.lon}
         requestId={stop.requestId}
@@ -1281,7 +1613,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
               {forecastGif && (
                 <div className="nc-forecast-card">
                   <div className="nc-section-label">FORECAST RADAR · NEXT 1 HOUR</div>
-                  <ForecastRadarPlayer
+                  <RadarScenePlayer
                     lat={forecastGif.lat}
                     lon={forecastGif.lon}
                     requestId={forecastGif.requestId}

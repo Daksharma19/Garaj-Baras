@@ -1005,6 +1005,119 @@
   color: #60A5FA;
 }
 
+/* ── Radar v2 scene player ────────────────────────────────────── */
+.rsp-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: #08101f;
+}
+
+.rsp-badge {
+  position: absolute;
+  top: 10px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  background: rgba(5, 16, 31, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: #e2e8f0;
+}
+
+.rsp-badge--time { left: 10px; }
+.rsp-badge--mode { right: 10px; }
+.rsp-mode-fc { color: #60a5fa; }
+.rsp-mode-obs { color: #f5b445; }
+.rsp-mode-est { color: #94a3b8; }
+
+.rsp-track {
+  position: relative;
+  height: 30px;
+  margin-top: 10px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.rsp-rail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 13px;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg,
+    rgba(245, 180, 69, 0.55) 0 var(--zero, 50%),
+    rgba(96, 165, 250, 0.55) var(--zero, 50%) 100%);
+}
+
+.rsp-tick {
+  position: absolute;
+  top: 9px;
+  width: 1px;
+  height: 12px;
+  background: rgba(148, 163, 184, 0.7);
+}
+
+.rsp-tick--zero {
+  width: 2px;
+  top: 6px;
+  height: 18px;
+  background: #4ade80;
+}
+
+.rsp-tick--eta {
+  width: 2px;
+  top: 6px;
+  height: 18px;
+  background: #f472b6;
+}
+
+.rsp-thumb {
+  position: absolute;
+  top: 7px;
+  left: var(--pos, 0%);
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  border: 3px solid #0b1526;
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.4);
+  transform: translateX(-8px);
+  pointer-events: none;
+}
+
+.rsp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 10px;
+}
+
+.rsp-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(196, 209, 230, 0.9);
+}
+
+.rsp-legend__chip {
+  width: 14px;
+  height: 8px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.rsp-track:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.8);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 /* ── Car journey animation (route map) ───────────────────────── */
 .car-marker-wrap,
 .stop-marker-wrap {

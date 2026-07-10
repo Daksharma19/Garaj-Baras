@@ -206,6 +206,28 @@ dir_from, dir_to, speed), `latest_frame`, `latest_ts`, `lag_info`, `patches`,
   ≤30 min ahead, and dies below 10 dBZ — unless rain is a widespread shield
   (≥50% coverage in a 60-px circle), where the kill doesn't apply.
 
+### Radar scene v2 (radar_scene.py) — data-driven animation
+`/nowcast/radar_scene?lat=&lon=` returns a compact JSON scene (~50–70 KB) the
+frontend canvas player (`RadarScenePlayer` in App.jsx) renders client-side:
+- **history**: each cached frame (deduped by timestamp, ~10-min cadence) as a
+  base64 dBZ grid (crop around the user, max-pooled to `CELL_PX = 3` px cells,
+  i.e. 80×80 for the 240×240 crop), with real OCR'd IST timestamps.
+- **owner grid**: which patch claims each rain cell of the newest frame
+  (0 = unclaimed → global drift).
+- **patches**: per-patch velocity (px/10 min) + decay params mirroring
+  nowcast's `_patch_fade` rules (`track` mode with measured decay_rate, or
+  `new`-cell synthetic lifecycle).
+- **places**: named cities inside the crop (curated per-radar `PLACES` list in
+  radar_scene.py, georeferenced via that radar's `latlon_to_pixel`), drawn as
+  labels on the canvas like IMD's city abbreviations.
+The player places history frames lag-corrected (latest frame at t = −lag),
+cross-fades between observed frames, and for t > −lag advects each cell by its
+owner's velocity with decay fade — continuous interpolated motion from ~−60
+to +60 min. Rain is drawn as a smoothed heatmap (two-pass canvas blur), with a
+dBZ color legend (Drizzle → Extreme) under the player. dBZ classification is vectorized (`_classify_dbz`, same color
+table/tolerance as fuzzy.py). This supersedes the base64-PNG player below,
+which is kept as fallback.
+
 ### Forecast animation (forecast_gif.py)
 Renders the exact same simulation as frames at now/+15/+30/+45/+60: each patch
 advected by its own vector and faded by its decay track, unclaimed rain drifts
@@ -263,6 +285,7 @@ residual for Delhi). Exposes `latlon_to_pixel`, `pixel_to_latlon`,
 | `/predict_waypoints` | POST | **Main route endpoint.** Body: `{waypoints:[{lat,lon,eta_mins}]}`; auto-selects radar from route midpoint; returns enriched waypoints + patch_analysis + summary |
 | `/predict` | POST | Legacy: start/end coords → server builds waypoints (Delhi only) |
 | `/nowcast` | POST | `{lat,lon}` → 8 slots + summary, auto radar selection |
+| `/nowcast/radar_scene?lat=&lon=` | GET | v2 animation scene JSON (dBZ history grids + patch motion/decay params) |
 | `/nowcast/forecast_gif?lat=&lon=` | GET | Forecast animation GIF |
 | `/nowcast/forecast_frames?lat=&lon=` | GET | Same as base64 PNG frames for the scrubber |
 | `/alerts/vapid_public_key` | GET | Push public key |
@@ -287,8 +310,9 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   pausing at each rainy stop; clicking a stop opens `JourneyStopCard` with an
   on-demand `/nowcast` for that point.
 - **Nowcast tab:** location search or geolocation → `NowcastSlots` (8 slot
-  cards with probability bars), `ForecastRadarPlayer` (plays
-  `/nowcast/forecast_frames`), and `RainAlertsCard` (registers `public/sw.js`,
+  cards with probability bars), `RadarScenePlayer` (canvas player over
+  `/nowcast/radar_scene`; `ForecastRadarPlayer` remains as unused fallback),
+  and `RainAlertsCard` (registers `public/sw.js`,
   subscribes to push via `/alerts/subscribe`).
 - **Chat tab (`ChatPage`):** streams `/chat` SSE, shows tool-call status.
 
