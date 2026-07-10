@@ -134,6 +134,37 @@ def get_subscription(endpoint: str):
             (endpoint,)).fetchone()
 
 
+def debug_list(send_test: bool = False):
+    """Diagnostic snapshot of every subscription (no crypto keys exposed). When
+    send_test is set, also fires a plain test push to each and reports whether
+    the push service accepted it — isolates 'backend didn't send' from
+    'browser didn't display'."""
+    init_db()
+    with _db_lock, _conn() as c:
+        rows = c.execute(
+            "SELECT id, endpoint, sub_json, lat, lon, label, state, "
+            "created_at, last_notified_at, last_rain_alert_at FROM subscriptions"
+        ).fetchall()
+    out = []
+    for sid, endpoint, sub_json, lat, lon, label, state, created, last_n, last_r in rows:
+        info = {
+            "id": sid, "label": label, "lat": lat, "lon": lon, "state": state,
+            "created_at": created, "last_notified_at": last_n,
+            "last_rain_alert_at": last_r,
+            "rain_cooldown_mins_left": (
+                round(MIN_RENOTIFY_MINS - _mins_since(last_r), 1)
+                if last_r and _mins_since(last_r) < MIN_RENOTIFY_MINS else 0
+            ),
+            "endpoint_host": endpoint.split("/")[2] if "//" in endpoint else endpoint[:40],
+        }
+        if send_test:
+            info["test_push_accepted"] = _send_push(
+                sub_json, "🔔 Garaj Baras test",
+                f"Delivery test for {label or 'your location'}.")
+        out.append(info)
+    return out
+
+
 def all_subscription_coords():
     """[(lat, lon)] for every saved subscription — used by the scheduled sweep
     to decide which radars have watchers worth refreshing."""

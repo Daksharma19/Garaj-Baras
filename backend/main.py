@@ -1526,6 +1526,17 @@ def tasks_sweep_alerts(token: str = ""):
     return _sweep_alerts()
 
 
+@app.get("/alerts/debug")
+def alerts_debug(send_test: int = 0, token: str = ""):
+    """Diagnostic: list subscriptions (no keys) and optionally fire a test push
+    to each. `?send_test=1` proves whether push delivery reaches the browser.
+    Gated by SWEEP_TOKEN when that env var is set."""
+    expected = (os.environ.get("SWEEP_TOKEN") or "").strip()
+    if expected and token != expected:
+        raise HTTPException(status_code=403, detail="Bad token.")
+    return {"subscriptions": alerts.debug_list(send_test=bool(send_test))}
+
+
 @app.post("/alerts/test")
 def alerts_test(req: AlertEndpointRequest):
     """Fire a test notification to one subscription (for setup verification)."""
