@@ -720,10 +720,12 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
 
 @app.get("/health")
 def health():
+    import db as _db
     return {
         "status": "ok",
         "service": "Garaj Baras API",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "db": "postgres" if _db.IS_POSTGRES else "sqlite",
     }
 
 
@@ -1444,11 +1446,7 @@ def alerts_unsubscribe(req: AlertEndpointRequest):
 @app.post("/alerts/test")
 def alerts_test(req: AlertEndpointRequest):
     """Fire a test notification to one subscription (for setup verification)."""
-    import sqlite3 as _sq
-    alerts.init_db()
-    with _sq.connect(alerts.DB_PATH) as c:
-        row = c.execute("SELECT sub_json, label FROM subscriptions WHERE endpoint=?",
-                        (req.endpoint,)).fetchone()
+    row = alerts.get_subscription(req.endpoint)
     if not row:
         raise HTTPException(status_code=404, detail="Subscription not found.")
     alive = alerts._send_push(row[0], "🔔 Garaj Baras test",

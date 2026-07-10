@@ -11,3 +11,4 @@ httpx
 pytesseract
 pywebpush
 google-genai
+psycopg2-binary

@@ -24,9 +24,10 @@
 
 import json
 import os
-import sqlite3
 import threading
 from datetime import datetime, timezone
+
+import db
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "alerts.db")
 VAPID_KEYS_PATH = os.path.join(os.path.dirname(__file__), "vapid_keys.json")
@@ -37,20 +38,22 @@ MIN_RENOTIFY_MINS = 45.0
 VAPID_CLAIMS_SUB = "mailto:prajjwalarya2020@gmail.com"
 
 _db_lock = threading.Lock()
+_db_ready = False
 _vapid = None
 
 
 def _conn():
-    c = sqlite3.connect(DB_PATH, timeout=15)
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
+    return db.connect(DB_PATH)
 
 
 def init_db():
+    global _db_ready
+    if _db_ready:
+        return
     with _db_lock, _conn() as c:
-        c.execute("""
+        c.execute(f"""
             CREATE TABLE IF NOT EXISTS subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {db.AUTOINC_PK},
                 endpoint TEXT UNIQUE NOT NULL,
                 sub_json TEXT NOT NULL,
                 lat REAL NOT NULL,
@@ -63,9 +66,13 @@ def init_db():
             )
         """)
         # Migrate older DBs that predate last_rain_alert_at.
-        cols = {r[1] for r in c.execute("PRAGMA table_info(subscriptions)")}
-        if "last_rain_alert_at" not in cols:
-            c.execute("ALTER TABLE subscriptions ADD COLUMN last_rain_alert_at TEXT")
+        if db.IS_POSTGRES:
+            c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_rain_alert_at TEXT")
+        else:
+            cols = {r[1] for r in c.execute("PRAGMA table_info(subscriptions)")}
+            if "last_rain_alert_at" not in cols:
+                c.execute("ALTER TABLE subscriptions ADD COLUMN last_rain_alert_at TEXT")
+    _db_ready = True
 
 
 def _clean_env(val):
@@ -116,6 +123,15 @@ def subscribe(sub: dict, lat: float, lon: float, label: str = None) -> bool:
         """, (endpoint, json.dumps(sub), float(lat), float(lon), label,
               datetime.now(timezone.utc).isoformat()))
     return True
+
+
+def get_subscription(endpoint: str):
+    """(sub_json, label) for one subscription, or None."""
+    init_db()
+    with _db_lock, _conn() as c:
+        return c.execute(
+            "SELECT sub_json, label FROM subscriptions WHERE endpoint=?",
+            (endpoint,)).fetchone()
 
 
 def unsubscribe(endpoint: str) -> bool:
@@ -276,4 +292,9 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
         print(f"alerts: process_alerts failed: {e}")
 
 
-init_db()
+# Best-effort at import: a transient Postgres outage must not crash startup;
+# init_db() is retried lazily by every public entry point.
+try:
+    init_db()
+except Exception as _e:
+    print(f"alerts: init_db failed at import (will retry lazily): {_e}")

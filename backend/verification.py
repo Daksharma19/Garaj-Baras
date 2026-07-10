@@ -20,11 +20,12 @@
 #   CSI = hit / (hit + miss + f.a.)     balanced single score
 
 import os
-import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
+
+import db
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "verification.db")
 
@@ -42,19 +43,21 @@ TRUTH_RADIUS_PX = 2
 ENGINE_VERSION = (os.environ.get("RENDER_GIT_COMMIT") or "dev")[:9]
 
 _db_lock = threading.Lock()
+_db_ready = False
 
 
 def _conn():
-    c = sqlite3.connect(DB_PATH, timeout=15)
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
+    return db.connect(DB_PATH)
 
 
 def init_db():
+    global _db_ready
+    if _db_ready:
+        return
     with _db_lock, _conn() as c:
-        c.execute("""
+        c.execute(f"""
             CREATE TABLE IF NOT EXISTS predictions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {db.AUTOINC_PK},
                 created_at TEXT NOT NULL,          -- UTC iso
                 radar TEXT NOT NULL,
                 source TEXT NOT NULL,              -- route | nowcast
@@ -77,6 +80,7 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_pred_status ON predictions(status, radar, target_time)")
+    _db_ready = True
 
 
 def log_predictions(radar: str, source: str, items: list, lag_mins=None):
@@ -307,4 +311,9 @@ def accuracy_stats(days: int = 30):
     }
 
 
-init_db()
+# Best-effort at import: a transient Postgres outage must not crash startup;
+# init_db() is retried lazily by every public entry point.
+try:
+    init_db()
+except Exception as _e:
+    print(f"verification: init_db failed at import (will retry lazily): {_e}")

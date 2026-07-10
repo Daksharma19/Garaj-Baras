@@ -38,7 +38,7 @@ Actions keep-alive pings substitute for a scheduler).
 
 | Layer | Tech |
 |---|---|
-| Backend | Python 3.11, FastAPI + uvicorn, NumPy, OpenCV, Pillow, pytesseract (dev only), pywebpush, httpx/requests, SQLite |
+| Backend | Python 3.11, FastAPI + uvicorn, NumPy, OpenCV, Pillow, pytesseract (dev only), pywebpush, httpx/requests, Postgres (Supabase, prod) / SQLite (dev fallback) via `db.py` |
 | Frontend | React 19 + Vite 8, react-leaflet/Leaflet (maps), axios. Single-page app, 3 tabs. |
 | External services | IMD radar GIFs (data source), OSRM public demo (routing), Nominatim (geocoding), Open-Meteo (cloud-cover cross-check, currently not wired in), Gemini 2.5 Flash / Groq (chatbot), Web Push (VAPID) |
 | Hosting | Backend: **Render free tier (512 MB RAM — the central constraint)** at `https://garaj-baras-api.onrender.com`. Frontend: Vercel/Netlify (static Vite build). GitHub Actions ping `/health` every 5–10 min to keep Render awake. |
@@ -67,6 +67,7 @@ Garaj Baras/
 │   ├── prediction.py            ← OSRM route building + rain-mask-shift route check
 │   ├── nowcast.py               ← 8-slot point forecast engine (compute_nowcast_slots)
 │   ├── forecast_gif.py          ← renders the forecast animation (GIF + frame payloads)
+│   ├── db.py                    ← DB backend switch: Postgres when DATABASE_URL is set (prod), else SQLite
 │   ├── bbox_mask.py             ← BBoxMask: patch masks as tight crops (~1/1000 memory)
 │   ├── timestamp_match.py       ← digit template-matching timestamp reader (prod, no Tesseract)
 │   ├── alerts.py                ← web-push rain alerts, SQLite alerts.db, state machine
@@ -77,7 +78,7 @@ Garaj Baras/
 │   ├── requirements.txt, runtime.txt (python-3.11.9), vapid_keys.json (dev VAPID keys)
 │   ├── frames/, frames_lucknow/ … ← extracted PNG frames per radar (served statically)
 │   ├── *.gif                    ← downloaded radar GIFs (delhi_radar.gif etc.)
-│   ├── alerts.db, verification.db ← SQLite (WAL mode)
+│   ├── alerts.db, verification.db ← SQLite (dev only; prod uses Supabase Postgres via db.py)
 │   ├── ts_templates/            ← digit glyph templates for timestamp_match.py
 │   └── debug_*.png, *_verify*.png ← throwaway debug images (ignore)
 ├── frontend/
@@ -335,10 +336,19 @@ anywhere**; ignore it. `dist/` is a committed production build.
   dev-only ground truth.
 - **Best-effort philosophy:** alerts/verification/patch/decay failures are
   caught and printed, never fail a request. External fetches fail-open.
-- SQLite DBs use WAL + a module-level `threading.Lock`.
+- **Database (`db.py`):** when `DATABASE_URL` is set (Render → Supabase Postgres,
+  Session pooler URL), alerts + verification use Postgres — this is what makes
+  alert subscriptions survive deploys/restarts (Render's disk is ephemeral, so
+  the old SQLite files were wiped on every deploy). Without `DATABASE_URL`
+  (local dev) they fall back to the SQLite files, zero setup. `db.py` keeps the
+  sqlite3 call style and translates `?` placeholders to `%s`; schemas use
+  `db.AUTOINC_PK` for the dialect difference. `/health` reports which backend
+  is active (`"db": "postgres"|"sqlite"`).
+- SQLite (dev) uses WAL; both backends are guarded by a module-level `threading.Lock`.
 - All timestamps IST-aware (`UTC+5:30`); DB rows store UTC ISO.
 - Deploy version = `RENDER_GIT_COMMIT` env (verification's `engine_version`).
-- Env vars: `VAPID_PRIVATE_KEY_PEM`, `VAPID_PUBLIC_KEY`, `GEMINI_API_KEY*`,
+- Env vars: `DATABASE_URL` (Supabase Postgres; unset = SQLite dev mode),
+  `VAPID_PRIVATE_KEY_PEM`, `VAPID_PUBLIC_KEY`, `GEMINI_API_KEY*`,
   `GEMINI_API_KEYS`, `GROQ_API_KEY`; frontend: `VITE_API_BASE`,
   `VITE_ORS_API_KEY`.
 - A Flutter client (`garaj_baras_flutter/`) existed but is **deleted** (staged
