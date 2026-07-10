@@ -71,6 +71,12 @@ NEW_CELL_MAX_ASSERT_MINS: float = 30.0
 # Projected dBZ below this → treat the new cell as rained out
 NEW_CELL_MIN_DBZ: float = 10.0
 
+# Widespread-rain detection: if rain covers >= this fraction of a wide circle
+# around the source point, it's a broad shield (stratiform / monsoon band),
+# not a convective pop-up — the 30-min new-cell kill must not apply.
+WIDESPREAD_RADIUS_PX: int = 60
+WIDESPREAD_MIN_FRACTION: float = 0.5
+
 
 def _track_has_history(track) -> bool:
     """True if the decay track has >= 2 observations (measured trend exists)."""
@@ -119,7 +125,144 @@ def dbz_to_probability(projected_dbz: float) -> int:
     return 99
 
 
-# ── Arrival confidence — "will it actually reach me?" ────────────────────────
+# ── Motion ensemble — data-driven "will it actually reach me?" ───────────────
+#
+# Instead of a hardcoded lead-time table, arrival probability is now computed
+# from the radar data itself:
+#
+#   1. The motion vector is perturbed into a 25-member ensemble
+#      (5 direction offsets × 5 speed factors, Gaussian-weighted). A fixed
+#      angular/speed error compounds with distance travelled, so positional
+#      spread grows naturally with lead time — no explicit time penalty needed.
+#   2. Each member back-projects the user's pixel (or forward-projects the
+#      patch centroid) and scores the *fraction* of rain pixels in the
+#      neighborhood — not a binary any(). Sitting deep inside a wide rain
+#      shield scores ~1.0; clipping the edge of a small cell scores ~0.2.
+#   3. The weighted mean over members is the geometric arrival probability.
+#   4. A mild lead-time skill factor accounts for the irreducible loss of
+#      extrapolation skill (storms grow/die/turn), and the existing decay
+#      penalties still apply.
+#
+# Result: a broad steady rain shield stays at high probability across the
+# whole horizon, while a small wobbly cell far away decays quickly — the
+# probability now tracks the storm, not the clock.
+
+ENSEMBLE_ANGLES_DEG = (-24.0, -12.0, 0.0, 12.0, 24.0)
+ENSEMBLE_SPEED_FACTORS = (0.70, 0.85, 1.0, 1.15, 1.30)
+_ENSEMBLE_W1D = (0.06, 0.24, 0.40, 0.24, 0.06)
+
+# Extrapolation skill fades with lead time even for a perfect geometric hit
+SKILL_FLOOR: float = 0.60
+SKILL_HORIZON_MINS: float = 105.0
+
+# Geometric probability below this (0-1) → the slot is treated as no-rain
+GEO_PROB_FLOOR: float = 0.12
+
+
+def _perturbed_vectors(dx: float, dy: float):
+    """25-member (weight, dx, dy) ensemble around the given motion vector."""
+    members = []
+    for ai, ang in enumerate(ENSEMBLE_ANGLES_DEG):
+        rad = math.radians(ang)
+        ca, sa = math.cos(rad), math.sin(rad)
+        rdx = dx * ca - dy * sa
+        rdy = dx * sa + dy * ca
+        for si, s in enumerate(ENSEMBLE_SPEED_FACTORS):
+            members.append((_ENSEMBLE_W1D[ai] * _ENSEMBLE_W1D[si], rdx * s, rdy * s))
+    return members
+
+
+def _rain_fraction(rain_mask: np.ndarray, fx: float, fy: float, radius: int) -> float:
+    """Fraction (0-1) of rain pixels within `radius` of (fx, fy)."""
+    h, w = rain_mask.shape
+    x0 = max(0, int(fx) - radius)
+    x1 = min(w - 1, int(fx) + radius)
+    y0 = max(0, int(fy) - radius)
+    y1 = min(h - 1, int(fy) + radius)
+    if x1 < x0 or y1 < y0:
+        return 0.0
+    win = rain_mask[y0:y1 + 1, x0:x1 + 1]
+    return float(np.count_nonzero(win)) / float(win.size)
+
+
+def _ensemble_arrival(
+    user_px: float,
+    user_py: float,
+    dx: float,
+    dy: float,
+    eff_mins: float,
+    rain_mask: np.ndarray,
+    radius: int,
+):
+    """
+    Back-project the user's pixel with every ensemble member and score the
+    rain coverage there. Returns (prob 0-1, best_px, best_py) where best_*
+    is the member point with the highest rain fraction (used for dBZ sampling).
+    """
+    total = 0.0
+    best_frac = 0.0
+    best_pt = (user_px - dx * eff_mins / 10.0, user_py - dy * eff_mins / 10.0)
+    for w, pdx, pdy in _perturbed_vectors(dx, dy):
+        ox = user_px - pdx * eff_mins / 10.0
+        oy = user_py - pdy * eff_mins / 10.0
+        f = _rain_fraction(rain_mask, ox, oy, radius)
+        total += w * f
+        if f > best_frac:
+            best_frac = f
+            best_pt = (ox, oy)
+    return min(1.0, total), best_pt[0], best_pt[1]
+
+
+def _ensemble_patch_prob(
+    patch: dict,
+    user_px: float,
+    user_py: float,
+    eff_mins: float,
+    radius: int,
+) -> float:
+    """
+    Probability (0-1) that this patch's projected footprint covers the user,
+    over the 25-member velocity ensemble. Members that land just outside the
+    footprint get partial credit (soft edge) — a storm predicted to graze the
+    user is a maybe, not a hard no.
+    """
+    cx, cy = patch["centroid_px"]
+    vx = patch.get("dx_10", 0.0)
+    vy = patch.get("dy_10", 0.0)
+    patch_radius = max(5, int(math.sqrt(patch.get("area_px", 25) / math.pi)))
+    hit_r = patch_radius + radius
+    total = 0.0
+    for w, pvx, pvy in _perturbed_vectors(vx, vy):
+        px = cx + pvx * eff_mins / 10.0
+        py = cy + pvy * eff_mins / 10.0
+        d = math.sqrt((px - user_px) ** 2 + (py - user_py) ** 2)
+        if d <= hit_r:
+            total += w
+        elif d <= hit_r * 1.5:
+            total += w * (1.0 - (d - hit_r) / (hit_r * 0.5))
+    return min(1.0, total)
+
+
+def _lead_time_skill(slot_mins: float) -> float:
+    """Extrapolation skill factor: 1.0 now → SKILL_FLOOR at the horizon."""
+    frac = min(1.0, max(0.0, slot_mins / SKILL_HORIZON_MINS))
+    return 1.0 - (1.0 - SKILL_FLOOR) * frac
+
+
+def _decay_factor(decay_status: str) -> float:
+    """Survival penalty for weakening storms (unchanged from legacy logic)."""
+    if decay_status == "dead":
+        return 0.0
+    if decay_status == "dying":
+        return 0.45
+    if decay_status == "weakening":
+        return 0.75
+    if decay_status == "new_cell":
+        return 0.8
+    return 1.0
+
+
+# ── Arrival confidence (legacy lead-time table — kept for reference/compat) ──
 
 def arrival_confidence(
     slot_mins: float,
@@ -343,16 +486,15 @@ def compute_nowcast_slots(
     for i in range(num_slots):
         t = float(i * slot_interval)
         eff = t + lag_mins
-        shifts = eff / 10.0
 
         has_rain = False
         proj_dbz = 0.0
         decay_status = "stable"
         patch_hit = None
         is_patch_hit = False
-        patch_dist_px = 0.0
+        geo_prob = 0.0  # 0-1 ensemble probability that rain covers the user
 
-        # ── 1. PATCH-FORWARD PASS ─────────────────────────────────────────────
+        # ── 1. PATCH-FORWARD PASS (velocity ensemble per patch) ─────────────
         for patch in _sorted_patches:
             cx, cy = patch["centroid_px"]
             vx = patch.get("dx_10", 0.0)
@@ -364,23 +506,29 @@ def compute_nowcast_slots(
             if abs(vx) < FRESH_POPUP_VELOCITY_THRESH and abs(vy) < FRESH_POPUP_VELOCITY_THRESH:
                 continue
 
-            pred_cx = cx + vx * shifts
-            pred_cy = cy + vy * shifts
-            patch_radius = max(5, int(math.sqrt(patch.get("area_px", 25) / math.pi)))
-            dist = math.sqrt((pred_cx - user_px) ** 2 + (pred_cy - user_py) ** 2)
-            if dist <= (patch_radius + radius):
-                has_rain = True
+            p = _ensemble_patch_prob(patch, user_px, user_py, eff, radius)
+            if p > geo_prob:
+                geo_prob = p
                 patch_hit = patch
-                is_patch_hit = True
-                patch_dist_px = cur_dist
-                break
 
-        # ── 2. GLOBAL-FLOW FALLBACK ───────────────────────────────────────────
-        orig_px = orig_py = None
-        if not has_rain:
-            orig_px = user_px - dx * eff / 10.0
-            orig_py = user_py - dy * eff / 10.0
-            has_rain = _is_rain_near(rain_mask, orig_px, orig_py, radius)
+        # ── 2. GLOBAL-FLOW back-projection ensemble ──────────────────────────
+        # Always computed: widespread rain behind a small tracked patch must
+        # not be under-reported just because the patch only grazes the user.
+        fb_prob, orig_px, orig_py = _ensemble_arrival(
+            user_px, user_py, dx, dy, eff, rain_mask, radius,
+        )
+
+        # Use whichever source is more confident
+        if patch_hit is not None and geo_prob >= max(fb_prob, GEO_PROB_FLOOR):
+            has_rain = True
+            is_patch_hit = True
+        elif fb_prob >= GEO_PROB_FLOOR:
+            has_rain = True
+            geo_prob = fb_prob
+            patch_hit = None
+        else:
+            patch_hit = None
+            geo_prob = 0.0
 
         # ── 3. dBZ / decay lookup ─────────────────────────────────────────────
         if has_rain and patch_hit is not None:
@@ -398,6 +546,12 @@ def compute_nowcast_slots(
             if _track_has_history(track):
                 proj_dbz = max(0.0, raw + track.decay_rate * (eff / 10.0))
                 decay_status = _classify(proj_dbz, track.decay_rate)
+            elif _rain_fraction(rain_mask, orig_px, orig_py, WIDESPREAD_RADIUS_PX) >= WIDESPREAD_MIN_FRACTION:
+                # Broad rain shield around the source point — not a pop-up.
+                # Keep the climatological decay but allow the full horizon.
+                proj_dbz = max(0.0, raw + NEW_CELL_DECAY_DBZ_PER_10MIN * (eff / 10.0))
+                decay_status = "stable"
+                has_rain = proj_dbz >= NEW_CELL_MIN_DBZ
             else:
                 # Untracked / single-observation cell: synthetic lifecycle.
                 # Moving patches with a measured trend never reach this branch
@@ -421,13 +575,18 @@ def compute_nowcast_slots(
                                 if _track_has_history(track) else "stable")
 
         # ── 4. Two separate scores ────────────────────────────────────────────
-        # arrival_confidence: geometric + temporal — "will it reach me?"
-        # intensity:          dBZ label           — "how heavy is the rain?"
+        # arrival_confidence: ensemble geometry × skill × decay — "will it reach me?"
+        # intensity:          dBZ label                         — "how heavy is the rain?"
         if is_observed_now:
             # Not a projection — the radar sees it (modulo lag)
             arr_conf = 90
+        elif has_rain:
+            arr_conf = int(round(
+                100.0 * geo_prob * _lead_time_skill(t) * _decay_factor(decay_status)
+            ))
+            arr_conf = max(0, min(97, arr_conf))
         else:
-            arr_conf = arrival_confidence(t, decay_status, is_patch_hit, patch_dist_px) if has_rain else 0
+            arr_conf = 0
 
         if arr_conf < MIN_PROBABILITY:
             has_rain = False
