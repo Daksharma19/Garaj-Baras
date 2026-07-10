@@ -1,6 +1,8 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import './App.css'
+import { useAuth, AccountButton, SignInGate } from './auth'
+import SavedPlaces from './SavedPlaces'
 
 const API_BASE = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
@@ -487,6 +489,7 @@ const CHAT_SUGGESTIONS = [
 ]
 
 function ChatPage({ activeTab, onChangeTab }) {
+  const { user } = useAuth()
   const [messages, setMessages] = useState([])   // {role:'user'|'model', text}
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -581,13 +584,39 @@ function ChatPage({ activeTab, onChangeTab }) {
 
   const isEmpty = messages.length === 0
 
+  // Ask AI is a signed-in feature (route + nowcast stay free).
+  if (!user) {
+    return (
+      <div className="pg-chat">
+        <nav className="nav">
+          <span className="nav__brand">GARAJ BARAS</span>
+          <span className="nav__right">
+            <span className="nav__live" aria-hidden>
+              <span className="nav__live-dot" />
+              LIVE
+            </span>
+            <AccountButton />
+          </span>
+        </nav>
+        <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
+        <SignInGate
+          title="Sign in to ask the AI"
+          sub="The rain assistant is tied to your account. Route check and nowcast stay free — no login needed there."
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="pg-chat">
       <nav className="nav">
         <span className="nav__brand">GARAJ BARAS</span>
-        <span className="nav__live" aria-hidden>
-          <span className="nav__live-dot" />
-          LIVE
+        <span className="nav__right">
+          <span className="nav__live" aria-hidden>
+            <span className="nav__live-dot" />
+            LIVE
+          </span>
+          <AccountButton />
         </span>
       </nav>
 
@@ -1193,6 +1222,7 @@ function urlBase64ToUint8Array(base64String) {
 }
 
 function RainAlertsCard({ lat, lon, label }) {
+  const { authHeaders } = useAuth()
   const [status, setStatus] = useState('idle') // idle|working|enabled|unsupported|denied|error
   const [note, setNote] = useState(null)
 
@@ -1244,7 +1274,7 @@ function RainAlertsCard({ lat, lon, label }) {
       }
       await axios.post(`${API_BASE}/alerts/subscribe`, {
         subscription: sub.toJSON(), lat, lon, label: label || null,
-      })
+      }, { headers: authHeaders() })
       localStorage.setItem('gb_alerts_endpoint', sub.endpoint)
       localStorage.setItem('gb_alerts_label', label || '')
       setStatus('enabled')
@@ -1472,9 +1502,12 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
     <div className="pg-nowcast">
       <nav className="nav">
         <span className="nav__brand">GARAJ BARAS</span>
-        <span className="nav__live" aria-hidden>
-          <span className="nav__live-dot" />
-          LIVE
+        <span className="nav__right">
+          <span className="nav__live" aria-hidden>
+            <span className="nav__live-dot" />
+            LIVE
+          </span>
+          <AccountButton />
         </span>
       </nav>
 
@@ -1580,9 +1613,25 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
         </button>
       </div>
 
-      {hasLocation && (
-        <RainAlertsCard lat={ncLat} lon={ncLon} label={ncName || null} />
-      )}
+      {/* Signed-in extras: rain alerts + saved places (nowcast itself stays free) */}
+      <SignInGate
+        title="Sign in for alerts & saved places"
+        sub="Get push alerts when rain approaches, and save Home/Work for one-tap checks. The nowcast above is free without login."
+      >
+        {hasLocation && (
+          <RainAlertsCard lat={ncLat} lon={ncLon} label={ncName || null} />
+        )}
+        <SavedPlaces
+          apiBase={API_BASE}
+          currentLat={ncLat}
+          currentLon={ncLon}
+          currentName={ncName}
+          onPick={(l) => {
+            setNcLat(l.lat); setNcLon(l.lon); setNcName(l.label)
+            setIsMyLoc(false); setNcResult(null); setNcError(null)
+          }}
+        />
+      </SignInGate>
 
       {ncError && (
         <div className="error-toast" role="alert" aria-live="polite">
@@ -1909,9 +1958,12 @@ export default function App() {
             <div className="pg-planner">
               <nav className="nav">
                 <span className="nav__brand">GARAJ BARAS</span>
-                <span className="nav__live" aria-hidden>
-                  <span className="nav__live-dot" />
-                  LIVE
+                <span className="nav__right">
+                  <span className="nav__live" aria-hidden>
+                    <span className="nav__live-dot" />
+                    LIVE
+                  </span>
+                  <AccountButton />
                 </span>
               </nav>
 

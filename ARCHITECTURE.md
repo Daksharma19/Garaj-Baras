@@ -6,7 +6,7 @@
 > deployment, and operational constraints. Only open source files when you need
 > the exact implementation of something specific.
 >
-> Last updated: 2026-07-10.
+> Last updated: 2026-07-11.
 
 ---
 
@@ -68,6 +68,8 @@ Garaj Baras/
 │   ├── nowcast.py               ← 8-slot point forecast engine (compute_nowcast_slots)
 │   ├── forecast_gif.py          ← renders the forecast animation (GIF + frame payloads)
 │   ├── db.py                    ← DB backend switch: Postgres when DATABASE_URL is set (prod), else SQLite
+│   ├── auth.py                  ← Supabase Auth JWT verification (get_current_user/get_optional_user deps)
+│   ├── accounts.py              ← users + saved_locations tables (accounts.db in dev)
 │   ├── bbox_mask.py             ← BBoxMask: patch masks as tight crops (~1/1000 memory)
 │   ├── timestamp_match.py       ← digit template-matching timestamp reader (prod, no Tesseract)
 │   ├── alerts.py                ← web-push rain alerts, SQLite alerts.db, state machine
@@ -307,10 +309,27 @@ residual for Delhi). Exposes `latlon_to_pixel`, `pixel_to_latlon`,
 | `/alerts/vapid_public_key` | GET | Push public key |
 | `/alerts/subscribe` / `/alerts/unsubscribe` / `/alerts/test` | POST | Push subscription management |
 | `/stats/accuracy?days=` | GET | Verified POD/FAR/CSI |
-| `/chat` | POST | Chatbot, SSE stream |
+| `/chat` | POST | Chatbot, SSE stream (frontend gates the tab behind sign-in) |
+| `/me` | GET | **Auth.** Upsert + return the signed-in user |
+| `/locations` | GET/POST | **Auth.** List / add saved locations (cap 10/user) |
+| `/locations/{id}` | PATCH/DELETE | **Auth.** Rename/toggle-alerts / delete a saved location |
 
 CORS: allow all. Validation: coordinates must be inside rough India bounds
 (6–38 N, 68–98 E).
+
+**Auth (auth.py + accounts.py):** Supabase Auth (Google OAuth + email OTP) on
+the frontend via `@supabase/supabase-js`; the backend verifies the Supabase
+JWT locally (HS256, `SUPABASE_JWT_SECRET`, pyjwt) — no per-request network
+call. **Policy: route + nowcast are fully public; sign-in gates only the
+extras** — Ask AI tab, rain alerts, saved places. `get_current_user` (401
+without token) / `get_optional_user` FastAPI deps. `accounts.py` owns `users`
+(id = Supabase uid) and `saved_locations` tables (Postgres in prod,
+`accounts.db` SQLite in dev, same `db.py` switch). `alerts.subscriptions`
+gained a nullable `user_id` column: subscriptions from signed-in users are
+tied to the account, anonymous ones keep working (`user_id NULL`). Dev
+fallback: with `SUPABASE_JWT_SECRET` unset, tokens are decoded WITHOUT
+signature verification (loud warning) so localhost works before Supabase is
+wired; never run prod like that.
 
 ## 10. Frontend (frontend/src)
 
@@ -328,9 +347,17 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
 - **Nowcast tab:** location search or geolocation → `NowcastSlots` (8 slot
   cards with probability bars), `RadarScenePlayer` (canvas player over
   `/nowcast/radar_scene`; `ForecastRadarPlayer` remains as unused fallback),
-  and `RainAlertsCard` (registers `public/sw.js`,
-  subscribes to push via `/alerts/subscribe`).
+  then a `SignInGate` wrapping `RainAlertsCard` (registers `public/sw.js`,
+  subscribes to push via `/alerts/subscribe` with the auth header) and
+  `SavedPlaces.jsx` (CRUD on `/locations`; tapping a place loads it into the
+  nowcast picker).
 - **Chat tab (`ChatPage`):** streams `/chat` SSE, shows tool-call status.
+  Gated behind sign-in (`SignInGate`).
+- **Auth (`auth.jsx` + `supabase.js`):** `AuthProvider` context (session,
+  `openLogin`, `authHeaders`), `AccountButton` in every nav, `LoginModal`
+  (Google OAuth + 6-digit email OTP), `SignInGate` prompt card. When
+  `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` are unset the client is null
+  and gated features show a "not configured" note; route + nowcast unaffected.
 
 Cold-start handling: `postWithWarmup` retries for up to 3 min with a
 "server warming up" status (Render free tier sleeps); `warmBackend()` pings
@@ -363,9 +390,10 @@ anywhere**; ignore it. `dist/` is a committed production build.
 - All timestamps IST-aware (`UTC+5:30`); DB rows store UTC ISO.
 - Deploy version = `RENDER_GIT_COMMIT` env (verification's `engine_version`).
 - Env vars: `DATABASE_URL` (Supabase Postgres; unset = SQLite dev mode),
+  `SUPABASE_JWT_SECRET` (auth; unset = dev no-verify mode),
   `VAPID_PRIVATE_KEY_PEM`, `VAPID_PUBLIC_KEY`, `GEMINI_API_KEY*`,
   `GEMINI_API_KEYS`, `GROQ_API_KEY`; frontend: `VITE_API_BASE`,
-  `VITE_ORS_API_KEY`.
+  `VITE_ORS_API_KEY`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
 - A Flutter client (`garaj_baras_flutter/`) existed but is **deleted** (staged
   deletions in git); the React app is the only client.
 - The two root `.txt` files are older prose/PPT summaries — useful narrative

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException  # type: ignore
+from fastapi import FastAPI, HTTPException, Depends  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from fastapi.responses import FileResponse, Response, StreamingResponse  # type: ignore
 from fastapi.staticfiles import StaticFiles  # type: ignore
@@ -29,6 +29,8 @@ from fuzzy import enrich_results  # type: ignore
 from decay import compute_decay_tracks, get_decay_status_at_pixel  # type: ignore
 import verification  # type: ignore
 import alerts  # type: ignore
+import accounts  # type: ignore
+from auth import get_current_user, get_optional_user  # type: ignore
 from patches import (  # type: ignore
     compute_patch_motion,
     score_patches_for_route,
@@ -1494,10 +1496,11 @@ def alerts_vapid_public_key():
 
 
 @app.post("/alerts/subscribe")
-def alerts_subscribe(req: AlertSubscribeRequest):
+def alerts_subscribe(req: AlertSubscribeRequest, user=Depends(get_optional_user)):
     if not (6 < req.lat < 38 and 68 < req.lon < 98):
         raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
-    ok = alerts.subscribe(req.subscription, req.lat, req.lon, req.label)
+    ok = alerts.subscribe(req.subscription, req.lat, req.lon, req.label,
+                          user_id=(user or {}).get("id"))
     if not ok:
         raise HTTPException(status_code=400, detail="Invalid subscription.")
     # Instant first check (background): if it's already raining at this spot,
@@ -1534,7 +1537,10 @@ def alerts_debug(send_test: int = 0, token: str = ""):
     expected = (os.environ.get("SWEEP_TOKEN") or "").strip()
     if expected and token != expected:
         raise HTTPException(status_code=403, detail="Bad token.")
-    return {"subscriptions": alerts.debug_list(send_test=bool(send_test))}
+    return {
+        "vapid_public_key": alerts.public_key_fingerprint(),
+        "subscriptions": alerts.debug_list(send_test=bool(send_test)),
+    }
 
 
 @app.post("/alerts/test")
@@ -1546,6 +1552,67 @@ def alerts_test(req: AlertEndpointRequest):
     alive = alerts._send_push(row[0], "🔔 Garaj Baras test",
                               f"Rain alerts are working for {row[1] or 'your location'}.")
     return {"ok": bool(alive)}
+
+
+# ENDPOINTS: Accounts + saved locations (Supabase Auth; auth.py verifies the
+# JWT locally). Nowcast/route stay public — sign-in gates only these extras.
+
+class SavedLocationCreate(BaseModel):
+    label: str
+    lat: float
+    lon: float
+    alerts_enabled: bool = False
+
+
+class SavedLocationUpdate(BaseModel):
+    label: str | None = None
+    alerts_enabled: bool | None = None
+
+
+@app.get("/me")
+def me(user=Depends(get_current_user)):
+    """Upsert + return the signed-in user (first authenticated call creates
+    the users row)."""
+    return accounts.upsert_user(user["id"], user.get("email"))
+
+
+@app.get("/locations")
+def locations_list(user=Depends(get_current_user)):
+    return {"locations": accounts.list_locations(user["id"])}
+
+
+@app.post("/locations")
+def locations_add(req: SavedLocationCreate, user=Depends(get_current_user)):
+    if not (6 < req.lat < 38 and 68 < req.lon < 98):
+        raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
+    label = (req.label or "").strip()[:60]
+    if not label:
+        raise HTTPException(status_code=400, detail="Label required.")
+    accounts.upsert_user(user["id"], user.get("email"))
+    loc = accounts.add_location(user["id"], label, req.lat, req.lon,
+                                req.alerts_enabled)
+    if loc is None:
+        raise HTTPException(status_code=400,
+                            detail=f"Limit of {accounts.MAX_LOCATIONS_PER_USER} saved places reached.")
+    return loc
+
+
+@app.patch("/locations/{loc_id}")
+def locations_update(loc_id: int, req: SavedLocationUpdate,
+                     user=Depends(get_current_user)):
+    label = req.label.strip()[:60] if req.label is not None else None
+    ok = accounts.update_location(user["id"], loc_id, label=label,
+                                  alerts_enabled=req.alerts_enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Location not found.")
+    return {"ok": True}
+
+
+@app.delete("/locations/{loc_id}")
+def locations_delete(loc_id: int, user=Depends(get_current_user)):
+    if not accounts.delete_location(user["id"], loc_id):
+        raise HTTPException(status_code=404, detail="Location not found.")
+    return {"ok": True}
 
 
 # ENDPOINT: Verified prediction accuracy (automated hit-rate tracking)

@@ -12,3 +12,4 @@ pytesseract
 pywebpush
 google-genai
 psycopg2-binary
+pyjwt

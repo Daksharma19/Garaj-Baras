@@ -65,13 +65,17 @@ def init_db():
                 last_rain_alert_at TEXT               -- cooldown for the "rain now" ping
             )
         """)
-        # Migrate older DBs that predate last_rain_alert_at.
+        # Migrate older DBs: last_rain_alert_at (pre-arrival-ping) and
+        # user_id (pre-accounts; NULL = anonymous browser subscription).
         if db.IS_POSTGRES:
             c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_rain_alert_at TEXT")
+            c.execute("ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS user_id TEXT")
         else:
             cols = {r[1] for r in c.execute("PRAGMA table_info(subscriptions)")}
             if "last_rain_alert_at" not in cols:
                 c.execute("ALTER TABLE subscriptions ADD COLUMN last_rain_alert_at TEXT")
+            if "user_id" not in cols:
+                c.execute("ALTER TABLE subscriptions ADD COLUMN user_id TEXT")
     _db_ready = True
 
 
@@ -108,20 +112,22 @@ def public_key():
     return load_vapid().get("public_key")
 
 
-def subscribe(sub: dict, lat: float, lon: float, label: str = None) -> bool:
+def subscribe(sub: dict, lat: float, lon: float, label: str = None,
+              user_id: str = None) -> bool:
     init_db()
     endpoint = (sub or {}).get("endpoint")
     if not endpoint:
         return False
     with _db_lock, _conn() as c:
         c.execute("""
-            INSERT INTO subscriptions (endpoint, sub_json, lat, lon, label, created_at)
-            VALUES (?,?,?,?,?,?)
+            INSERT INTO subscriptions (endpoint, sub_json, lat, lon, label, created_at, user_id)
+            VALUES (?,?,?,?,?,?,?)
             ON CONFLICT(endpoint) DO UPDATE SET
                 sub_json=excluded.sub_json, lat=excluded.lat, lon=excluded.lon,
-                label=excluded.label, state='clear'
+                label=excluded.label, state='clear',
+                user_id=COALESCE(excluded.user_id, subscriptions.user_id)
         """, (endpoint, json.dumps(sub), float(lat), float(lon), label,
-              datetime.now(timezone.utc).isoformat()))
+              datetime.now(timezone.utc).isoformat(), user_id))
     return True
 
 
@@ -132,6 +138,42 @@ def get_subscription(endpoint: str):
         return c.execute(
             "SELECT sub_json, label FROM subscriptions WHERE endpoint=?",
             (endpoint,)).fetchone()
+
+
+def send_test_verbose(sub_json: str, title: str, body: str) -> dict:
+    """Like _send_push but returns the real FCM/WNS HTTP status + error text, so
+    a 403 VAPID-mismatch (which _send_push hides as 'alive') is visible."""
+    from pywebpush import webpush, WebPushException
+    from py_vapid import Vapid
+    v = load_vapid()
+    if not v.get("private_key_pem"):
+        return {"ok": False, "status": None, "error": "no VAPID keys configured"}
+    try:
+        webpush(
+            subscription_info=json.loads(sub_json),
+            data=json.dumps({"title": title, "body": body}),
+            vapid_private_key=Vapid.from_pem(v["private_key_pem"].encode()),
+            vapid_claims={"sub": VAPID_CLAIMS_SUB},
+            ttl=3600,
+        )
+        return {"ok": True, "status": 201, "error": None}
+    except WebPushException as e:
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        detail = None
+        try:
+            detail = e.response.text[:200]
+        except Exception:
+            detail = str(e)[:200]
+        return {"ok": False, "status": code, "error": detail}
+    except Exception as e:
+        return {"ok": False, "status": None, "error": str(e)[:200]}
+
+
+def public_key_fingerprint() -> str:
+    """First/last chars of the served public key — lets us eyeball whether the
+    deployed VAPID public key matches what a subscription was created with."""
+    pk = public_key() or ""
+    return f"{pk[:12]}…{pk[-6:]} (len {len(pk)})" if pk else "NONE"
 
 
 def debug_list(send_test: bool = False):
@@ -158,7 +200,7 @@ def debug_list(send_test: bool = False):
             "endpoint_host": endpoint.split("/")[2] if "//" in endpoint else endpoint[:40],
         }
         if send_test:
-            info["test_push_accepted"] = _send_push(
+            info["push_result"] = send_test_verbose(
                 sub_json, "🔔 Garaj Baras test",
                 f"Delivery test for {label or 'your location'}.")
         out.append(info)
