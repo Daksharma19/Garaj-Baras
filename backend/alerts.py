@@ -134,6 +134,15 @@ def get_subscription(endpoint: str):
             (endpoint,)).fetchone()
 
 
+def all_subscription_coords():
+    """[(lat, lon)] for every saved subscription — used by the scheduled sweep
+    to decide which radars have watchers worth refreshing."""
+    init_db()
+    with _db_lock, _conn() as c:
+        return [(float(r[0]), float(r[1]))
+                for r in c.execute("SELECT lat, lon FROM subscriptions").fetchall()]
+
+
 def unsubscribe(endpoint: str) -> bool:
     init_db()
     with _db_lock, _conn() as c:
@@ -180,11 +189,15 @@ def _mins_since(iso: str) -> float:
         return 1e9
 
 
-def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixel):
+def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixel,
+                   only_endpoint: str = None):
     """
     Run after a radar refresh. `state` is the freshly-built radar state dict.
     Checks each saved location in this radar's coverage and pushes a heads-up
     when rain is approaching and again when it arrives. Best-effort: never raises.
+
+    `only_endpoint`: when set, checks just that one subscription (used by the
+    instant check fired the moment a user enables alerts).
     """
     try:
         init_db()
@@ -193,6 +206,8 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                 "SELECT id, endpoint, sub_json, lat, lon, label, state, "
                 "last_notified_at, last_rain_alert_at "
                 "FROM subscriptions").fetchall()
+        if only_endpoint is not None:
+            subs = [s for s in subs if s[1] == only_endpoint]
         if not subs:
             return
 

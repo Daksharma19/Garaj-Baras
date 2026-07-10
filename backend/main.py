@@ -716,6 +716,71 @@ def _load_bhopal_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: boo
     return bhopal_cache
 
 
+# ── Radar registry + alert plumbing ───────────────────────────────────────────
+# One table mapping a radar name to everything the alert paths need: its
+# blocking refresh fn (which also runs process_alerts on completion), its cache,
+# its cold-start event, and its georef module.
+
+_RADAR_REGISTRY = {
+    "delhi":   {"refresh": _do_delhi_refresh,   "cache": radar_cache,   "ready": _delhi_ready,   "georef": _georef_delhi},
+    "lucknow": {"refresh": _do_lucknow_refresh, "cache": lucknow_cache, "ready": _lucknow_ready, "georef": georef_lucknow},
+    "patna":   {"refresh": _do_patna_refresh,   "cache": patna_cache,   "ready": _patna_ready,   "georef": georef_patna},
+    "bhopal":  {"refresh": _do_bhopal_refresh,  "cache": bhopal_cache,  "ready": _bhopal_ready,  "georef": georef_bhopal},
+}
+
+
+def _ensure_radar_fresh_blocking(name: str) -> dict:
+    """Return a usable state for `name`, refreshing synchronously if stale.
+    The refresh fn no-ops if another refresh already holds the bg lock, so this
+    is best-effort: it never double-refreshes and never raises."""
+    reg = _RADAR_REGISTRY.get(name)
+    if not reg:
+        return None
+    cache = reg["cache"]
+    if not (reg["ready"].is_set() and _is_fresh(cache, RADAR_CACHE_TTL_SEC)):
+        try:
+            reg["refresh"](RADAR_CACHE_TTL_SEC, False)
+        except Exception as e:
+            print(f"alert sweep: refresh {name} failed: {e}")
+    return cache
+
+
+def _instant_alert_check(endpoint: str, lat: float, lon: float) -> None:
+    """Fired in a thread the moment a user enables alerts: if it's already
+    raining (or rain is imminent) at their spot, notify within seconds instead
+    of waiting for the next radar refresh."""
+    try:
+        name = _detect_radar(lat, lon)
+        reg = _RADAR_REGISTRY.get(name)
+        if not reg:
+            return
+        state = _ensure_radar_fresh_blocking(name)
+        if not (state and state.get("latest_frame")):
+            return
+        alerts.process_alerts(name, state, reg["georef"].is_within_radar,
+                              reg["georef"].latlon_to_pixel, only_endpoint=endpoint)
+    except Exception as e:
+        print(f"instant alert check failed: {e}")
+
+
+def _sweep_alerts() -> dict:
+    """Refresh every radar that has at least one saved subscription and run its
+    alert checks. Driven by the scheduled keep-alive so alerts fire on time even
+    when no one is actively using that radar city."""
+    try:
+        coords = alerts.all_subscription_coords()
+    except Exception as e:
+        print(f"alert sweep: could not read subscriptions: {e}")
+        return {"ok": False, "error": str(e)}
+    radars = sorted({_detect_radar(lat, lon) for lat, lon in coords})
+    refreshed = []
+    for name in radars:
+        # The blocking refresh runs process_alerts for all this radar's subs.
+        _ensure_radar_fresh_blocking(name)
+        refreshed.append(name)
+    return {"ok": True, "subscriptions": len(coords), "radars_refreshed": refreshed}
+
+
 # ENDPOINT 1: Health Check
 
 @app.get("/health")
@@ -1435,12 +1500,30 @@ def alerts_subscribe(req: AlertSubscribeRequest):
     ok = alerts.subscribe(req.subscription, req.lat, req.lon, req.label)
     if not ok:
         raise HTTPException(status_code=400, detail="Invalid subscription.")
+    # Instant first check (background): if it's already raining at this spot,
+    # the user hears about it in seconds rather than at the next radar refresh.
+    endpoint = (req.subscription or {}).get("endpoint")
+    if endpoint:
+        threading.Thread(target=_instant_alert_check,
+                         args=(endpoint, req.lat, req.lon), daemon=True).start()
     return {"ok": True, "message": "Rain alerts enabled for this location."}
 
 
 @app.post("/alerts/unsubscribe")
 def alerts_unsubscribe(req: AlertEndpointRequest):
     return {"ok": alerts.unsubscribe(req.endpoint)}
+
+
+@app.get("/tasks/sweep_alerts")
+def tasks_sweep_alerts(token: str = ""):
+    """Scheduled alert sweep: refresh radars that have saved subscriptions and
+    fire due notifications. Called by the keep-alive workflow every ~10-15 min so
+    alerts don't depend on someone happening to browse. Protected by SWEEP_TOKEN
+    when that env var is set (leave unset to allow open calls in dev)."""
+    expected = (os.environ.get("SWEEP_TOKEN") or "").strip()
+    if expected and token != expected:
+        raise HTTPException(status_code=403, detail="Bad sweep token.")
+    return _sweep_alerts()
 
 
 @app.post("/alerts/test")

@@ -255,6 +255,21 @@ covered saved location gets a 4-slot nowcast:
   (`VAPID_PRIVATE_KEY_PEM`/`VAPID_PUBLIC_KEY`, paste-mistake-tolerant) or
   `vapid_keys.json` in dev. Push TTL 3600 (WNS rejects 0).
 
+**Two triggers keep alerts timely (beyond the browse-driven refresh):**
+- **Instant check on subscribe:** `/alerts/subscribe` spawns a background
+  `_instant_alert_check` (main.py) — detect radar, ensure fresh state, then
+  `process_alerts(only_endpoint=...)` for just the new subscription. If it's
+  already raining, the user is notified within seconds.
+- **Scheduled sweep:** `GET /tasks/sweep_alerts?token=` (`_sweep_alerts` in
+  main.py) reads every subscription's coords (`alerts.all_subscription_coords`),
+  maps them to distinct radars via `_detect_radar`, and blocking-refreshes each
+  (which runs `process_alerts`). The `keepalive.yml` GitHub Action hits this
+  every 10 min, so alerts fire on schedule instead of only when someone browses
+  that city; `keep_alive.yml` still pings `/health` every 5 min as a cheap
+  awake-keeper. Optional `SWEEP_TOKEN` env gates the endpoint (matching repo
+  secret sent by the workflow). Both paths use the `_RADAR_REGISTRY` table
+  (name → refresh fn / cache / ready event / georef).
+
 ### Chatbot (chatbot.py)
 Gemini 2.5 Flash with function calling; tools are the **in-process** endpoint
 functions registered by main.py (`get_nowcast`, `get_route_rain`,
