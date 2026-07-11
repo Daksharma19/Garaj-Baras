@@ -1,22 +1,33 @@
 # Garaj Baras - georef_lucknow.py
 #
-# Lucknow radar crop: 527 x 525 px (same IMD layout as Delhi).
+# Lucknow radar crop: 392 x 392 px, cropped from the raw 704x594 GIF at
+# CROP_BOX (0, 176, 392, 568) — see radar_lucknow.py. NOT the same layout as
+# Delhi (880x720, 527x525 crop): the raw frame size and panel offset differ.
+#
+# This module previously assumed a 527x525 crop reusing Delhi's crop box,
+# which on Lucknow's actual (smaller, differently-offset) frame pulled in the
+# right-side RHI/legend panel and black-padded the bottom — every pixel below
+# was silently wrong. The GCPs were originally measured against that crop's
+# real (non-padded) region, which only ever differed from the corrected crop
+# by a constant 51px vertical offset (176 - 125), so the fit was recovered by
+# shifting the py constant term by -51 rather than re-measuring from scratch;
+# verified by re-plotting all 7 GCPs against a live corrected-crop frame.
 #
 # Quadratic georef model (identical form to georef.py):
 #   px = c0 + c1*lat + c2*lon + c3*lat*lon + c4*lat^2 + c5*lon^2
 #   py = d0 + d1*lat + d2*lon + d3*lat*lon + d4*lat^2 + d5*lon^2
 #
-# Least-squares fit to 7 GCPs measured from cropped 527x525 frame (max residual: 6 px):
-#   Lucknow    (26.8467, 80.9462) → (195, 246)
-#   Gonda      (27.1320, 81.9607) → (277, 216)
-#   Bareilly   (28.3670, 79.4304) → ( 82, 108)
-#   Prayagraj  (25.4358, 81.8463) → (275, 360)
-#   Jaunpur    (25.7464, 82.6836) → (340, 336)
-#   Banda      (25.4804, 80.3377) → (153, 359)
-#   Kannauj    (27.0535, 79.9207) → ( 92, 222)
+# Least-squares fit to 7 GCPs, in corrected 392x392 crop space (max residual: 6 px):
+#   Lucknow    (26.8467, 80.9462) → (195, 195)
+#   Gonda      (27.1320, 81.9607) → (277, 165)
+#   Bareilly   (28.3670, 79.4304) → ( 82,  57)
+#   Prayagraj  (25.4358, 81.8463) → (275, 309)
+#   Jaunpur    (25.7464, 82.6836) → (340, 285)
+#   Banda      (25.4804, 80.3377) → (153, 308)
+#   Kannauj    (27.0535, 79.9207) → ( 92, 171)
 
-IMAGE_WIDTH  = 527
-IMAGE_HEIGHT = 525
+IMAGE_WIDTH  = 392
+IMAGE_HEIGHT = 392
 
 CENTER_LAT = 26.8467   # Lucknow radar station
 CENTER_LON = 80.9462
@@ -31,7 +42,7 @@ CPX = (
 )
 
 CPY = (
-    -4868.510862835962,
+    -4919.510862835962,
         6.658676495472395,
       152.62412436416002,
        -0.33161483156016053,
@@ -92,13 +103,13 @@ def is_within_radar(lat, lon):
 
 if __name__ == "__main__":
     gcps = [
-        ("Lucknow",   26.8467, 80.9462, 195, 246),
-        ("Gonda",     27.1320, 81.9607, 277, 216),
-        ("Bareilly",  28.3670, 79.4304,  82, 108),
-        ("Prayagraj", 25.4358, 81.8463, 275, 360),
-        ("Jaunpur",   25.7464, 82.6836, 340, 336),
-        ("Banda",     25.4804, 80.3377, 153, 359),
-        ("Kannauj",   27.0535, 79.9207,  92, 222),
+        ("Lucknow",   26.8467, 80.9462, 195, 195),
+        ("Gonda",     27.1320, 81.9607, 277, 165),
+        ("Bareilly",  28.3670, 79.4304,  82,  57),
+        ("Prayagraj", 25.4358, 81.8463, 275, 309),
+        ("Jaunpur",   25.7464, 82.6836, 340, 285),
+        ("Banda",     25.4804, 80.3377, 153, 308),
+        ("Kannauj",   27.0535, 79.9207,  92, 171),
     ]
     print("Lucknow GCP check:")
     for name, la, lo, ex, ey in gcps:

@@ -255,7 +255,7 @@ def augment_with_current_image(frame_data, output_folder,
         return frame_data
 
 
-def extract_frames(gif_path, output_folder, ocr_crop=None):
+def extract_frames(gif_path, output_folder, ocr_crop=None, crop_box=None):
     """
     Extract all frames from animated GIF.
 
@@ -263,11 +263,20 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
     - OCR the timestamp from the exact RIGHT-panel coordinates (before cropping)
     - Crop the radar-circle region and save it as `frame_XX.png`
 
+    `crop_box` is (left, top, right, bottom) for the radar-circle region; it
+    defaults to Delhi's box but MUST be overridden for any source GIF whose
+    raw frame size/panel layout differs from Delhi's 880x720 (e.g. Lucknow's
+    704x594) — reusing Delhi's box on a different layout silently crops in
+    the wrong region (legend/RHI panel bleed, black padding past the real
+    image bounds) and desyncs every georef_*.py fit from the actual pixels.
+
     Returns:
         frame_data: list of (frame_path, timestamp_or_None)
     """
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
+
+    crop_box = crop_box if crop_box is not None else (0, CROP_TOP, CROP_RIGHT, CROP_BOTTOM)
 
     frame_data = []
     try:
@@ -281,7 +290,7 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
         with Image.open(gif_path) as im:
             for frame in ImageSequence.Iterator(im):
                 full = frame.convert('RGB')
-                radar_crop = full.crop((0, CROP_TOP, CROP_RIGHT, CROP_BOTTOM))
+                radar_crop = full.crop(crop_box)
                 crop_bytes = radar_crop.tobytes()
                 if crop_bytes == last_crop_bytes:
                     skipped += 1
@@ -343,7 +352,7 @@ def extract_frames(gif_path, output_folder, ocr_crop=None):
             frame_cropped.save(frame_path)
             frame_data.append((frame_path, ts_list[idx]))
             if idx == 0:
-                print("Delhi crop frame size: %s" % (frame_cropped.size,))
+                print("Radar crop frame size: %s" % (frame_cropped.size,))
     except Exception as e:
         print(f"Error extracting frames: {e}")
 

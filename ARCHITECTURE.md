@@ -107,7 +107,7 @@ text. Rain intensity (reflectivity, **dBZ**) is encoded as 10 legend colors
 | Radar | Center | Notes |
 |---|---|---|
 | Delhi (Palam) | 28.556 N, 77.100 E | Primary/default. Also fetches IMD's separate "current image" (`caz_delhi.gif`) and appends it as newest frame when its timestamp is strictly newer than the GIF (GIF rebuilds lazily, can lag 60+ min). |
-| Lucknow | 26.847 N, 80.946 E | GIF is 704×594, own OCR crop coordinates |
+| Lucknow | 26.847 N, 80.946 E | GIF is 704×594 (not 880×720); own OCR crop **and own radar-circle crop** (392×392 at box `(0,176,392,568)` — the circle sits at a different offset than Delhi's, so it cannot reuse Delhi's crop box) |
 | Patna | 25.591 N, 85.096 E | |
 | Bhopal | 23.288 N, 77.337 E | **Re-enabled** (older docs say disabled). BBoxMask compression + LRU state eviction (max 2 radars in RAM) made it fit in 512 MB. |
 
@@ -303,6 +303,19 @@ c4·lat² + c5·lon²`, same for py) least-squares fitted to 7 manually measured
 Ground Control Points (cities with known lat/lon and pixel positions; ≤4 px
 residual for Delhi). Exposes `latlon_to_pixel`, `pixel_to_latlon`,
 `is_within_radar`, `IMAGE_WIDTH/HEIGHT`, `CENTER_LAT/LON`. Scale ≈ 0.877 km/px.
+
+**A georef's GCP fit is only valid for the exact crop box its own `radar_*.py`
+produces.** `extract_frames()` (radar.py) takes a `crop_box` param — Delhi,
+Patna, and Bhopal share its default (their raw GIFs are all 880×720 with the
+same panel layout), but Lucknow's raw GIF is 704×594 with the circle at a
+different offset, so `radar_lucknow.py` defines and always applies its own
+`CROP_BOX`. (This was previously a silent bug: Lucknow reused Delhi's crop
+box, which pulled in the RHI/legend panel and black-padded the missing rows —
+every Lucknow pixel was desynced from `georef_lucknow.py`'s fit. Fixed by
+giving Lucknow its own crop box and re-deriving the fit for that crop.) Adding
+a new radar whose source GIF isn't 880×720-with-Delhi's-layout must follow the
+same pattern: measure that radar's own crop box from a live frame before
+reusing any GCP numbers.
 
 ## 9. API endpoints (main.py)
 

@@ -13,12 +13,21 @@
 # captures the '14:22:10Z / 5 JUL 2026 UTC / 19:52:10 IST' block only.
 _OCR_CROP = (540, 175, 704, 268)
 
+# Lucknow's radar-circle crop, in full-GIF coordinates (704x594 raw frame —
+# NOT 880x720 like Delhi, and the circle sits at a different offset). Measured
+# directly off the green-disc bounding box in a live frame: x 1-391, y 177-567.
+# Previously this radar reused radar.py's Delhi-tuned box (0,125,527,650),
+# which on this smaller/differently-laid-out frame pulled in the RHI/legend
+# panel on the right and black-padded the bottom 56px — desyncing every pixel
+# from georef_lucknow.py's fit. See georef_lucknow.py for the matching GCPs.
+CROP_BOX = (0, 176, 392, 568)
+
 import os
 import threading
 
 from radar import (
     download_gif,
-    extract_frames,
+    extract_frames as _extract_frames,
     gif_is_fresh as _gif_is_fresh,
     clear_frames_folder,
     get_radar_lag_mins,
@@ -36,15 +45,20 @@ def gif_is_fresh(ttl_sec=RADAR_TTL_SEC):
     return _gif_is_fresh(ttl_sec=ttl_sec, gif_path=GIF_SAVE_PATH)
 
 
+def extract_frames(gif_path, output_folder):
+    """Lucknow-specific wrapper: always applies this radar's OCR/crop boxes."""
+    return _extract_frames(gif_path, output_folder, ocr_crop=_OCR_CROP, crop_box=CROP_BOX)
+
+
 def get_all_frames():
     success, _ = download_gif(GIF_URL, GIF_SAVE_PATH)
     if success:
-        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
+        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER)
     # IMD unreachable: serve the last GIF we have — the lag system will
     # honestly report its age. Stale radar beats an empty state.
     if os.path.exists(GIF_SAVE_PATH):
         print("Lucknow radar: download failed — using last GIF on disk")
-        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
+        return extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER)
     print("Lucknow radar: GIF download failed.")
     return []
 
@@ -61,7 +75,7 @@ def refresh_frames_if_stale(*, ttl_sec=RADAR_TTL_SEC, force=False, clear_pngs=Tr
         if not success:
             if os.path.exists(GIF_SAVE_PATH):
                 print("Lucknow radar: download failed — using last GIF on disk")
-                frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
+                frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER)
                 return (frame_data, True)
             print("Lucknow radar: GIF download failed.")
             return ([], False)
@@ -71,5 +85,5 @@ def refresh_frames_if_stale(*, ttl_sec=RADAR_TTL_SEC, force=False, clear_pngs=Tr
             if deleted:
                 print(f"Lucknow: cleared {deleted} old frame PNGs")
 
-        frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER, ocr_crop=_OCR_CROP)
+        frame_data = extract_frames(GIF_SAVE_PATH, FRAMES_FOLDER)
         return (frame_data, True)
