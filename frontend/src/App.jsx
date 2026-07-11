@@ -85,15 +85,6 @@ async function postWithWarmup(url, body, config = {}, onStatus = null) {
   }
 }
 
-function computeViewboxAround(lat, lon, radiusKm = 180) {
-  const la = Number(lat)
-  const lo = Number(lon)
-  if (!Number.isFinite(la) || !Number.isFinite(lo)) return null
-  const dLat = radiusKm / 111
-  const dLon = radiusKm / (111 * Math.max(0.2, Math.cos((la * Math.PI) / 180)))
-  return `${lo - dLon},${la + dLat},${lo + dLon},${la - dLat}`
-}
-
 function getRainColor(label) {
   const l = String(label || '')
   if (l === 'No Rain') return '#FFFFFF'
@@ -253,7 +244,7 @@ async function geocode(place) {
   return { lat: parseFloat(data.lat), lon: parseFloat(data.lon), display_name: data.display_name }
 }
 
-async function searchPlaces(query, signal, opts = {}) {
+async function searchPlaces(query, signal) {
   const q = String(query ?? '').trim()
   if (!q) return []
   const res = await axios.get(NOMINATIM_SEARCH_URL, {
@@ -264,7 +255,6 @@ async function searchPlaces(query, signal, opts = {}) {
       format: 'jsonv2',
       limit: 6,
       addressdetails: 1,
-      ...(opts?.viewbox ? { viewbox: opts.viewbox, bounded: 0 } : {}),
       countrycodes: 'in',
     },
     headers: { Accept: 'application/json' },
@@ -1578,14 +1568,13 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
       const ac = new AbortController()
       ncAbortRef.current = ac
       try {
-        const viewbox = userLoc ? computeViewboxAround(userLoc.lat, userLoc.lon, 220) : null
-        setNcSuggestions(await searchPlaces(q, ac.signal, { viewbox }))
+        setNcSuggestions(await searchPlaces(q, ac.signal))
       } catch (e) {
         if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setNcSuggestions([])
       }
     }, 350)
     return () => { if (ncDebounceRef.current) clearTimeout(ncDebounceRef.current) }
-  }, [ncSearchQuery, userLoc])
+  }, [ncSearchQuery])
 
   function useMyLocation() {
     if (!userLoc) return
@@ -1959,14 +1948,13 @@ export default function App() {
       const ac = new AbortController()
       sourceAbortRef.current = ac
       try {
-        const viewbox = userLoc ? computeViewboxAround(userLoc.lat, userLoc.lon, 220) : null
-        setSourceSug(await searchPlaces(q, ac.signal, { viewbox }))
+        setSourceSug(await searchPlaces(q, ac.signal))
       } catch (e) {
         if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setSourceSug([])
       }
     }, 350)
     return () => { if (sourceDebounceRef.current) clearTimeout(sourceDebounceRef.current) }
-  }, [source, userLoc])
+  }, [source])
 
   useEffect(() => {
     const q = String(destination || '').trim()
@@ -1977,14 +1965,13 @@ export default function App() {
       const ac = new AbortController()
       destAbortRef.current = ac
       try {
-        const viewbox = userLoc ? computeViewboxAround(userLoc.lat, userLoc.lon, 220) : null
-        setDestSug(await searchPlaces(q, ac.signal, { viewbox }))
+        setDestSug(await searchPlaces(q, ac.signal))
       } catch (e) {
         if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setDestSug([])
       }
     }, 350)
     return () => { if (destDebounceRef.current) clearTimeout(destDebounceRef.current) }
-  }, [destination, userLoc])
+  }, [destination])
 
   async function handlePredict() {
     const startCity = source.trim()

@@ -57,9 +57,9 @@ Garaj Baras/
 ├── backend/                     ← FastAPI app (run from inside this dir)
 │   ├── main.py                  ← API endpoints + per-radar state cache + LRU eviction (THE hub)
 │   ├── radar.py                 ← Delhi GIF download/frame-extraction/OCR-timestamp + shared helpers
-│   ├── radar_lucknow.py / radar_patna.py / radar_bhopal.py  ← per-radar wrappers over radar.py helpers
+│   ├── radar_lucknow.py / radar_patna.py / radar_bhopal.py / radar_jaipur.py / radar_paradip.py ← per-radar wrappers over radar.py helpers
 │   ├── georef.py                ← Delhi pixel↔latlon quadratic GCP model
-│   ├── georef_lucknow.py / georef_patna.py / georef_bhopal.py ← per-radar georef models
+│   ├── georef_lucknow.py / georef_patna.py / georef_bhopal.py / georef_jaipur.py / georef_paradip.py ← per-radar georef models
 │   ├── optical_flow.py          ← rain mask isolation + global movement vector (Farneback)
 │   ├── patches.py               ← per-storm-cell (blob) motion + route intercept scoring
 │   ├── decay.py                 ← per-cell dBZ trend tracks (stable/weakening/dying/dead)
@@ -102,7 +102,7 @@ Each GIF ≈ 18 frames ≈ last 3 hours. The Delhi frame is 880×720 but only a
 text. Rain intensity (reflectivity, **dBZ**) is encoded as 10 legend colors
 (dark blue ≈ 20 dBZ light drizzle → yellow 44 heavy → red 55 → white 60 extreme).
 
-**Four radars, each with its own `radar_*.py` + `georef_*.py` pair:**
+**Six radars, each with its own `radar_*.py` + `georef_*.py` pair:**
 
 | Radar | Center | Notes |
 |---|---|---|
@@ -110,8 +110,10 @@ text. Rain intensity (reflectivity, **dBZ**) is encoded as 10 legend colors
 | Lucknow | 26.847 N, 80.946 E | GIF is 704×594 (not 880×720); own OCR crop **and own radar-circle crop** (392×392 at box `(0,176,392,568)` — the circle sits at a different offset than Delhi's, so it cannot reuse Delhi's crop box). Current image: `caz_lkn.gif`. |
 | Patna | 25.591 N, 85.096 E | Current image: `caz_ptn.gif`. |
 | Bhopal | 23.288 N, 77.337 E | **Re-enabled** (older docs say disabled). BBoxMask compression + LRU state eviction (max 2 radars in RAM) made it fit in 512 MB. Current image: `caz_bhp.gif`. |
+| Jaipur | 26.824 N, 75.812 E | Raw GIF is 880×720 but the map panel is at the bottom-left, so it has its own crop box `(0,200,520,720)` → 520×520 (Delhi's OCR box works). **250 km radar** (not 300): disc radius 257 px → 0.973 km/px true scale. GCPs generated from an azimuthal-equidistant fit around the disc center (= Jaipur airport), validated against the frame's airport markers. Current image: `caz_jpr.gif`. |
+| Paradip | 20.264 N, 86.611 E | **Coastal** radar (Odisha). Same bottom-left panel layout/crop box as Jaipur → 520×520, Delhi OCR box. **250 km radar**: disc center + scale (0.971 km/px) confirmed by fitting the range rings over the open sea, then GCPs from a north-up azimuthal-equidistant fit about the site, validated against Odisha city diamonds. Half the disc is ocean (grey). Current image: `caz_pdp.gif` (URL code `PDP`). |
 
-**Current-image augmentation (all four radars):** IMD's animation GIF rebuilds
+**Current-image augmentation (all six radars):** IMD's animation GIF rebuilds
 lazily and can lag 50–60+ min behind its single "current radar" image
 (`caz_*.gif`, same layout as that radar's GIF frames). After extracting GIF
 frames, each radar's refresh fetches the current image and appends it as the
@@ -356,7 +358,7 @@ reusing any GCP numbers.
 | `/health` | GET | Liveness (also the keep-alive target) |
 | `/debug/cache` | GET | Per-radar cache freshness/ready diagnostics |
 | `/movement` | GET | Global rain movement over Delhi NCR |
-| `/radar/gif?radar=` | GET | Latest downloaded radar GIF (delhi/lucknow/patna/bhopal) |
+| `/radar/gif?radar=` | GET | Latest downloaded radar GIF (delhi/lucknow/patna/bhopal/jaipur/paradip) |
 | `/frames/latest?n=&force=` | GET | Latest frame URLs + timestamps + lag info |
 | `/radar/refresh` | POST | User-triggered "check for a new frame". Body `{lat,lon}` → detects radar, forces a **blocking** re-download + reprocess (bypasses TTL), returns `new_frame` (did IMD publish a newer frame than cached), plus latest/previous timestamps + lag. Bounded by a bg-lock (no double-refresh) and a frontend 60 s cooldown. |
 | `/radar/frames*` | static | Extracted PNGs per radar (`frames_lucknow` etc.) |
