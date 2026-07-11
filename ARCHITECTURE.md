@@ -106,10 +106,20 @@ text. Rain intensity (reflectivity, **dBZ**) is encoded as 10 legend colors
 
 | Radar | Center | Notes |
 |---|---|---|
-| Delhi (Palam) | 28.556 N, 77.100 E | Primary/default. Also fetches IMD's separate "current image" (`caz_delhi.gif`) and appends it as newest frame when its timestamp is strictly newer than the GIF (GIF rebuilds lazily, can lag 60+ min). |
-| Lucknow | 26.847 N, 80.946 E | GIF is 704×594 (not 880×720); own OCR crop **and own radar-circle crop** (392×392 at box `(0,176,392,568)` — the circle sits at a different offset than Delhi's, so it cannot reuse Delhi's crop box) |
-| Patna | 25.591 N, 85.096 E | |
-| Bhopal | 23.288 N, 77.337 E | **Re-enabled** (older docs say disabled). BBoxMask compression + LRU state eviction (max 2 radars in RAM) made it fit in 512 MB. |
+| Delhi (Palam) | 28.556 N, 77.100 E | Primary/default. Current image: `caz_delhi.gif`. |
+| Lucknow | 26.847 N, 80.946 E | GIF is 704×594 (not 880×720); own OCR crop **and own radar-circle crop** (392×392 at box `(0,176,392,568)` — the circle sits at a different offset than Delhi's, so it cannot reuse Delhi's crop box). Current image: `caz_lkn.gif`. |
+| Patna | 25.591 N, 85.096 E | Current image: `caz_ptn.gif`. |
+| Bhopal | 23.288 N, 77.337 E | **Re-enabled** (older docs say disabled). BBoxMask compression + LRU state eviction (max 2 radars in RAM) made it fit in 512 MB. Current image: `caz_bhp.gif`. |
+
+**Current-image augmentation (all four radars):** IMD's animation GIF rebuilds
+lazily and can lag 50–60+ min behind its single "current radar" image
+(`caz_*.gif`, same layout as that radar's GIF frames). After extracting GIF
+frames, each radar's refresh fetches the current image and appends it as the
+newest frame when its OCR timestamp is strictly newer (never duplicated;
+unreadable timestamp → skipped). Implemented in `radar.py
+augment_with_current_image()`; Delhi calls it directly in `_do_delhi_refresh`,
+the other radars via their `augment_current()` wrappers (which pass their own
+OCR/crop boxes).
 
 Radar selection (`_detect_radar` in main.py): check which radars' coverage
 circles contain the point; if several, pick the closest center; if none,

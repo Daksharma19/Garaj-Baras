@@ -438,6 +438,13 @@ def _do_lucknow_refresh(ttl_sec: float, force: bool = False) -> None:
         else:
             all_frame_data = radar_lucknow.extract_frames(lk_gif, radar_lucknow.FRAMES_FOLDER) if gif_fresh else radar_lucknow.get_all_frames()
 
+        # Same lazy-GIF fix as Delhi: IMD's current image often updates before
+        # the animation GIF — append it as the newest frame when strictly newer.
+        try:
+            all_frame_data = radar_lucknow.augment_current(all_frame_data)
+        except Exception as _ae:
+            print(f"Lucknow current-image augmentation failed: {_ae}")
+
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         verification.verify_pending("lucknow", all_frame_data, isolate_rain, clutter_mask=None)
         del all_frame_data
@@ -538,6 +545,13 @@ def _do_patna_refresh(ttl_sec: float, force: bool = False) -> None:
         else:
             all_frame_data = radar_patna.extract_frames(ptn_gif, radar_patna.FRAMES_FOLDER) if gif_fresh else radar_patna.get_all_frames()
 
+        # Same lazy-GIF fix as Delhi: IMD's current image often updates before
+        # the animation GIF — append it as the newest frame when strictly newer.
+        try:
+            all_frame_data = radar_patna.augment_current(all_frame_data)
+        except Exception as _ae:
+            print(f"Patna current-image augmentation failed: {_ae}")
+
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         verification.verify_pending("patna", all_frame_data, isolate_rain, clutter_mask=None)
         del all_frame_data
@@ -637,6 +651,13 @@ def _do_bhopal_refresh(ttl_sec: float, force: bool = False) -> None:
             all_frame_data = frame_data
         else:
             all_frame_data = radar_bhopal.extract_frames(bhp_gif, radar_bhopal.FRAMES_FOLDER) if gif_fresh else radar_bhopal.get_all_frames()
+
+        # Same lazy-GIF fix as Delhi: IMD's current image often updates before
+        # the animation GIF — append it as the newest frame when strictly newer.
+        try:
+            all_frame_data = radar_bhopal.augment_current(all_frame_data)
+        except Exception as _ae:
+            print(f"Bhopal current-image augmentation failed: {_ae}")
 
         recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
         verification.verify_pending("bhopal", all_frame_data, isolate_rain, clutter_mask=None)

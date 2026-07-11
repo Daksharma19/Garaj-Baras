@@ -11,12 +11,28 @@ from radar import (
     gif_is_fresh as _gif_is_fresh,
     clear_frames_folder,
     get_radar_lag_mins,
+    augment_with_current_image as _augment_with_current_image,
     RADAR_TTL_SEC,
 )
 
 GIF_URL       = "https://mausam.imd.gov.in/Radar/animation/Converted/PTN_MAXZ.gif"
 GIF_SAVE_PATH = os.path.join(os.path.dirname(__file__), "patna_radar.gif")
 FRAMES_FOLDER = os.path.join(os.path.dirname(__file__), "frames_patna")
+
+# IMD's single "current radar" image (same 880x720 MAX-Z layout as Delhi, so
+# the default OCR/crop boxes apply). Updates ~10 min while the animation GIF
+# rebuilds lazily. Appended as newest frame when strictly newer — see radar.py.
+CURRENT_IMG_URL       = "https://mausam.imd.gov.in/Radar/caz_ptn.gif"
+CURRENT_IMG_SAVE_PATH = os.path.join(os.path.dirname(__file__), "patna_current.gif")
+
+
+def augment_current(frame_data):
+    """Append IMD's current image as the newest frame if strictly newer."""
+    return _augment_with_current_image(
+        frame_data, FRAMES_FOLDER,
+        current_url=CURRENT_IMG_URL,
+        current_save_path=CURRENT_IMG_SAVE_PATH,
+    )
 
 _refresh_lock = threading.Lock()
 

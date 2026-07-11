@@ -14,6 +14,9 @@ COLOR_TABLE = [
 import math
 
 def rgb_to_dbz(r, g, b):
+    # Cast defensively: numpy uint8 inputs silently overflow in the
+    # subtraction below (e.g. 0 - 176 wraps to 80), corrupting distances.
+    r, g, b = int(r), int(g), int(b)
     min_dist = float('inf')
     best_dbz = 0
     for cr, cg, cb, dbz in COLOR_TABLE:
@@ -67,6 +70,20 @@ def enrich_results(results, waypoints_latlon,
 
     lag_mins = lag_info['lag_mins'] if lag_info else 25.0
 
+    def _sample_dbz_near(cx, cy, radius=3):
+        """Max dBZ within `radius` px of (cx, cy) — tolerates small
+        back-projection / georef error before declaring 'no color here'."""
+        h, w = arr.shape[:2]
+        best = 0
+        for oy in range(-radius, radius + 1):
+            for ox in range(-radius, radius + 1):
+                ny, nx = cy + oy, cx + ox
+                if 0 <= ny < h and 0 <= nx < w:
+                    d = rgb_to_dbz(int(arr[ny, nx, 0]), int(arr[ny, nx, 1]), int(arr[ny, nx, 2]))
+                    if d > best:
+                        best = d
+        return best
+
     for r, (lat, lon, eta) in zip(results, waypoints_latlon):
         if latlon_to_pixel_fn is not None:
             px, py = latlon_to_pixel_fn(lat, lon)
@@ -94,13 +111,23 @@ def enrich_results(results, waypoints_latlon,
 
             rv, gv, bv = arr[shifted_py, shifted_px]
             dbz = rgb_to_dbz(rv, gv, bv)
-            label, color = dbz_to_label(dbz)
+            if dbz == 0:
+                # Exact pixel has no color — allow a small neighborhood before
+                # giving up (back-projection can be a few px off the blob).
+                dbz = _sample_dbz_near(shifted_px, shifted_py)
 
             if dbz == 0:
-                label, color = dbz_to_label(20)
-
-            message = f"{label} expected in {eta:.0f} mins"
-            message += f"\n(radar ~{lag_mins:.0f} mins old — actual arrival may vary)"
+                # No radar color anywhere near the source pixel: no rain was
+                # observed there. The mask-shift hit contradicts the pixels —
+                # downgrade to clear instead of inventing drizzle.
+                r["rain_expected"] = False
+                r["confidence"] = "low"
+                label, color = "No Rain", "#000000"
+                message = "Clear"
+            else:
+                label, color = dbz_to_label(dbz)
+                message = f"{label} expected in {eta:.0f} mins"
+                message += f"\n(radar ~{lag_mins:.0f} mins old — actual arrival may vary)"
         else:
             label  = "No Rain"
             color  = "#000000"
