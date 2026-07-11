@@ -30,6 +30,11 @@ from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_DECAY_DBZ_PER_10MIN,
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# View radius of the rendered animation (px). Half the 120-px prediction
+# search radius — the view is only a viewport; predictions still use the
+# full PATCH_SEARCH_RADIUS_PX.
+VIEW_RADIUS_PX = PATCH_SEARCH_RADIUS_PX // 2
+
 SLOTS_MINS = [0, 15, 30, 45, 60]
 FRAME_DURATION_MS = 900
 UPSCALE = 2
@@ -66,7 +71,7 @@ def _patch_fade(patch, tracks, eff_mins, slot_mins=0.0):
 
 def render_forecast_frames(frame_rgb, rain_mask, patches, tracks,
                            gdx, gdy, lag_mins, user_px, user_py,
-                           radius_px=PATCH_SEARCH_RADIUS_PX):
+                           radius_px=VIEW_RADIUS_PX):
     """
     Renders the 1-hour forecast around (user_px, user_py).
     Returns list of (slot_mins, label, PIL RGB image).
@@ -187,7 +192,7 @@ def render_forecast_frames(frame_rgb, rain_mask, patches, tracks,
 
 def render_forecast_gif(frame_rgb, rain_mask, patches, tracks,
                         gdx, gdy, lag_mins, user_px, user_py,
-                        radius_px=PATCH_SEARCH_RADIUS_PX):
+                        radius_px=VIEW_RADIUS_PX):
     """Animated-GIF bytes of render_forecast_frames output."""
     frames = render_forecast_frames(frame_rgb, rain_mask, patches, tracks,
                                     gdx, gdy, lag_mins, user_px, user_py,
@@ -204,7 +209,7 @@ def render_forecast_gif(frame_rgb, rain_mask, patches, tracks,
 
 def render_forecast_frames_payload(frame_rgb, rain_mask, patches, tracks,
                                    gdx, gdy, lag_mins, user_px, user_py,
-                                   radius_px=PATCH_SEARCH_RADIUS_PX):
+                                   radius_px=VIEW_RADIUS_PX):
     """
     JSON-ready payload: frames as base64 PNG data-URLs, for the frontend
     player (pause/play/scrub — a GIF can't be paused).

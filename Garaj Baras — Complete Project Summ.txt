@@ -1,0 +1,125 @@
+Garaj Baras — Complete Project Summary
+What is Garaj Baras?
+Garaj Baras is a real-time, radar-driven rain prediction system built specifically for vehicle navigation and route safety in India. Unlike generic weather apps that show city-level forecasts, Garaj Baras predicts rain at every specific waypoint along a driver's exact route — down to 2-minute driving intervals — and tells the driver not just "will it rain?" but "will it rain on this exact stretch of road, at the exact time I will be there?"
+
+The name "Garaj Baras" comes from Hindi — Garaj means thunder, Baras means to rain — capturing the essence of the system: catching the storm before it catches you.
+
+The Problem It Solves
+India's road network sees some of the world's most intense monsoon rainfall. A driver leaving Delhi for Meerut at 7 PM has no way to know whether the heavy rain currently near Muzaffarnagar will reach the NH-58 stretch they will cross in 35 minutes. Standard weather apps give forecasts for the whole city. Navigation apps give turn-by-turn directions but ignore weather entirely. The gap between these two — hyperlocal, time-matched rain prediction for a moving vehicle — is exactly what Garaj Baras fills.
+
+For two-wheelers (the most vulnerable road users in rain), truck drivers (who need extra braking distance on wet roads), and any driver making time-sensitive decisions, knowing the rain timeline for their specific journey is a direct safety input.
+
+Where It Fits — ADAS and Autonomous Systems
+Garaj Baras is an environmental perception and hazard detection layer — the same category as lane departure warning, collision detection, and road condition monitoring in ADAS frameworks. Rain on a route ahead is a hazard, just like a vehicle stopped in the road. The system detects it in advance, quantifies its severity (light drizzle vs heavy rain), and gives the driver time to react — slow down, pull over, or choose an alternate route. For autonomous vehicles, this exact data feed (rain intensity at every waypoint with arrival time) is a required input to the motion planning stack.
+
+Data Source
+The entire system is built on live radar data published by IMD (India Meteorological Department). IMD operates a network of Doppler Weather Radar stations across India and publishes animated GIF files for each station on their public website, updated approximately every 10 minutes.
+
+Each GIF contains 18 frames — one frame per radar scan — covering the last 3 hours of rain history over a ~300 km radius circle around the radar station. The radar measures how much microwave energy bounces back from raindrops (called reflectivity, measured in dBZ). More bouncing = heavier rain. IMD encodes the dBZ value as a specific color in the image: dark blue for light drizzle, cyan for light rain, green for moderate rain, yellow for heavy rain, orange and red for very heavy rain.
+
+Currently active radars: Delhi (Palam), Lucknow, Patna. Bhopal radar is integrated but temporarily disabled due to server memory limits.
+
+How the System Works — Layer by Layer
+Layer 1: Data Ingestion
+Every 10 minutes, the backend automatically downloads the latest radar GIF from IMD's website for each active radar. The GIF is split into 18 individual PNG frames. Each frame is cropped to the radar map area (527×525 pixels, discarding the border legend and station text). A timestamp is extracted from each frame using OCR (Tesseract reads the time printed in the corner of each frame). Duplicate frames — IMD sometimes repeats the last frame to pad the GIF — are dropped. The result is a clean, timestamped sequence of radar snapshots.
+
+Layer 2: Georeferencing
+The radar image is just a grid of pixels. To use it for navigation, the system must know what real-world location each pixel represents. This is solved using Ground Control Points (GCPs) — a set of known cities whose pixel positions in the radar image are manually measured and matched to their real lat/lon coordinates. A quadratic mathematical model is then fitted to these pairs, giving two equations:
+
+
+pixel_x = f(latitude, longitude)
+pixel_y = g(latitude, longitude)
+This allows instant conversion in both directions: a city name → lat/lon → pixel coordinates, or a pixel → lat/lon. Each radar has its own georef model (7 GCPs each) because each radar image has different scale, orientation, and projection.
+
+Layer 3: Rain Detection (fuzzy.py)
+For any pixel in the radar frame, the system determines the rain intensity by finding which of the 10 IMD legend colors the pixel is closest to in RGB color space. This gives a dBZ value, which is then mapped to a human-readable label: Very Light Rain, Light Rain, Moderate Rain, Heavy Rain, Very Heavy Rain. This pixel-level rain detection is the foundation for everything above it.
+
+Layer 4: Rain Movement — Global Flow (optical_flow.py)
+To predict where rain will be in the future, the system must know how it is currently moving. OpenCV's Farneback dense optical flow algorithm is run on consecutive frame pairs. For each pair, it calculates how far every rain pixel moved between the two frames (in pixels). Averaging across all rain pixels gives a single global movement vector: dx pixels per 10 minutes horizontally, dy pixels per 10 minutes vertically. This is computed across the last 6 frames (5 pairs), with recent pairs weighted more heavily. The result — two numbers, dx and dy — represents how the overall rain system is moving and is stored in memory for all subsequent requests.
+
+Layer 5: Individual Storm Cell Tracking (patches.py)
+The global flow gives one average direction. But individual storm cells can move differently. patches.py uses OpenCV's connected components algorithm to find and label every separate rain blob in the latest radar frame. Each blob gets its own optical flow computed — only over its own pixels, only from frames where that blob existed (fresh pop-ups are handled separately). The result per blob includes: its center location in lat/lon, its own velocity vector (dx_10, dy_10 — pixels per 10 minutes), its speed in km/h, its direction, and its maximum rain intensity (dBZ). These individual patch velocities are the key input to the nowcast engine.
+
+Layer 6: Decay Tracking (decay.py)
+Knowing rain is coming isn't enough if that rain cell is dying. decay.py tracks each blob across all 6 recent frames, links the same blob across consecutive frames (using the global flow vector to predict where it should appear next), and records the mean dBZ of each blob at each time step. A linear trend is fitted through these dBZ values, giving a decay_rate — how many dBZ the blob loses per 10-minute frame. A decaying blob is classified as stable, weakening, dying, or dead. This decay rate is then used to project what the rain intensity will be when it actually arrives at the user's location.
+
+Layer 7: Route Building (prediction.py)
+When a user enters a start and end point, the system builds the actual route using OSRM — an open-source routing engine equivalent to Google Maps routing. OSRM returns the real road geometry (actual turns and road shapes, not a straight line) plus accurate driving duration for each road segment. The route is then resampled: one waypoint is placed every 2 minutes of driving time. Each waypoint carries its lat/lon and its estimated time of arrival (ETA) from departure. If OSRM is unavailable, the system falls back to a straight-line approximation with one point every 2 km at an assumed 40 km/h.
+
+Layer 8: Route Rain Prediction (prediction.py + fuzzy.py)
+For each waypoint on the route, the system asks: "Will rain be at this location when the driver arrives?" The core technique is rain mask shifting:
+
+
+effective_ETA = driving_ETA + radar_lag
+(radar image is 10-25 minutes old, so rain has already moved further)
+
+shift the entire rain mask forward:
+  shift_x = dx × (effective_ETA / 10)
+  shift_y = dy × (effective_ETA / 10)
+
+check if this waypoint's pixel is now in rain
+To handle prediction uncertainty, three time points are checked per waypoint (effective_ETA, +5 min, +10 min). Three hits = high confidence, two = medium, one = low. Predictions beyond 60 minutes are automatically capped at low confidence. The rain intensity at each rainy waypoint is determined by reading the actual RGB color from the shifted frame and converting to a dBZ label. Decay information is also attached — telling the driver whether the rain they will encounter is a strengthening or dying storm.
+
+Layer 9: Point Nowcast (nowcast.py)
+The nowcast answers a different question: not "what will I drive through?" but "what will happen at my current location over the next 2 hours?" Eight 15-minute time slots are computed (Now, +15, +30 ... +105 minutes).
+
+For each slot, two passes run in order:
+
+Pass 1 — Patch Forward Projection (primary): All storm blobs currently within 120 pixels of the user are examined. Each blob's centroid is projected forward using its own velocity. If the projected position lands within the blob's radius plus a 5-pixel tolerance of the user's location, it's a hit. This catches approaching storms that haven't reached the user yet.
+
+Pass 2 — Global Flow Fallback: If no patch hit, the user's pixel is back-projected using global dx/dy. If there is rain at the back-projected position in the current frame, rain is coming from that direction.
+
+The intensity for each slot is computed as:
+
+
+projected_dBZ = raw_pixel_dBZ + decay_rate × frames_ahead
+This anchors the intensity to the actual heavy pixel the user is standing in (not the blob's average), then applies the measured decay rate so later slots realistically show the storm weakening. The dBZ value maps to a probability (44 dBZ → 92%, 30 dBZ → 64%, 20 dBZ → 35%) and a label (Heavy Rain, Moderate Rain, etc.).
+
+System Architecture
+
+IMD Website (live radar GIFs)
+        ↓  every 10 minutes
+FastAPI Backend (Python, hosted on Render)
+        │
+        ├── radar.py         download + extract frames + OCR timestamps
+        ├── optical_flow.py  global rain movement vector (dx, dy)
+        ├── patches.py       individual storm cell velocities
+        ├── decay.py         per-cell intensity trend (growing/dying)
+        ├── georef.py        pixel ↔ lat/lon conversion
+        ├── fuzzy.py         pixel color → dBZ → rain label
+        ├── prediction.py    route building (OSRM) + rain check per waypoint
+        ├── nowcast.py       8-slot point forecast
+        └── main.py          API endpoints + cache management
+                ↓
+React Frontend (Vite, hosted on Vercel/Netlify)
+        │
+        ├── Radar animation viewer
+        ├── Route planner with rain overlay
+        └── Point nowcast scanner
+Endpoints:
+
+POST /predict_waypoints — rain check for every waypoint on a route
+POST /nowcast — 2-hour point forecast at a fixed location
+GET /radar/gif — live radar GIF for animation display
+GET /frames/latest — individual frame URLs for the animation viewer
+Memory and Performance
+The server runs on Render's free tier with a strict 512 MB RAM limit. Key optimizations:
+
+Only the last 6 radar frames are kept in memory (not all 18)
+Heavy computation (optical flow, patch detection, decay tracking) runs once per GIF refresh and is cached — user requests just read the result
+Frame arrays are explicitly deleted and garbage collected after processing
+A thread-safe double-check lock prevents multiple simultaneous cache refreshes
+Clutter mask computation is disabled (was using significant memory)
+Bhopal radar is temporarily disabled — it would push memory over the limit
+Four separate caches run independently (Delhi, Lucknow, Patna, Bhopal), each with its own TTL and lock, so one radar refreshing doesn't block requests for the others.
+
+Radar Coverage
+Radar	Center	States Covered
+Delhi (Palam)	28.55°N, 77.10°E	Delhi NCR, western UP, Haryana, parts of Rajasthan
+Lucknow	26.84°N, 80.94°E	Central UP, Uttarakhand foothills
+Patna	25.59°N, 85.09°E	Bihar, eastern UP, Jharkhand border
+Bhopal	23.28°N, 77.33°E	Madhya Pradesh (disabled)
+When a location falls in the overlap zone of two radars, the closer radar is used. If a location is outside all radar coverage, the system returns an explicit "outside radar bounds" flag rather than a silent wrong prediction.
+
+Hackathon Category Fit — ADAS and Autonomous Systems
+Garaj Baras functions as an environmental hazard detection and driver assistance layer. In ADAS terminology: it is a forward-looking environmental perception system that detects a specific road hazard (heavy rain) before the vehicle encounters it, quantifies the hazard severity, and provides time-to-impact information so the driver or autonomous system can respond. The nowcast's 8-slot output maps directly to a vehicle's planning horizon — the same structure used by autonomous vehicles for trajectory planning (what are conditions like in the next 0, 15, 30, 45 minutes?). For connected vehicles, the /nowcast API is a ready-made endpoint that an in-vehicle infotainment system or ADAS ECU can poll directly.

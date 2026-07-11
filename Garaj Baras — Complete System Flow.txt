@@ -1,0 +1,568 @@
+Garaj Baras — Complete System Flow (PPT Reference)
+SLIDE 1 — The Big Picture
+Title: What happens when you ask "Will it rain on my route?"
+
+Visual idea: A horizontal pipeline with 6 stages, left to right with arrows
+
+
+IMD Satellite
+    ↓
+Radar GIF (animated)
+    ↓
+Frame Extraction (18 PNGs)
+    ↓
+Rain Detection + Movement
+    ↓
+Prediction Engine
+    ↓
+Your Phone
+Key message: Every 10 minutes, fresh radar data flows through this pipeline automatically. Your request just reads the result.
+
+SLIDE 2 — The Radar GIF
+Title: Where the data comes from
+
+Visual idea: Show the actual radar GIF image with annotations
+
+IMD (India Meteorological Department) publishes live radar GIFs at their website
+Delhi radar (DLH_MAXZ.gif), Lucknow (LKN_MAXZ.gif), Patna (PTN_MAXZ.gif)
+Each GIF = 18 frames, one frame every ~10 minutes = last ~3 hours of rain history
+Frame size: 880×720 pixels, but only the 527×525 center crop is the actual radar map
+The outer border contains: legend, timestamp text, station name — all ignored except the timestamp (OCR reads it)
+Visual idea: Show the full GIF frame on left, draw a red crop box on the radar area, arrow pointing to the 527×525 cropped version on right
+
+SLIDE 3 — Frame Extraction (radar.py)
+Title: Turning the GIF into usable data
+
+Visual idea: One GIF → 18 individual PNG frames laid out in a row
+
+What happens:
+
+Download GIF from IMD every 10 minutes
+Split into individual PNG frames
+Drop duplicate frames (IMD sometimes repeats the last frame)
+For each frame, OCR the timestamp printed in the corner (using Tesseract)
+Result: list of (frame_path, timestamp) pairs — oldest to newest
+Why timestamps matter: The gap between two consecutive frames tells us the real time between scans. If frame 5 is at 14:30 and frame 6 is at 14:42, rain moved for exactly 12 minutes between them — not the assumed 10. This makes the speed calculation accurate.
+
+SLIDE 4 — Color = Rain Intensity (fuzzy.py)
+Title: Reading rain from pixel colors
+
+Visual idea: Color palette bar with labels, like a legend
+
+
+Dark Blue   (0,25,176)    → 20 dBZ → Very Light Rain
+Medium Blue (0,71,255)    → 30 dBZ → Light Rain
+Cyan        (135,241,255) → 38 dBZ → Light Rain
+Green       (0,200,0)     → 41 dBZ → Moderate Rain
+Yellow      (255,255,0)   → 44 dBZ → Heavy Rain
+Orange      (255,165,0)   → 50 dBZ → Heavy Rain
+Red         (255,0,0)     → 55 dBZ → Very Heavy Rain
+White       (255,255,255) → 60 dBZ → Extreme Rain
+Key concept — dBZ: The radar measures how much microwave energy bounces back from raindrops. More bouncing = heavier rain = higher dBZ number. IMD encodes this as specific colors in the image.
+
+What fuzzy.py does: For any pixel in the radar frame, find which legend color it's closest to (by Euclidean distance in RGB space) → that gives the dBZ → that gives the rain label.
+
+Visual idea: Show a pixel's RGB (255,255,0) → distance calculation to each legend color → Yellow wins → 44 dBZ → "Heavy Rain"
+
+SLIDE 5 — Optical Flow: How Rain Moves (optical_flow.py)
+Title: Detecting rain movement from consecutive frames
+
+Visual idea: Two radar frames side by side, with arrows showing direction rain pixels moved
+
+Step 1 — Isolate rain pixels
+Each frame is scanned pixel by pixel. A pixel is "rain" only if its color matches one of the 10 legend colors within RGB distance 65. Non-rain pixels (map background, roads, borders) are zeroed out. Result: binary mask — 255=rain, 0=no rain.
+
+Step 2 — Dense Optical Flow (Farneback algorithm)
+Compare two consecutive frames. For every pixel, OpenCV calculates how far it moved between the two frames. Output: a grid where each cell says (dx, dy) — "this pixel moved X pixels right and Y pixels down."
+
+Step 3 — Average over rain pixels only
+Take the mean dx and dy across all pixels that are rain. Non-rain pixels are ignored.
+
+Step 4 — Multi-frame weighted average
+Do this for all 5 consecutive pairs in the last 6 frames. Weight recent pairs higher. Skip pairs with no movement (no rain) or extreme movement (noise). Result: one smooth (dx, dy) — the global rain movement vector.
+
+Visual idea:
+
+
+Frame 5→6: dx=2.3, dy=0.7  (weight 5) ←most trusted
+Frame 4→5: dx=2.0, dy=0.9  (weight 4)
+Frame 3→4: dx=1.9, dy=0.8  (weight 3)
+──────────────────────────────────────
+Weighted avg: dx=2.1, dy=0.8
+= Rain moving East-Southeast at ~14 km/h
+This is cached — runs once per GIF refresh, not per user request.
+
+SLIDE 6 — Georeferencing: Pixel ↔ Location (georef.py)
+Title: Translating "pixel 430,385" into "Atrauli, UP"
+
+Visual idea: Radar image with dots and labels at known cities, overlaid pixel coordinates
+
+The problem: The radar image is just pixels. The app needs to know: "if rain is at pixel (430,385), what real-world location is that?"
+
+The solution — GCP fitting (Ground Control Points):
+Pick 7 cities whose lat/lon is known. Manually identify their pixel position in the radar frame. Fit a quadratic math formula to those 7 pairs.
+
+
+7 GCPs used for Delhi radar:
+  IGI Airport      (28.55°N, 77.10°E) → pixel (284, 310)
+  Aligarh          (27.89°N, 78.08°E) → pixel (395, 395)
+  Bijnor           (29.37°N, 78.13°E) → pixel (398, 207)
+  Moradabad        (28.83°N, 78.77°E) → pixel (472, 275)
+  Muzaffarnagar    (29.47°N, 77.70°E) → pixel (354, 196)
+  Sambhal          (28.58°N, 78.56°E) → pixel (450, 306)
+  100km West point (28.55°N, 76.07°E) → pixel (114, 310)
+Output formula:
+
+
+pixel_x = f(latitude, longitude)   [quadratic equation]
+pixel_y = g(latitude, longitude)   [quadratic equation]
+Usage: When a user enters "Atrauli" (27.97°N, 78.40°E), the app instantly computes → pixel (430, 385). That pixel is then checked in the rain mask.
+
+Each radar (Delhi, Lucknow, Patna) has its own georef model because each radar image has different scale and orientation.
+
+SLIDE 7 — Individual Rain Patches (patches.py)
+Title: Tracking each storm cell independently
+
+Visual idea: Radar image with 3 colored blobs circled and numbered, each with an arrow showing its direction
+
+Why not just use global flow?
+Global flow gives one average direction. But Storm Cell A near Meerut might be moving SE while Storm Cell B near Aligarh is moving NE. A person in Sambhal only cares about cells heading toward Sambhal.
+
+Step 1 — Find blobs in the latest frame
+OpenCV's connectedComponentsWithStats scans the rain mask and labels every separate connected group of rain pixels with an ID number. Each blob gets:
+
+A centroid (center pixel)
+An area (number of pixels)
+Visual idea: Rain mask → colored blob labels (1=red, 2=blue, 3=green, ...)
+
+Step 2 — Per-blob optical flow
+For each blob, look at only the pixels belonging to that blob across the last 4 frames. Calculate optical flow for those specific pixels.
+
+Smart check: "Did this blob exist in older frames?" Search a 12-pixel radius around the centroid in each older frame.
+
+Blob existed → include that frame pair's flow (reliable history)
+Blob didn't exist → skip (fresh pop-up, don't use zero-flow to dilute velocity)
+Step 3 — Per-blob output
+
+
+Blob #3:
+  centroid: pixel (430, 310) = 29.1°N, 77.8°E (near Meerut)
+  size: 840 pixels (~22 sq km)
+  velocity: dx_10=2.4, dy_10=1.1 (moves 2.4px right, 1.1px down per 10min)
+  speed: 27 km/h
+  direction: from NW, moving SE
+  max_dbz: 44 (Yellow = Heavy Rain)
+  in_ncr: True
+This runs once per GIF refresh and is stored in state["patches"].
+
+SLIDE 8 — Decay Tracking (decay.py)
+Title: Is the storm getting stronger or weaker?
+
+Visual idea: Line graph — dBZ on Y axis, time (frames) on X axis — showing a declining trend with "Weakening" label
+
+The problem: Knowing rain is coming isn't enough. If a storm cell was 44 dBZ (Heavy Rain) 30 minutes ago but has been losing intensity each frame, by the time it reaches you in 45 minutes it might be only 20 dBZ (Very Light Rain).
+
+How it works:
+
+Step 1 — Track each blob across all 6 recent frames
+For every blob in frame 1, predict where it will be in frame 2 (using global dx, dy). Find the nearest actual blob in frame 2 within 35 pixels. Link them — same storm, different time. Repeat through all 6 frames. This creates a "track" — the history of one storm cell.
+
+Visual idea: 6 radar frames in a row, with the same blob circled in each, connected by a dotted line
+
+Step 2 — Fit a decay rate
+For each track, record the mean dBZ at each frame:
+
+
+Frame 1: 44 dBZ
+Frame 2: 42 dBZ
+Frame 3: 40 dBZ
+Frame 4: 37 dBZ
+Frame 5: 35 dBZ
+Frame 6: 32 dBZ
+Fit a straight line through these values → decay_rate = -2.4 dBZ per frame
+
+Step 3 — Project forward
+
+
+project_dbz(track, eta_mins):
+  frames_ahead = eta_mins / 10
+  return current_dbz + decay_rate × frames_ahead
+
+Example: current=32 dBZ, decay=-2.4, ETA=30min
+  → 32 + (-2.4 × 3) = 24.8 dBZ → Light Rain
+Step 4 — Classify status
+
+
+projected_dbz < 8   → "dead"      (will be gone)
+projected_dbz < 18  → "dying"     (almost gone)
+projected_dbz < 32 AND declining → "weakening"
+otherwise           → "stable"
+This is stored in state["decay_tracks"] and used by both nowcast and route prediction.
+
+SLIDE 9 — Route Prediction (prediction.py)
+Title: "Will it rain on my drive from Sambhal to Meerut?"
+
+Visual idea: Map showing a route with green (clear) and red (rain) segments
+
+Phase 1 — Build the route
+
+Primary: Call OSRM (open-source routing engine, like Google Maps)
+
+
+Input:  Sambhal (28.58°N, 78.56°E) → Meerut (28.98°N, 77.70°E)
+Output: Actual NH-9 road geometry + driving time per segment
+Decode the compressed polyline → get actual road coordinates → assign real driving time to each point → resample: one waypoint every 2 minutes of driving time.
+
+Fallback (if OSRM fails): straight line, one point every 2 km, assume 40 km/h.
+
+Phase 2 — Check rain at each waypoint
+
+For each waypoint (lat, lon, eta_mins):
+
+
+1. Convert lat/lon → pixel using georef
+2. effective_eta = eta_mins + radar_lag_mins
+   (radar is 15 min old → rain has moved 15 min further than image shows)
+3. Shift entire rain mask forward by effective_eta minutes
+   shift_x = dx × (effective_eta / 10)
+   shift_y = dy × (effective_eta / 10)
+4. Check 3 time points: effective_eta, +5min, +10min
+   → 3 hits = HIGH confidence rain
+   → 2 hits = MEDIUM
+   → 1 hit  = LOW
+   → 0 hits = CLEAR
+5. If ETA > 60 min → cap confidence at LOW (too far ahead to be reliable)
+Visual idea: Timeline bar showing a waypoint's 3 check points on it, color-coded
+
+Output per waypoint:
+
+
+{rain_expected: true, confidence: "high", label: "Heavy Rain", eta_mins: 23}
+SLIDE 10 — Point Nowcast (nowcast.py)
+Title: "Will it rain at my location in the next 2 hours?"
+
+Visual idea: 8 slot cards in a row (Now, +15, +30, +45, +60, +75, +90, +105) with rain probability bars
+
+This is different from route prediction. Route checks many locations along a journey. Nowcast checks ONE fixed location at 8 future time slots.
+
+For each of the 8 slots, two passes run in order:
+
+PASS 1 — Patch Forward Projection (Primary)
+
+Look at all storm blobs currently within 120 pixels of the user.
+
+For each blob:
+
+
+Where will this blob be at T+30 min?
+  predicted_x = blob_centroid_x + blob_dx_10 × (30/10)
+  predicted_y = blob_centroid_y + blob_dy_10 × (30/10)
+
+Does the predicted position overlap the user's location?
+  distance = sqrt((pred_x - user_x)² + (pred_y - user_y)²)
+  if distance ≤ (blob_radius + 5px) → HIT
+If a blob hits → use that blob's dBZ and its decay track for the intensity.
+
+Visual idea: Radar image showing user as a dot, blob as a circle with an arrow, the projected future position as a dashed circle
+
+PASS 2 — Global Flow Fallback (if no patch hit)
+
+Back-project the user's location using global dx, dy:
+
+
+Where was rain at T-30 min that would reach me by T+30?
+  back_x = user_x - dx × (30/10)
+  back_y = user_y - dy × (30/10)
+  
+Is there rain at (back_x, back_y) in the current frame?
+  YES → rain is coming
+dBZ → Intensity for the slot:
+
+
+raw = actual dBZ sampled at the user's pixel right now
+track.decay_rate = how fast this blob is losing intensity
+
+projected_dbz = raw + (decay_rate × frames_ahead)
+
+Example:
+  raw=44 dBZ (Yellow, Heavy Rain)
+  decay_rate = -2 dBZ/frame
+  T+30 min = 3 frames ahead
+  projected = 44 + (-2 × 3) = 38 dBZ → still Heavy Rain
+
+  T+60 min = 6 frames
+  projected = 44 + (-2 × 6) = 32 dBZ → Moderate Rain
+
+  T+90 min = 9 frames
+  projected = 44 + (-2 × 9) = 26 dBZ → Light Rain
+dBZ → Probability:
+
+
+44 dBZ → 92%
+38 dBZ → 85%
+32 dBZ → 64%
+26 dBZ → 50%
+20 dBZ → 35%
+Output:
+
+
+Slot T+0:   Heavy Rain  92%  stable
+Slot T+15:  Heavy Rain  85%  weakening
+Slot T+30:  Heavy Rain  85%  weakening
+Slot T+45:  Moderate Rain 64%  weakening
+Slot T+60:  Moderate Rain 64%  weakening
+Slot T+75:  Light Rain  50%  weakening
+Slot T+90:  Light Rain  50%  weakening
+Slot T+105: Very Light  35%  dying
+SLIDE 11 — The Cache System (main.py)
+Title: Why the server doesn't crash under load
+
+Visual idea: Clock on left, cache box in middle, multiple users on right all reading from same box
+
+The problem: Loading radar data (download GIF + extract 18 frames + run optical flow + compute patches + build decay tracks) takes ~5-8 seconds and uses significant memory. You can't do this for every user request.
+
+The solution — TTL Cache:
+
+
+First request arrives
+  → Is cache fresh? (loaded < 10 min ago?)
+      YES → return cached data instantly (< 50ms)
+      NO  → run full refresh (5-8 sec), store result, return it
+
+Second request 2 seconds later
+  → Cache is fresh → instant return
+
+1000th request 3 minutes later
+  → Cache is still fresh → instant return
+
+Request after 10 minutes
+  → Cache is stale → run refresh again
+Thread safety — double-check lock:
+
+
+Two users hit the server at the same moment, cache is stale.
+Both check "is fresh?" → both see NO → both try to refresh.
+Without a lock: two parallel downloads, double the memory use.
+
+With lock:
+  User A acquires lock → checks again → still stale → refreshes
+  User B waits for lock → acquires lock → checks again → NOW FRESH
+  User B returns immediately without re-downloading
+4 separate caches — one for each radar (Delhi, Lucknow, Patna, Bhopal):
+
+
+radar_cache    → Delhi data
+lucknow_cache  → Lucknow data
+patna_cache    → Patna data
+bhopal_cache   → (disabled — memory limit on free server)
+SLIDE 12 — Radar Selection (_detect_radar in main.py)
+Title: Which radar covers your location?
+
+Visual idea: Map of India with 3 overlapping circles centered on Delhi, Lucknow, Patna
+
+
+User enters location → lat/lon
+  ↓
+Check: is it inside Delhi radar circle?   → YES/NO
+Check: is it inside Lucknow radar circle? → YES/NO
+Check: is it inside Patna radar circle?   → YES/NO
+  ↓
+If only one covers it → use that one
+If multiple cover it → use the closest radar center
+If none covers it    → default to Delhi (fallback)
+Example:
+
+
+Atrauli (27.97°N, 78.40°E)
+  Delhi radar:   distance to center = 168 km  ✓ inside
+  Lucknow radar: distance to center = 241 km  ✓ inside
+  → Delhi wins (closer)
+
+Varanasi (25.31°N, 82.97°E)
+  Delhi radar:   outside coverage  ✗
+  Lucknow radar: distance = 312 km  ✓ inside
+  Patna radar:   distance = 189 km  ✓ inside
+  → Patna wins (closer)
+SLIDE 13 — Complete End-to-End Flow
+Title: Everything together — one request lifecycle
+
+Visual idea: Full vertical flowchart
+
+
+USER OPENS APP
+      │
+      ▼
+[Frontend] User types "Atrauli"
+      │ → Geocoding API returns (27.97°N, 78.40°E)
+      │
+      ▼
+[Frontend] Calls POST /nowcast  {lat: 27.97, lon: 78.40}
+      │
+      ▼
+[main.py] _detect_radar(27.97, 78.40) → "delhi"
+      │
+      ▼
+[main.py] _load_radar_state()
+      │   Is cache fresh? YES → skip to next step instantly
+      │   Is cache stale? → download GIF → extract frames
+      │                  → optical_flow.py → (dx, dy)
+      │                  → patches.py → blob list
+      │                  → decay.py → decay tracks
+      │
+      ▼
+[georef.py] latlon_to_pixel(27.97, 78.40) → (430, 385)
+      │
+      ▼
+[nowcast.py] compute_nowcast_slots(user_px=430, user_py=385, ...)
+      │
+      │   For each of 8 time slots (0, 15, 30...105 min):
+      │
+      │   PASS 1: patches within 120px of (430,385)?
+      │     → Blob #3 centroid=(410,320), velocity=(2.4,1.1)
+      │     → At T+30: predicted=(410+7.2, 320+3.3)=(417,323)
+      │     → distance to user = 73px → too far, no hit
+      │     → At T+60: predicted=(410+14.4, 320+6.6)=(424,327)
+      │     → distance = 60px → no hit yet
+      │     → [different blob hits at T+45] → HIT
+      │
+      │   PASS 2 (if no patch hit): back-project user pixel
+      │     → (430 - 2.1×1.5, 385 - 0.8×1.5) = (427, 384)
+      │     → is (427,384) in rain mask? YES → rain coming
+      │
+      │   Decay lookup:
+      │     → raw pixel dBZ at user location = 44
+      │     → track.decay_rate = -1.8 dBZ/frame
+      │     → T+45: projected = 44 + (-1.8 × 4.5) = 35.9 → 76%
+      │
+      ▼
+[main.py] Build response:
+      {
+        summary: "Rain right now · 92% probability",
+        slots: [
+          {slot_mins:0,  has_rain:true, probability:92, intensity:"Heavy Rain"},
+          {slot_mins:15, has_rain:true, probability:92, intensity:"Heavy Rain"},
+          {slot_mins:30, has_rain:true, probability:85, intensity:"Heavy Rain"},
+          {slot_mins:45, has_rain:true, probability:76, intensity:"Moderate Rain"},
+          ...
+        ]
+      }
+      │
+      ▼
+[Frontend] Renders the 8 slot cards with progress bars
+SLIDE 14 — Memory Budget (Why Bhopal is Disabled)
+Title: Fitting everything in 512 MB (Render free tier)
+
+Visual idea: Memory bar split into segments
+
+
+Each radar loaded in memory:
+  6 PNG frames (527×525×3 bytes each) ≈ 25 MB
+  Rain masks, optical flow arrays       ≈ 15 MB
+  Patch data, decay tracks              ≈  5 MB
+  ─────────────────────────────────────────────
+  Per radar                             ≈ 45 MB
+
+3 active radars (Delhi + Lucknow + Patna) ≈ 135 MB
+Python runtime + FastAPI + libraries      ≈ 180 MB
+Processing peaks (during refresh)         ≈ 150 MB
+─────────────────────────────────────────────────
+Total peak                                ≈ 465 MB
+
+Render free tier limit: 512 MB
+Bhopal would push it over → OOM crash → disabled
+Optimizations already applied:
+
+Only keep last 6 frames in memory (not all 18)
+Delete frame arrays immediately after computing movement/patches (del all_frame_data, gc.collect())
+No startup warmup — data loads only when first user request arrives
+Clutter mask disabled (was computing and storing an extra 527×525 array per radar)
+in last slide add what improvements further can be done
+SLIDE 14 — Memory Budget (Why Bhopal is Disabled) — EXTENDED
+Title: Fitting everything in 512 MB — and what comes next
+
+Visual idea: Memory bar split into segments
+
+
+Each radar loaded in memory:
+  6 PNG frames (527×525×3 bytes each) ≈ 25 MB
+  Rain masks, optical flow arrays       ≈ 15 MB
+  Patch data, decay tracks              ≈  5 MB
+  ─────────────────────────────────────────────
+  Per radar                             ≈ 45 MB
+
+3 active radars (Delhi + Lucknow + Patna) ≈ 135 MB
+Python runtime + FastAPI + libraries      ≈ 180 MB
+Processing peaks (during refresh)         ≈ 150 MB
+─────────────────────────────────────────────────
+Total peak                                ≈ 465 MB
+
+Render free tier limit: 512 MB
+Bhopal would push it over → OOM crash → disabled
+Optimizations already applied:
+
+Only keep last 6 frames in memory (not all 18)
+Delete frame arrays immediately after computing movement/patches (del all_frame_data, gc.collect())
+No startup warmup — data loads only when first user request arrives
+Clutter mask disabled (was computing and storing an extra 527×525 array per radar)
+FURTHER IMPROVEMENTS (what can be done next)
+1. Pre-process frames at extraction time, not at request time
+
+Right now, when a GIF refreshes, the server extracts PNGs and then immediately runs optical flow, patch detection, and decay tracking — all in one blocking operation. If a user request arrives during this window, they wait.
+
+Better approach: extract PNGs first, respond to users with old cache data, then run the heavy computation in a background thread and swap the cache atomically when done. Users always get a fast response; the cache upgrades silently behind them.
+
+2. Store pre-computed rain masks on disk instead of re-running isolate_rain per request
+
+Every /nowcast call runs isolate_rain(latest_frame) — opening the PNG, scanning every pixel, matching to 10 legend colors. This takes ~200ms per call.
+
+Better: when frames are extracted, immediately compute and save the rain mask as a .npy file (binary numpy format, very small). Requests just load the .npy — 5ms instead of 200ms.
+
+3. Bhopal radar re-enablement via frame compression
+
+Frames are stored as full RGB PNGs. Since the radar only uses 10 specific colors, each pixel's actual information is just 4 bits (which of the 10 colors, or background). Storing frames as indexed-color PNGs or as raw label arrays would cut frame memory from ~25 MB to ~2 MB per radar — making all 4 radars fit comfortably in 512 MB.
+
+4. Smarter decay rate — per-pixel instead of per-blob mean
+
+Right now, decay_rate is computed from the blob's mean dBZ across all its pixels. But a storm cell is not uniform — the center (eye) might be 55 dBZ while the edges are 30 dBZ. The user standing at the edge gets the same decay rate as someone at the center, which is wrong.
+
+Better: track a small neighborhood (say 10×10 pixels) around the exact user pixel across frames, compute the decay rate specifically for that neighborhood. More accurate for point predictions.
+
+5. Multi-radar blending at coverage overlap zones
+
+Right now when Delhi and Lucknow both cover a location (like Bareilly), the closest radar wins entirely. But radar accuracy degrades with distance from the center — a location 240 km from Delhi radar is near the edge where the beam is elevated and misses low cloud rain.
+
+Better: blend the two radars' rain masks weighted by distance from each center. A point 150 km from Delhi and 120 km from Lucknow would trust Lucknow more.
+
+6. OCR timestamp reliability — fallback to frame diff timing
+
+If OCR fails on a frame (blurry timestamp, unusual font), the gap between that frame and its neighbor is assumed to be 10 minutes. Wrong gap = wrong speed calculation.
+
+Better fallback: when OCR fails, compare the GIF file's internal frame delay metadata (each GIF frame has a delay time embedded in the file header). This gives the actual intended interval even without reading the text.
+
+7. Nowcast confidence score — separate from probability
+
+Currently probability (0–100%) mixes two different things: how intense the rain is AND how likely the prediction is. A Heavy Rain patch moving slowly toward you is very different from a Light Rain patch moving fast across you — both might show 76% but for very different reasons.
+
+Better: expose two separate numbers — intensity_dbz (what kind of rain) and arrival_confidence (how sure we are it will actually reach you). Users understand "Heavy Rain, 60% chance it reaches you" better than a single merged number.
+
+8. Persistence layer — don't re-download if server restarts
+
+Currently if Render restarts the server (which it does after inactivity on the free tier), the entire cache is wiped. The first user after a restart triggers a full fresh download and 5-8 seconds of processing — slow cold start.
+
+Better: save the processed state (frame paths + dx, dy, patch list, decay tracks) to disk as a JSON/pickle file after each refresh. On startup, load from disk if the file is less than 10 minutes old. Cold start becomes instant for the common case.
+
+9. Clutter mask — selective re-enablement with higher threshold
+
+The clutter mask was disabled because it was flagging active monsoon rain (Meerut pixel rainy in 18/18 frames) as static ground clutter. But without it, fixed radar artifacts (range rings, station labels that share legend colors) might get detected as rain.
+
+Better approach: only flag a pixel as clutter if it appears as rain in every single frame across multiple days (not just one GIF's 18 frames). True ground clutter is permanent — rain is not. Store a running multi-day clutter map on disk and update it daily.
+
+10. Upgrade to paid Render plan or move to fly.io
+
+The most direct fix. 512 MB → 1 GB unlocks:
+
+All 4 radars active simultaneously (Bhopal re-enabled)
+Clutter mask re-enabled
+More frames in memory (9 instead of 6) → better decay tracking
+No more OOM risk during peak monsoon when all radars are processing heavy rainfall simultaneously
+Provide a concise title for your project that effectively captures its essence and purpose

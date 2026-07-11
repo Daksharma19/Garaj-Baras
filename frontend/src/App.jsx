@@ -888,16 +888,77 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
 // nowcast simulation advected continuously: each rain cell moves with its
 // owner patch's velocity and fades with its decay trend.
 
-const DBZ_RAMP = [
-  [20, [43, 79, 132]], [25, [47, 127, 194]], [30, [53, 163, 201]],
-  [35, [47, 185, 140]], [38, [127, 201, 90]], [41, [227, 193, 75]],
-  [44, [224, 161, 63]], [50, [224, 134, 63]], [55, [209, 80, 80]],
-  [60, [180, 90, 214]],
+// Vivid, continuously-interpolated reflectivity ramp (colors lerp between
+// stops instead of hard steps — pro-radar-app look).
+const DBZ_STOPS = [
+  [8, [22, 48, 105]],
+  [20, [37, 108, 199]], [25, [40, 160, 228]], [30, [58, 200, 178]],
+  [35, [94, 217, 100]], [38, [172, 227, 64]], [41, [249, 208, 46]],
+  [44, [251, 156, 38]], [50, [246, 106, 34]], [55, [238, 54, 62]],
+  [60, [200, 70, 255]], [70, [255, 172, 255]],
 ]
-function dbzToRgb(dbz) {
-  let c = DBZ_RAMP[0][1]
-  for (const [d, rgb] of DBZ_RAMP) { if (dbz >= d) c = rgb; else break }
-  return c
+// LUT over 0..70 dBZ in 0.5 steps → [r,g,b,a]; alpha combines a soft outer
+// edge (below ~18 dBZ fades out) with an intensity ramp (heavy rain = denser).
+const DBZ_LUT = (() => {
+  const lut = new Uint8ClampedArray(141 * 4)
+  for (let i = 0; i <= 140; i++) {
+    const v = i / 2
+    let k = 0
+    while (k < DBZ_STOPS.length - 2 && v > DBZ_STOPS[k + 1][0]) k++
+    const [d0, c0] = DBZ_STOPS[k]
+    const [d1, c1] = DBZ_STOPS[k + 1]
+    const f = Math.min(1, Math.max(0, (v - d0) / (d1 - d0)))
+    const edge = Math.min(1, Math.max(0, (v - 9) / 9))
+    const body = 0.6 + 0.4 * Math.min(1, Math.max(0, (v - 20) / 26))
+    lut[i * 4] = c0[0] + (c1[0] - c0[0]) * f
+    lut[i * 4 + 1] = c0[1] + (c1[1] - c0[1]) * f
+    lut[i * 4 + 2] = c0[2] + (c1[2] - c0[2]) * f
+    lut[i * 4 + 3] = Math.round(255 * edge * body)
+  }
+  return lut
+})()
+
+// Upscale factor for the field renderer: dBZ grids are bilinearly interpolated
+// 4× BEFORE colorizing (interpolate-data-then-colorize — smooth gradients with
+// crisp cores, no canvas blur needed).
+const FIELD_UP = 4
+
+function paintField(img, dbz, fade, gw, gh) {
+  const W = gw * FIELD_UP, H = gh * FIELD_UP
+  const data = img.data
+  data.fill(0)
+  for (let y = 0; y < H; y++) {
+    let fy = (y + 0.5) / FIELD_UP - 0.5
+    fy = Math.max(0, Math.min(gh - 1, fy))
+    const y0 = Math.floor(fy), y1 = Math.min(gh - 1, y0 + 1), wy = fy - y0
+    for (let x = 0; x < W; x++) {
+      let fx = (x + 0.5) / FIELD_UP - 0.5
+      fx = Math.max(0, Math.min(gw - 1, fx))
+      const x0 = Math.floor(fx), x1 = Math.min(gw - 1, x0 + 1), wx = fx - x0
+      const w00 = (1 - wy) * (1 - wx), w01 = (1 - wy) * wx
+      const w10 = wy * (1 - wx), w11 = wy * wx
+      const v = dbz[y0 * gw + x0] * w00 + dbz[y0 * gw + x1] * w01 +
+                dbz[y1 * gw + x0] * w10 + dbz[y1 * gw + x1] * w11
+      if (v < 9.5) continue
+      const li = Math.min(140, Math.round(v * 2)) * 4
+      let a = DBZ_LUT[li + 3]
+      if (fade) {
+        // fade weighted by each neighbor's rain contribution, so empty cells
+        // (fade 0, dbz 0) don't darken blob edges
+        const c00 = dbz[y0 * gw + x0] * w00, c01 = dbz[y0 * gw + x1] * w01
+        const c10 = dbz[y1 * gw + x0] * w10, c11 = dbz[y1 * gw + x1] * w11
+        const cs = c00 + c01 + c10 + c11
+        if (cs > 0) {
+          a *= (fade[y0 * gw + x0] * c00 + fade[y0 * gw + x1] * c01 +
+                fade[y1 * gw + x0] * c10 + fade[y1 * gw + x1] * c11) / cs
+        }
+      }
+      if (a < 4) continue
+      const j = (y * W + x) * 4
+      data[j] = DBZ_LUT[li]; data[j + 1] = DBZ_LUT[li + 1]; data[j + 2] = DBZ_LUT[li + 2]
+      data[j + 3] = a
+    }
+  }
 }
 function b64ToBytes(b64) {
   const raw = atob(b64)
@@ -930,18 +991,13 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
     if (!scene) return null
     const { w: gw, h: gh } = scene.grid
     const lag = scene.lag_mins
-    const mkGridCanvas = (dbz) => {
+    const W = gw * FIELD_UP, H = gh * FIELD_UP
+    const mkFieldCanvas = (dbz) => {
       const c = document.createElement('canvas')
-      c.width = gw; c.height = gh
+      c.width = W; c.height = H
       const g = c.getContext('2d')
-      const img = g.createImageData(gw, gh)
-      for (let i = 0; i < dbz.length && i < gw * gh; i++) {
-        if (dbz[i] > 0) {
-          const [r, gr, b] = dbzToRgb(dbz[i])
-          img.data[i * 4] = r; img.data[i * 4 + 1] = gr; img.data[i * 4 + 2] = b
-          img.data[i * 4 + 3] = dbz[i] >= 41 ? 235 : dbz[i] >= 30 ? 205 : 165
-        }
-      }
+      const img = g.createImageData(W, H)
+      paintField(img, dbz, null, gw, gh)
       g.putImageData(img, 0, 0)
       return c
     }
@@ -951,9 +1007,12 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
       dbz: b64ToBytes(h.dbz),
       canvas: null,                  // built lazily below
     }))
-    history.forEach((h) => { h.canvas = mkGridCanvas(h.dbz) })
+    history.forEach((h) => { h.canvas = mkFieldCanvas(h.dbz) })
     const patchById = {}
     for (const p of scene.patches) patchById[p.id] = p
+    const simCanvas = document.createElement('canvas')
+    simCanvas.width = W; simCanvas.height = H
+    const simCtx = simCanvas.getContext('2d')
     return {
       gw, gh, lag,
       history,
@@ -966,8 +1025,14 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
       userGx: scene.crop.user_gx, userGy: scene.crop.user_gy,
       radiusCells: scene.crop.radius_cells,
       places: scene.places || [],
-      // scratch canvas for the simulated (t > -lag) half
-      sim: (() => { const c = document.createElement('canvas'); c.width = gw; c.height = gh; return c })(),
+      // reusable buffers for the simulated (t > -lag) half: bilinear splat
+      // accumulators + upscaled field canvas (no per-frame allocations)
+      sim: simCanvas, simCtx,
+      simImg: simCtx.createImageData(W, H),
+      simVal: new Float32Array(gw * gh),
+      simWt: new Float32Array(gw * gh),
+      simFade: new Float32Array(gw * gh),
+      simDbz: new Float32Array(gw * gh),
     }
   }, [scene])
 
@@ -989,46 +1054,48 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
     const ctx = cv.getContext('2d')
     const S = cv.width
     const scale = S / m.gw
+    const k = S / 480                       // UI scale (hi-DPI / responsive)
     // basemap
     ctx.fillStyle = '#08101f'
     ctx.fillRect(0, 0, S, S)
     ctx.strokeStyle = '#16233c'
-    ctx.lineWidth = 1
+    ctx.lineWidth = k
     const cx = m.userGx * scale, cy = m.userGy * scale
     for (const rr of [0.33, 0.66, 1.0]) {
       ctx.beginPath(); ctx.arc(cx, cy, m.radiusCells * scale * rr, 0, 7); ctx.stroke()
     }
     ctx.imageSmoothingEnabled = true
-    // two-pass draw: wide blur = smooth heatmap body, light blur = definition
+    ctx.imageSmoothingQuality = 'high'
+    // field canvases are pre-smoothed (bilinear dBZ interpolation) — a single
+    // sharp draw, no blur filter needed
     const drawRain = (src, alpha = 1) => {
       ctx.globalAlpha = alpha
-      ctx.filter = 'blur(2px)'
       ctx.drawImage(src, 0, 0, S, S)
-      ctx.filter = 'blur(0.5px)'
-      ctx.globalAlpha = alpha * 0.6
-      ctx.drawImage(src, 0, 0, S, S)
-      ctx.filter = 'none'
       ctx.globalAlpha = 1
     }
     if (t <= -m.lag + 0.01 && m.history.length) {
-      // observed half: cross-fade between the two neighboring real frames
+      // observed half: eased cross-fade between the two neighboring frames
       let i = 0
       while (i < m.history.length - 1 && m.history[i + 1].t <= t) i++
       const a = m.history[i]
       const b = m.history[Math.min(i + 1, m.history.length - 1)]
       const w = b.t > a.t ? Math.min(1, Math.max(0, (t - a.t) / (b.t - a.t))) : 0
+      const e = w * w * (3 - 2 * w)         // smoothstep easing
       drawRain(a.canvas, 1)
-      if (w > 0) drawRain(b.canvas, w)
+      if (e > 0.004) drawRain(b.canvas, e)
     } else {
-      // simulated half: advect the latest frame's cells forward by eff mins
+      // simulated half: advect the latest frame's cells forward by eff mins.
+      // Bilinear splat at the FRACTIONAL target position (weight-normalized)
+      // so blobs glide continuously instead of snapping cell to cell.
       const eff = t + m.lag                 // minutes since the latest frame
       const slotMins = Math.max(0, t)
       const shifts = eff / 10
-      const g = m.sim.getContext('2d')
-      const img = g.createImageData(m.gw, m.gh)
-      for (let gy = 0; gy < m.gh; gy++) {
-        for (let gx = 0; gx < m.gw; gx++) {
-          const i = gy * m.gw + gx
+      const { gw, gh } = m
+      const val = m.simVal, wt = m.simWt, fad = m.simFade, out = m.simDbz
+      val.fill(0); wt.fill(0); fad.fill(0)
+      for (let gy = 0; gy < gh; gy++) {
+        for (let gx = 0; gx < gw; gx++) {
+          const i = gy * gw + gx
           const dbz = m.nowDbz[i]
           if (!dbz) continue
           const p = m.patchById[m.owner[i]] || null
@@ -1036,42 +1103,58 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
           if (!f) continue
           const vx = p ? p.vx : m.global.vx
           const vy = p ? p.vy : m.global.vy
-          const nx = Math.round(gx + (vx * shifts) / m.cellPx)
-          const ny = Math.round(gy + (vy * shifts) / m.cellPx)
-          if (nx < 0 || nx >= m.gw || ny < 0 || ny >= m.gh) continue
+          const fxp = gx + (vx * shifts) / m.cellPx
+          const fyp = gy + (vy * shifts) / m.cellPx
+          const x0 = Math.floor(fxp), y0 = Math.floor(fyp)
+          const dx = fxp - x0, dy = fyp - y0
           const pd = Math.max(10, dbz + f.ddbz)
-          const [r, gr, b] = dbzToRgb(pd)
-          const j = (ny * m.gw + nx) * 4
-          img.data[j] = r; img.data[j + 1] = gr; img.data[j + 2] = b
-          img.data[j + 3] = Math.round((pd >= 41 ? 235 : pd >= 30 ? 205 : 165) * f.fade)
+          for (let sy = 0; sy < 2; sy++) {
+            const ny = y0 + sy
+            if (ny < 0 || ny >= gh) continue
+            const wy = sy ? dy : 1 - dy
+            for (let sx = 0; sx < 2; sx++) {
+              const nx = x0 + sx
+              if (nx < 0 || nx >= gw) continue
+              const ww = wy * (sx ? dx : 1 - dx)
+              if (ww < 0.001) continue
+              const j = ny * gw + nx
+              val[j] += pd * ww
+              fad[j] += f.fade * ww
+              wt[j] += ww
+            }
+          }
         }
       }
-      g.putImageData(img, 0, 0)
-      drawRain(m.sim, t > 0 ? 0.92 : 1)
+      for (let j = 0; j < gw * gh; j++) {
+        if (wt[j] > 0) { out[j] = val[j] / wt[j]; fad[j] /= wt[j] } else out[j] = 0
+      }
+      paintField(m.simImg, out, fad, gw, gh)
+      m.simCtx.putImageData(m.simImg, 0, 0)
+      drawRain(m.sim, t > 0 ? 0.94 : 1)
     }
     // place labels (like IMD's city abbreviations, but readable)
-    ctx.font = '600 10px ui-monospace, Consolas, monospace'
+    ctx.font = `600 ${10 * k}px ui-monospace, Consolas, monospace`
     for (const pl of m.places) {
       const px2 = pl.gx * scale, py2 = pl.gy * scale
-      if (Math.hypot(px2 - cx, py2 - cy) < 16) continue
+      if (Math.hypot(px2 - cx, py2 - cy) < 16 * k) continue
       ctx.fillStyle = 'rgba(226,232,240,0.9)'
-      ctx.fillRect(px2 - 1.5, py2 - 1.5, 3, 3)
+      ctx.fillRect(px2 - 1.5 * k, py2 - 1.5 * k, 3 * k, 3 * k)
       ctx.fillStyle = 'rgba(5,16,31,0.75)'
-      ctx.fillText(pl.name, px2 + 6, py2 + 4)
-      ctx.fillText(pl.name, px2 + 5, py2 + 3)
+      ctx.fillText(pl.name, px2 + 6 * k, py2 + 4 * k)
+      ctx.fillText(pl.name, px2 + 5 * k, py2 + 3 * k)
       ctx.fillStyle = 'rgba(196,209,230,0.95)'
-      ctx.fillText(pl.name, px2 + 5.5, py2 + 3.5)
+      ctx.fillText(pl.name, px2 + 5.5 * k, py2 + 3.5 * k)
     }
     // scan-zone ring + user marker
     ctx.strokeStyle = t > 0 ? 'rgba(96,165,250,0.9)' : 'rgba(96,165,250,0.5)'
-    if (t > 0) ctx.setLineDash([6, 5])
-    ctx.lineWidth = 1.6
-    ctx.beginPath(); ctx.arc(cx, cy, m.radiusCells * scale - 2, 0, 7); ctx.stroke()
+    if (t > 0) ctx.setLineDash([6 * k, 5 * k])
+    ctx.lineWidth = 1.6 * k
+    ctx.beginPath(); ctx.arc(cx, cy, m.radiusCells * scale - 2 * k, 0, 7); ctx.stroke()
     ctx.setLineDash([])
     ctx.fillStyle = '#fff'
-    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 7); ctx.fill()
-    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 2
-    ctx.beginPath(); ctx.arc(cx, cy, 10, 0, 7); ctx.stroke()
+    ctx.beginPath(); ctx.arc(cx, cy, 5 * k, 0, 7); ctx.fill()
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 2 * k
+    ctx.beginPath(); ctx.arc(cx, cy, 10 * k, 0, 7); ctx.stroke()
     // badge + thumb
     const tt = Math.round(t)
     let timeLabel
@@ -1090,6 +1173,24 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
       track.style.setProperty('--pos', `${pct}%`)
     }
   }
+
+  // hi-DPI responsive backing store: match the canvas buffer to its CSS size
+  // × devicePixelRatio so it renders pixel-sharp on mobile and retina screens
+  useEffect(() => {
+    const cv = canvasRef.current
+    if (!cv || typeof ResizeObserver === 'undefined') return
+    const fit = () => {
+      const rect = cv.getBoundingClientRect()
+      if (!rect.width) return
+      const dpr = Math.min(2.5, window.devicePixelRatio || 1)
+      const px = Math.max(320, Math.round(rect.width * dpr))
+      if (cv.width !== px) { cv.width = px; cv.height = px }
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(cv)
+    return () => ro.disconnect()
+  }, [scene])
 
   // playback loop
   useEffect(() => {
@@ -1192,12 +1293,12 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
       </div>
       <div className="rsp-legend" aria-label="Rain intensity colors">
         {[
-          ['#2f7fc2', 'Drizzle'],
-          ['#2fb98c', 'Light'],
-          ['#e3c14b', 'Moderate'],
-          ['#e0863f', 'Heavy'],
-          ['#d15050', 'Very heavy'],
-          ['#b45ad6', 'Extreme'],
+          ['#256cc7', 'Drizzle'],
+          ['#3ac8b2', 'Light'],
+          ['#f9d02e', 'Moderate'],
+          ['#fb9c26', 'Heavy'],
+          ['#ee363e', 'Very heavy'],
+          ['#c846ff', 'Extreme'],
         ].map(([c, label]) => (
           <span key={label} className="rsp-legend__item">
             <span className="rsp-legend__chip" style={{ background: c }} />
@@ -1437,6 +1538,9 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
   const [ncScanStatus, setNcScanStatus] = useState('')
   const [radarDown, setRadarDown] = useState(false)
   const [forecastGif, setForecastGif] = useState(null)  // { url, loading }
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshMsg, setRefreshMsg] = useState('')      // one-shot "new frame" / "already latest"
+  const [cooldownLeft, setCooldownLeft] = useState(0)   // seconds until button re-enables
   const { user, authHeaders } = useAuth()
   const [saveState, setSaveState] = useState('idle')    // idle | saving | saved | error
 
@@ -1501,6 +1605,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
     setNcLoading(true)
     setNcResult(null)
     setForecastGif(null)
+    setRefreshMsg('')
     setNcScanStatus('Scanning radar…')
     try {
       const res = await postWithWarmup(
@@ -1522,6 +1627,43 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
     } finally {
       setNcLoading(false)
       setNcScanStatus('')
+    }
+  }
+
+  // Cooldown ticker: IMD publishes ~every 10 min, so gate the refresh button
+  // for 60 s after each check to avoid pointless full-pipeline re-runs.
+  const REFRESH_COOLDOWN_SEC = 60
+  useEffect(() => {
+    if (cooldownLeft <= 0) return
+    const id = setInterval(() => setCooldownLeft((s) => Math.max(0, s - 1)), 1000)
+    return () => clearInterval(id)
+  }, [cooldownLeft])
+
+  async function handleRefreshFrame() {
+    if (!ncLat || !ncLon || refreshing || cooldownLeft > 0) return
+    setRefreshing(true)
+    setRefreshMsg('')
+    try {
+      const res = await postWithWarmup(
+        `${API_BASE}/radar/refresh`,
+        { lat: ncLat, lon: ncLon },
+        {},
+        (msg) => setRefreshMsg(msg),
+      )
+      const newFrame = !!res.data?.new_frame
+      if (newFrame) {
+        setRefreshMsg('New radar frame arrived — updating…')
+        await handleScan()
+        setRefreshMsg('Updated to the newest radar frame.')
+      } else {
+        setRefreshMsg('Already the latest frame — IMD refreshes about every 10 min.')
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail || e?.message || 'Refresh failed.'
+      setRefreshMsg(typeof detail === 'string' ? detail.slice(0, 200) : 'Refresh failed.')
+    } finally {
+      setRefreshing(false)
+      setCooldownLeft(REFRESH_COOLDOWN_SEC)
     }
   }
 
@@ -1699,6 +1841,27 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
               <div className={`banner banner--${(ncResult.rain_slots ?? 0) > 0 ? 'rain' : 'clear'}`}>
                 <p className="banner__head">{ncResult.summary}</p>
               </div>
+
+              <div className="nc-refresh-row">
+                <span className="nc-refresh-age">
+                  Radar as of {ncResult.radar_as_of || 'unknown'}
+                  {ncResult.lag_mins != null ? ` · ${Math.round(ncResult.lag_mins)} min ago` : ''}
+                </span>
+                <button
+                  type="button"
+                  className="nc-refresh-btn"
+                  disabled={refreshing || cooldownLeft > 0}
+                  onClick={handleRefreshFrame}
+                >
+                  {refreshing
+                    ? 'Checking…'
+                    : cooldownLeft > 0
+                      ? `Check again in ${cooldownLeft}s`
+                      : '↻ Check for new frame'}
+                </button>
+              </div>
+              {refreshMsg && <p className="nc-refresh-msg">{refreshMsg}</p>}
+
               <NowcastSlots slots={ncResult.slots} />
               {forecastGif && (
                 <div className="nc-forecast-card">

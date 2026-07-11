@@ -930,6 +930,61 @@ def get_latest_frames(n: int = 6, force: bool = True):
         "frames": frames,
     }
 
+class RadarRefreshRequest(BaseModel):
+    lat: float
+    lon: float
+
+
+@app.post("/radar/refresh")
+def radar_refresh(req: RadarRefreshRequest):
+    """
+    User-triggered "check for a new radar frame" for the point's radar.
+
+    Detects the covering radar, forces a synchronous re-download + reprocess
+    (bypassing the 10-min TTL), and reports whether IMD actually published a
+    newer frame than what was cached. IMD only refreshes ~every 10 min, so a
+    'False' new_frame is expected and normal — the frontend gates the button
+    with a cooldown accordingly.
+    """
+    if not (6 < req.lat < 38 and 68 < req.lon < 98):
+        raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
+
+    name = _detect_radar(req.lat, req.lon)
+    reg = _RADAR_REGISTRY.get(name)
+    if not reg:
+        raise HTTPException(status_code=500, detail=f"Unknown radar '{name}'.")
+
+    def _ts(cache):
+        return cache.get("latest_ts")
+
+    prev_ts = _ts(reg["cache"])
+
+    # Blocking, forced refresh. The refresh fn acquires the bg lock with a
+    # non-blocking try, so if a refresh is already running this returns quickly
+    # without double-processing; the timestamps below still reflect the latest
+    # cached state either way.
+    try:
+        reg["refresh"](RADAR_CACHE_TTL_SEC, True)
+    except Exception as e:
+        raise HTTPException(status_code=502,
+                            detail=f"Radar refresh failed: {e}")
+    _touch_radar_and_evict(name)
+
+    new_ts = _ts(reg["cache"])
+    lag_info = _fresh_lag_info(reg["cache"])
+    new_frame = bool(prev_ts and new_ts and new_ts > prev_ts) or bool(new_ts and not prev_ts)
+
+    return {
+        "radar": name,
+        "new_frame": new_frame,
+        "latest_timestamp_ist": new_ts.isoformat() if new_ts else None,
+        "previous_timestamp_ist": prev_ts.isoformat() if prev_ts else None,
+        "radar_lag_mins": lag_info.get("lag_mins"),
+        "radar_freshness": lag_info.get("freshness"),
+        "radar_message": lag_info.get("message"),
+    }
+
+
 # ENDPOINT 4: Predict Rain For Provided Waypoints
 
 @app.post("/predict_waypoints")

@@ -228,7 +228,9 @@ dir_from, dir_to, speed), `latest_frame`, `latest_ts`, `lag_info`, `patches`,
 frontend canvas player (`RadarScenePlayer` in App.jsx) renders client-side:
 - **history**: each cached frame (deduped by timestamp, ~10-min cadence) as a
   base64 dBZ grid (crop around the user, max-pooled to `CELL_PX = 2` px cells
-  (~1.75 km/cell)), with real OCR'd IST timestamps.
+  (~1.75 km/cell)), with real OCR'd IST timestamps. The crop is `VIEW_RADIUS_PX`
+  = half the 120-px prediction search radius (a tighter, more zoomed-in
+  viewport + ~4× lighter payload); predictions still use the full radius.
 - **owner grid**: which patch claims each rain cell of the newest frame
   (0 = unclaimed → global drift).
 - **patches**: per-patch velocity (px/10 min) + decay params mirroring
@@ -248,7 +250,8 @@ which is kept as fallback.
 ### Forecast animation (forecast_gif.py)
 Renders the exact same simulation as frames at now/+15/+30/+45/+60: each patch
 advected by its own vector and faded by its decay track, unclaimed rain drifts
-with the global vector, cropped to the 120-px search circle around the user.
+with the global vector, cropped to `VIEW_RADIUS_PX` (half the 120-px search
+radius) around the user.
 Served as GIF (`/nowcast/forecast_gif`) or base64-PNG frame list for a
 scrubbable player (`/nowcast/forecast_frames`).
 
@@ -345,6 +348,7 @@ reusing any GCP numbers.
 | `/movement` | GET | Global rain movement over Delhi NCR |
 | `/radar/gif?radar=` | GET | Latest downloaded radar GIF (delhi/lucknow/patna/bhopal) |
 | `/frames/latest?n=&force=` | GET | Latest frame URLs + timestamps + lag info |
+| `/radar/refresh` | POST | User-triggered "check for a new frame". Body `{lat,lon}` → detects radar, forces a **blocking** re-download + reprocess (bypasses TTL), returns `new_frame` (did IMD publish a newer frame than cached), plus latest/previous timestamps + lag. Bounded by a bg-lock (no double-refresh) and a frontend 60 s cooldown. |
 | `/radar/frames*` | static | Extracted PNGs per radar (`frames_lucknow` etc.) |
 | `/predict_waypoints` | POST | **Main route endpoint.** Body: `{waypoints:[{lat,lon,eta_mins}]}`; auto-selects radar from route midpoint; returns enriched waypoints + patch_analysis + summary |
 | `/predict` | POST | Legacy: start/end coords → server builds waypoints (Delhi only) |
