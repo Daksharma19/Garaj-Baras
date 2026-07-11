@@ -48,9 +48,10 @@ LOCATION_RADIUS_PX: int = 5
 MAX_NOWCAST_MINS: int = 120
 
 # Minimum probability to include an event (below this we treat rain as not coming)
-# Raised 8 → 20: slots the engine itself only believes at <20% were shown as
-# rain and dominated false alarms in the far slots.
-MIN_PROBABILITY: int = 20
+# Middle ground (8 → 20 was too strict and blanked borderline slots to No Rain;
+# original 8 was too permissive). 14 keeps clearly-weak far slots out without
+# erasing real light/moderate arrivals.
+MIN_PROBABILITY: int = 14
 
 # Patch-forward: search circle radius around user (pixels)
 PATCH_SEARCH_RADIUS_PX: int = 120
@@ -149,12 +150,14 @@ def dbz_to_probability(projected_dbz: float) -> int:
 # whole horizon, while a small wobbly cell far away decays quickly — the
 # probability now tracks the storm, not the clock.
 
-# Narrowed (±24° → ±15°, 0.70–1.30× → 0.85–1.15×): the old cone was so wide
-# that storms passing 10–20 km to the side still landed enough members on the
-# user to cross the floor — a major false-positive source. The vector comes
-# from 5 recency-weighted frame pairs, so ±15° is still a fair error budget.
-ENSEMBLE_ANGLES_DEG = (-15.0, -7.5, 0.0, 7.5, 15.0)
-ENSEMBLE_SPEED_FACTORS = (0.85, 0.925, 1.0, 1.075, 1.15)
+# Middle ground between the original (±24°, 0.70–1.30×, too loose → false
+# positives) and the first tightening (±15°, 0.85–1.15×, too strict → distant/
+# future patches never reached the user and dropped out). The upper speed
+# factor (1.25) is deliberately kept generous so fast-arrival scenarios still
+# count toward future slots; the low tail and angular spread stay tighter than
+# the original so grazing storms don't over-trigger.
+ENSEMBLE_ANGLES_DEG = (-20.0, -10.0, 0.0, 10.0, 20.0)
+ENSEMBLE_SPEED_FACTORS = (0.80, 0.90, 1.0, 1.125, 1.25)
 _ENSEMBLE_W1D = (0.06, 0.24, 0.40, 0.24, 0.06)
 
 # Extrapolation skill fades with lead time even for a perfect geometric hit
@@ -162,9 +165,10 @@ SKILL_FLOOR: float = 0.60
 SKILL_HORIZON_MINS: float = 105.0
 
 # Geometric probability below this (0-1) → the slot is treated as no-rain
-# Raised 0.12 → 0.30: at 12%, a graze by the ensemble's edge members was
-# enough to declare rain; now a weighted ~third of members must cover the user.
-GEO_PROB_FLOOR: float = 0.30
+# Middle ground (0.12 too loose → edge grazes; 0.30 too strict → future patches
+# that only reached via the ensemble's fast/angled members dropped out). 0.20
+# ≈ a weighted fifth of members must cover the user.
+GEO_PROB_FLOOR: float = 0.20
 
 
 def _perturbed_vectors(dx: float, dy: float):
