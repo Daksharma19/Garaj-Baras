@@ -1002,9 +1002,9 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
     // two-pass draw: wide blur = smooth heatmap body, light blur = definition
     const drawRain = (src, alpha = 1) => {
       ctx.globalAlpha = alpha
-      ctx.filter = 'blur(4px)'
+      ctx.filter = 'blur(2px)'
       ctx.drawImage(src, 0, 0, S, S)
-      ctx.filter = 'blur(1px)'
+      ctx.filter = 'blur(0.5px)'
       ctx.globalAlpha = alpha * 0.6
       ctx.drawImage(src, 0, 0, S, S)
       ctx.filter = 'none'

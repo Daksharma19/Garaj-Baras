@@ -27,7 +27,11 @@ from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_DECAY_DBZ_PER_10MIN,
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-CELL_PX = 3            # grid cell size in radar pixels (0.877 km/px → ~2.6 km)
+CELL_PX = 2            # grid cell size in radar pixels (0.877 km/px → ~1.75 km)
+
+# View radius of the animation crop (px). Half the 120-px prediction search
+# radius — this is only the viewport; predictions still use the full radius.
+VIEW_RADIUS_PX = PATCH_SEARCH_RADIUS_PX // 2
 
 # Notable places per radar, drawn as labels on the frontend canvas (like the
 # city abbreviations on IMD's own frames, but full readable names).
@@ -131,7 +135,7 @@ def _patch_params(patch: dict, tracks) -> dict:
 
 def build_radar_scene(frame_data, latest_rain_mask, patches, tracks,
                       gdx, gdy, lag_mins, user_px, user_py,
-                      radius_px: int = PATCH_SEARCH_RADIUS_PX,
+                      radius_px: int = VIEW_RADIUS_PX,
                       cell_px: int = CELL_PX,
                       radar_name: str = None,
                       latlon_to_pixel_fn=None) -> dict:

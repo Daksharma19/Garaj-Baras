@@ -227,8 +227,8 @@ dir_from, dir_to, speed), `latest_frame`, `latest_ts`, `lag_info`, `patches`,
 `/nowcast/radar_scene?lat=&lon=` returns a compact JSON scene (~50–70 KB) the
 frontend canvas player (`RadarScenePlayer` in App.jsx) renders client-side:
 - **history**: each cached frame (deduped by timestamp, ~10-min cadence) as a
-  base64 dBZ grid (crop around the user, max-pooled to `CELL_PX = 3` px cells,
-  i.e. 80×80 for the 240×240 crop), with real OCR'd IST timestamps.
+  base64 dBZ grid (crop around the user, max-pooled to `CELL_PX = 2` px cells
+  (~1.75 km/cell)), with real OCR'd IST timestamps.
 - **owner grid**: which patch claims each rain cell of the newest frame
   (0 = unclaimed → global drift).
 - **patches**: per-patch velocity (px/10 min) + decay params mirroring
