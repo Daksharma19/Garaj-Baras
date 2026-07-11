@@ -133,9 +133,22 @@ IMD GIF (every ~10 min)
       blob existed (12-px centroid search) → per-blob {centroid px+latlon, area,
       dx_10, dy_10, speed, direction, max_dbz}; masks stored as BBoxMask
   → decay.py: compute_decay_tracks(): link the same blob across all 6 frames
-      (predict-next-position via global flow, nearest blob ≤35 px) → mean dBZ per
-      frame → linear fit → decay_rate (dBZ per 10-min frame) → project_dbz(eta),
-      status: stable / weakening (<32 & declining) / dying (<18) / dead (<8)
+      (predict-next-position via global flow, nearest blob ≤35 px) → mean dBZ vs
+      REAL minutes between frames (gaps vary) → Theil–Sen fit (median of pairwise
+      slopes, outlier-immune) → decay_rate (dBZ per 10 real minutes) →
+      project_dbz(eta) via dbz_change(): rate is clamped (growth +1.5, decay −8)
+      and exponentially damped with lead time (τ = 45 min), so the projected
+      change saturates at rate×4.5 dBZ instead of extrapolating linearly for
+      hours. **Area trend (survivor-bias fix):** mean dBZ over a thresholded
+      mask misses shrinking storms (weak edges leave the mask first, so the
+      mean stays flat while the blob dies), so each track also fits a clamped
+      Theil–Sen trend on ln(area); project_area_fraction() (same τ damping,
+      growth capped at 1.0) feeds _classify alongside projected dBZ.
+      Status: dead (<8 dBZ or <15% area left) / dying (<18 or <35%) /
+      weakening (<32 & declining, or <65%) / stable.
+      All consumers (nowcast, forecast_gif) use dbz_change() +
+      project_area_fraction(); radar_scene exports the clamped dBZ rate only
+      (its frontend player fades linearly and doesn't model area shrink).
   → verification.verify_pending(): grade past predictions whose target time now
       has a real frame (±5 min) → outcome hit/false_alarm/miss/correct_clear
   → alerts.process_alerts(): nowcast each saved location, push notifications
@@ -202,7 +215,8 @@ dir_from, dir_to, speed), `latest_frame`, `latest_ts`, `lag_info`, `patches`,
 - **Pass 2 — global-flow fallback:** back-project the user pixel by the global
   (dx, dy) over `slot + lag` minutes; if that source pixel is rain in the
   latest mask → rain is coming.
-- Intensity: `projected_dbz = raw_pixel_dbz + decay_rate × frames_ahead`;
+- Intensity: `projected_dbz = raw_pixel_dbz + dbz_change(decay_rate, eff_mins)`
+  (damped, saturating trend — see decay.py above);
   dBZ → probability via a motion-ensemble mapping (~44 dBZ → ~92%, 20 → ~35%).
 - **New-cell lifecycle:** a blob observed in only 1 frame (no measured motion/
   trend) gets synthetic decay −2.5 dBZ/10 min, may only assert rain for

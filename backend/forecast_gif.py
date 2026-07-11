@@ -49,9 +49,12 @@ def _patch_fade(patch, tracks, eff_mins, slot_mins=0.0):
         return 1.0
     track = _find_track_for_patch(patch, tracks)
     if track is not None and len(getattr(track, "mean_dbzs", []) or []) >= 2:
-        proj = raw + float(track.decay_rate) * (eff_mins / 10.0)
-        if proj < 8.0:       # DEAD_DBZ_THRESHOLD
+        from decay import dbz_change, project_area_fraction, AREA_DEAD_FRACTION
+        proj = raw + dbz_change(float(track.decay_rate), eff_mins)
+        area_frac = project_area_fraction(track, eff_mins)
+        if proj < 8.0 or area_frac < AREA_DEAD_FRACTION:  # DEAD thresholds
             return 0.0
+        proj = proj * area_frac  # shrinking blob fades even at flat mean dBZ
     else:
         if slot_mins > NEW_CELL_MAX_ASSERT_MINS:
             return 0.0

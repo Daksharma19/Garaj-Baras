@@ -407,7 +407,7 @@ def _build_event(
     radius: int,
 ) -> Optional[NowcastEvent]:
     """Build a NowcastEvent for a detected rain window [rain_start, rain_end)."""
-    from decay import project_dbz, _classify  # type: ignore
+    from decay import project_dbz, _classify, project_area_fraction  # type: ignore
     from fuzzy import dbz_to_label            # type: ignore
 
     eta = rain_start
@@ -416,7 +416,8 @@ def _build_event(
     track = _find_patch_track(hit_px, hit_py, patch_tracks)
     if track:
         proj_dbz = max(0.0, project_dbz(track, eta + lag_mins))
-        decay_status = _classify(proj_dbz, track.decay_rate)
+        decay_status = _classify(proj_dbz, track.decay_rate,
+                                 project_area_fraction(track, eta + lag_mins))
         raw_dbz = track.dbz_latest
     else:
         # New pop-up: no decay history → use raw dBZ, assume stable
@@ -473,7 +474,7 @@ def compute_nowcast_slots(
       projected_dbz
       decay_status
     """
-    from decay import project_dbz, _classify  # type: ignore
+    from decay import project_dbz, _classify, dbz_change, project_area_fraction  # type: ignore
     from fuzzy import dbz_to_label            # type: ignore
 
     # Pre-sort patches by current distance from user (closest first, checked first per slot)
@@ -535,8 +536,9 @@ def compute_nowcast_slots(
             track = _find_track_for_patch(patch_hit, patch_tracks)
             raw = float(patch_hit.get("max_dbz", 0))
             if track:
-                proj_dbz = max(0.0, raw + track.decay_rate * (eff / 10.0))
-                decay_status = _classify(proj_dbz, track.decay_rate)
+                proj_dbz = max(0.0, raw + dbz_change(track.decay_rate, eff))
+                decay_status = _classify(proj_dbz, track.decay_rate,
+                                         project_area_fraction(track, eff))
             else:
                 proj_dbz = raw
                 decay_status = "stable"
@@ -544,8 +546,9 @@ def compute_nowcast_slots(
             track = _find_patch_track(orig_px, orig_py, patch_tracks)
             raw = _sample_raw_dbz(rain_mask, rgb_arr, orig_px, orig_py, radius)
             if _track_has_history(track):
-                proj_dbz = max(0.0, raw + track.decay_rate * (eff / 10.0))
-                decay_status = _classify(proj_dbz, track.decay_rate)
+                proj_dbz = max(0.0, raw + dbz_change(track.decay_rate, eff))
+                decay_status = _classify(proj_dbz, track.decay_rate,
+                                         project_area_fraction(track, eff))
             elif _rain_fraction(rain_mask, orig_px, orig_py, WIDESPREAD_RADIUS_PX) >= WIDESPREAD_MIN_FRACTION:
                 # Broad rain shield around the source point — not a pop-up.
                 # Keep the climatological decay but allow the full horizon.

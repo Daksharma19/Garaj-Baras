@@ -12,6 +12,8 @@ Three scenarios surfaced to the frontend:
   dying/dead      → rain patch will likely be gone when you get there
 """
 
+import math
+
 import numpy as np
 import cv2
 from dataclasses import dataclass, field
@@ -35,14 +37,40 @@ MATCH_RADIUS_PX = 35
 # Minimum frames a patch must appear in to trust its decay rate
 MIN_TRACK_LENGTH = 3
 
+# A measured trend from ≤6 noisy observations can't be trusted linearly for
+# 2 hours: damp it toward zero with lead time so the total projected change
+# saturates at rate × TAU/10 dBZ instead of growing without bound.
+TREND_DAMPING_TAU_MINS = 45.0
+# Growth trends overshoot worse than decay (storms peak and collapse), so cap
+# positive rates harder than negative ones.
+MAX_GROWTH_RATE_DBZ_PER_10MIN = 1.5
+MAX_DECAY_RATE_DBZ_PER_10MIN = -8.0
+
+# ── Area trend (survivor-bias fix) ─────────────────────────────────────────
+# Mean dBZ over a thresholded mask is blind to the most common decay mode:
+# a dying storm loses its weak edges FIRST, so the mean over surviving pixels
+# stays flat (or rises) while the blob visibly shrinks. So we also track blob
+# AREA and classify against the projected surviving-area fraction.
+# Area evolves multiplicatively → fit the trend on ln(area); the log-rate is
+# clamped per 10 min: shrink to no less than ~30% (ln 0.3) and grow to no
+# more than ~1.5× (ln 1.5) per 10 min.
+MAX_AREA_SHRINK_LOG_PER_10MIN = -1.2
+MAX_AREA_GROWTH_LOG_PER_10MIN = 0.4
+# Projected surviving-area fraction thresholds for classification
+AREA_DEAD_FRACTION = 0.15       # < 15 % of current area left → dead
+AREA_DYING_FRACTION = 0.35      # < 35 % left → dying
+AREA_WEAKENING_FRACTION = 0.65  # < 65 % left → weakening
+
 
 @dataclass
 class PatchTrack:
     frame_indices: List[int] = field(default_factory=list)
     centroids: List[Tuple[float, float]] = field(default_factory=list)
     mean_dbzs: List[float] = field(default_factory=list)
+    areas: List[int] = field(default_factory=list)   # blob px area per frame
     mask_latest: Optional[BBoxMask] = None   # blob mask in last frame (bbox crop)
-    decay_rate: float = 0.0     # dBZ per 10-min frame (negative = dying)
+    decay_rate: float = 0.0     # dBZ per 10 real minutes (negative = dying)
+    area_log_rate: float = 0.0  # ln(area) change per 10 real minutes (clamped)
     dbz_latest: float = 0.0
     status: str = "stable"      # stable | weakening | dying | dead
 
@@ -74,12 +102,74 @@ def _frame_blobs(rain_mask: np.ndarray, rgb_arr: np.ndarray) -> List[dict]:
     return blobs
 
 
-def _classify(dbz_at_eta: float, decay_rate: float) -> str:
-    if dbz_at_eta < DEAD_DBZ_THRESHOLD:
+def _theil_sen_rate_per_10min(minutes: List[float], dbzs: List[float]) -> float:
+    """
+    Median of all pairwise slopes (Theil–Sen) over (real minutes, dBZ) points,
+    scaled to dBZ per 10 min. Immune to a single outlier frame, which a
+    least-squares fit over ≤6 points is not.
+    """
+    slopes = []
+    for i in range(len(minutes)):
+        for j in range(i + 1, len(minutes)):
+            dt = minutes[j] - minutes[i]
+            if dt > 0:
+                slopes.append((dbzs[j] - dbzs[i]) / dt)
+    if not slopes:
+        return 0.0
+    return float(np.median(slopes)) * 10.0
+
+
+def _frame_minutes(frame_data: list) -> List[float]:
+    """Cumulative minutes of each frame relative to the first, from real
+    timestamps (10-min fallback per gap when a timestamp is missing)."""
+    minutes = [0.0]
+    for fi in range(1, len(frame_data)):
+        ts_prev, ts_curr = frame_data[fi - 1][1], frame_data[fi][1]
+        if ts_prev and ts_curr:
+            gap = max(1.0, (ts_curr - ts_prev).total_seconds() / 60.0)
+        else:
+            gap = 10.0
+        minutes.append(minutes[-1] + gap)
+    return minutes
+
+
+def dbz_change(decay_rate: float, mins_ahead: float) -> float:
+    """
+    Projected dBZ change after mins_ahead for a measured trend, with the rate
+    damped exponentially toward zero (convective trends don't persist), so the
+    change saturates instead of extrapolating linearly for hours.
+    """
+    rate = min(max(decay_rate, MAX_DECAY_RATE_DBZ_PER_10MIN),
+               MAX_GROWTH_RATE_DBZ_PER_10MIN)
+    tau = TREND_DAMPING_TAU_MINS
+    return rate * (tau / 10.0) * (1.0 - math.exp(-max(0.0, mins_ahead) / tau))
+
+
+def project_area_fraction(track: Optional["PatchTrack"], mins_ahead: float) -> float:
+    """
+    Projected fraction of the blob's current area still raining at mins_ahead,
+    from the clamped ln(area) trend, damped with the same lead-time tau as the
+    dBZ trend. 1.0 for None / no measured trend / growing blobs.
+    """
+    if track is None:
+        return 1.0
+    log_rate = min(max(float(getattr(track, "area_log_rate", 0.0)),
+                       MAX_AREA_SHRINK_LOG_PER_10MIN),
+                   MAX_AREA_GROWTH_LOG_PER_10MIN)
+    if log_rate >= 0.0:
+        return 1.0  # growth doesn't boost survival above certain
+    tau = TREND_DAMPING_TAU_MINS
+    log_change = log_rate * (tau / 10.0) * (1.0 - math.exp(-max(0.0, mins_ahead) / tau))
+    return float(math.exp(log_change))
+
+
+def _classify(dbz_at_eta: float, decay_rate: float, area_frac: float = 1.0) -> str:
+    if dbz_at_eta < DEAD_DBZ_THRESHOLD or area_frac < AREA_DEAD_FRACTION:
         return "dead"
-    if dbz_at_eta < DYING_DBZ_THRESHOLD:
+    if dbz_at_eta < DYING_DBZ_THRESHOLD or area_frac < AREA_DYING_FRACTION:
         return "dying"
-    if dbz_at_eta < WEAKENING_DBZ_THRESHOLD and decay_rate < -1.5:
+    if ((dbz_at_eta < WEAKENING_DBZ_THRESHOLD and decay_rate < -1.5)
+            or area_frac < AREA_WEAKENING_FRACTION):
         return "weakening"
     return "stable"
 
@@ -176,6 +266,7 @@ def compute_decay_tracks(
     # ── Convert tracks to PatchTrack objects ──────────────────────────────────
     patch_tracks = []
     latest_fi = n_frames - 1
+    frame_mins = _frame_minutes(frame_data)
 
     for track in active_tracks:
         if not track:
@@ -184,6 +275,7 @@ def compute_decay_tracks(
         frame_indices = [t[0] for t in track]
         mean_dbzs = [t[1]["mean_dbz"] for t in track]
         centroids = [t[1]["centroid"] for t in track]
+        areas = [t[1]["area_px"] for t in track]
 
         # Only use tracks that reach the latest frame (anchored to NOW)
         if frame_indices[-1] != latest_fi:
@@ -192,22 +284,39 @@ def compute_decay_tracks(
         dbz_latest = mean_dbzs[-1]
         mask_latest = track[-1][1]["mask"]
 
-        # Fit linear trend if enough observations
+        # Fit trend against REAL minutes (frame gaps vary: dedup + IMD cadence
+        # drift), robust to a single outlier frame via Theil–Sen.
+        obs_mins = [frame_mins[fi] for fi in frame_indices]
         if len(mean_dbzs) >= MIN_TRACK_LENGTH:
-            xs = np.arange(len(mean_dbzs), dtype=float)
-            coeffs = np.polyfit(xs, mean_dbzs, 1)
-            decay_rate = float(coeffs[0])   # dBZ per frame
+            decay_rate = _theil_sen_rate_per_10min(obs_mins, mean_dbzs)
         elif len(mean_dbzs) == 2:
-            decay_rate = float(mean_dbzs[1] - mean_dbzs[0])
+            dt = max(1.0, obs_mins[1] - obs_mins[0])
+            decay_rate = float(mean_dbzs[1] - mean_dbzs[0]) / dt * 10.0
         else:
             decay_rate = 0.0  # single observation — assume stable
+
+        # Area trend in log domain (area evolves multiplicatively), same
+        # Theil–Sen / real-minute treatment as the dBZ trend, clamped so one
+        # merge/split glitch can't declare instant death or explosive growth.
+        log_areas = [math.log(max(1.0, a)) for a in areas]
+        if len(log_areas) >= MIN_TRACK_LENGTH:
+            area_log_rate = _theil_sen_rate_per_10min(obs_mins, log_areas)
+        elif len(log_areas) == 2:
+            dt = max(1.0, obs_mins[1] - obs_mins[0])
+            area_log_rate = (log_areas[1] - log_areas[0]) / dt * 10.0
+        else:
+            area_log_rate = 0.0
+        area_log_rate = min(max(area_log_rate, MAX_AREA_SHRINK_LOG_PER_10MIN),
+                            MAX_AREA_GROWTH_LOG_PER_10MIN)
 
         pt = PatchTrack(
             frame_indices=frame_indices,
             centroids=centroids,
             mean_dbzs=mean_dbzs,
+            areas=areas,
             mask_latest=mask_latest,
             decay_rate=decay_rate,
+            area_log_rate=area_log_rate,
             dbz_latest=dbz_latest,
             status="stable",  # filled below
         )
@@ -218,8 +327,7 @@ def compute_decay_tracks(
 
 def project_dbz(track: PatchTrack, eta_mins: float) -> float:
     """Estimated dBZ of this patch when traveller arrives (eta_mins from now)."""
-    frames_ahead = eta_mins / 10.0
-    return track.dbz_latest + track.decay_rate * frames_ahead
+    return track.dbz_latest + dbz_change(track.decay_rate, eta_mins)
 
 
 def get_decay_status_at_pixel(
@@ -239,7 +347,8 @@ def get_decay_status_at_pixel(
             continue
         if track.mask_latest.hit(px, py, radius=0):
             proj = project_dbz(track, eta_mins)
-            status = _classify(proj, track.decay_rate)
+            status = _classify(proj, track.decay_rate,
+                               project_area_fraction(track, eta_mins))
             return {
                 "decay_status": status,
                 "projected_dbz": round(max(0.0, proj), 1),

@@ -110,7 +110,12 @@ def _patch_params(patch: dict, tracks) -> dict:
     raw = float(patch.get("max_dbz", 0) or 0)
     track = _find_track_for_patch(patch, tracks)
     if track is not None and len(getattr(track, "mean_dbzs", []) or []) >= 2:
-        mode, rate, min_dbz, max_assert = "track", float(track.decay_rate), DEAD_DBZ_THRESHOLD, None
+        # Frontend player fades linearly; clamp to the same rate bounds the
+        # damped backend projection uses so the visual can't wildly diverge.
+        from decay import MAX_GROWTH_RATE_DBZ_PER_10MIN, MAX_DECAY_RATE_DBZ_PER_10MIN
+        clamped = min(max(float(track.decay_rate), MAX_DECAY_RATE_DBZ_PER_10MIN),
+                      MAX_GROWTH_RATE_DBZ_PER_10MIN)
+        mode, rate, min_dbz, max_assert = "track", clamped, DEAD_DBZ_THRESHOLD, None
     else:
         mode, rate, min_dbz, max_assert = "new", NEW_CELL_DECAY_DBZ_PER_10MIN, NEW_CELL_MIN_DBZ, NEW_CELL_MAX_ASSERT_MINS
     return {
