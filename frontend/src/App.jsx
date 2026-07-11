@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import './App.css'
 import { useAuth, AccountButton, SignInGate } from './auth'
-import SavedPlaces from './SavedPlaces'
+import SavedMenu from './SavedMenu'
 
 const API_BASE = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
@@ -488,7 +488,7 @@ const CHAT_SUGGESTIONS = [
   'Is it raining on the route from Noida to Gurgaon?',
 ]
 
-function ChatPage({ activeTab, onChangeTab }) {
+function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
   const { user } = useAuth()
   const [messages, setMessages] = useState([])   // {role:'user'|'model', text}
   const [input, setInput] = useState('')
@@ -596,6 +596,7 @@ function ChatPage({ activeTab, onChangeTab }) {
               LIVE
             </span>
             <AccountButton />
+            <SavedMenu apiBase={API_BASE} onPick={onPickSaved} />
           </span>
         </nav>
         <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
@@ -617,6 +618,7 @@ function ChatPage({ activeTab, onChangeTab }) {
             LIVE
           </span>
           <AccountButton />
+          <SavedMenu apiBase={API_BASE} onPick={onPickSaved} />
         </span>
       </nav>
 
@@ -1408,11 +1410,20 @@ function JourneyStopCard({ stop, onClose }) {
   )
 }
 
-function NowcastPage({ userLoc, activeTab, onChangeTab }) {
+function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc, onPendingConsumed }) {
   const [ncLat, setNcLat] = useState(null)
   const [ncLon, setNcLon] = useState(null)
   const [ncName, setNcName] = useState('')
   const [isMyLoc, setIsMyLoc] = useState(false)
+
+  // A saved place picked from the SavedMenu (in any tab) lands here.
+  useEffect(() => {
+    if (!pendingLoc) return
+    setNcLat(pendingLoc.lat); setNcLon(pendingLoc.lon)
+    setNcName(pendingLoc.label || 'Saved place')
+    setIsMyLoc(false); setNcResult(null); setNcError(null)
+    onPendingConsumed && onPendingConsumed()
+  }, [pendingLoc])
 
   const [ncSearchQuery, setNcSearchQuery] = useState('')
   const [ncSuggestions, setNcSuggestions] = useState([])
@@ -1508,6 +1519,12 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
             LIVE
           </span>
           <AccountButton />
+          <SavedMenu
+            apiBase={API_BASE}
+            onPick={onPickSaved}
+            currentLoc={ncLat != null && ncLon != null
+              ? { label: ncName, lat: ncLat, lon: ncLon } : null}
+          />
         </span>
       </nav>
 
@@ -1613,25 +1630,16 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
         </button>
       </div>
 
-      {/* Signed-in extras: rain alerts + saved places (nowcast itself stays free) */}
-      <SignInGate
-        title="Sign in for alerts & saved places"
-        sub="Get push alerts when rain approaches, and save Home/Work for one-tap checks. The nowcast above is free without login."
-      >
-        {hasLocation && (
+      {/* Signed-in extra: rain alerts (nowcast itself stays free; saved
+          places live in the ⋮ menu in the top nav). */}
+      {hasLocation && (
+        <SignInGate
+          title="Sign in for rain alerts & saved places"
+          sub="Get push alerts when rain approaches, and save Home/Work (⋮ menu, top-right) for one-tap checks. The nowcast above is free without login."
+        >
           <RainAlertsCard lat={ncLat} lon={ncLon} label={ncName || null} />
-        )}
-        <SavedPlaces
-          apiBase={API_BASE}
-          currentLat={ncLat}
-          currentLon={ncLon}
-          currentName={ncName}
-          onPick={(l) => {
-            setNcLat(l.lat); setNcLon(l.lon); setNcName(l.label)
-            setIsMyLoc(false); setNcResult(null); setNcError(null)
-          }}
-        />
-      </SignInGate>
+        </SignInGate>
+      )}
 
       {ncError && (
         <div className="error-toast" role="alert" aria-live="polite">
@@ -1687,6 +1695,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab }) {
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [activeTab, setActiveTab] = useState('route')
+  const [pendingNcLoc, setPendingNcLoc] = useState(null)  // saved place → Nowcast
 
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
@@ -1921,6 +1930,12 @@ export default function App() {
     setError(null)
   }
 
+  // A saved place picked from the ⋮ menu (in any tab) → jump to Nowcast + load it.
+  function onPickSaved(loc) {
+    setPendingNcLoc(loc)
+    handleTabChange('nowcast')
+  }
+
   return (
     <div className="app">
 
@@ -1930,6 +1945,9 @@ export default function App() {
           userLoc={userLoc}
           activeTab={activeTab}
           onChangeTab={handleTabChange}
+          onPickSaved={onPickSaved}
+          pendingLoc={pendingNcLoc}
+          onPendingConsumed={() => setPendingNcLoc(null)}
         />
       )}
 
@@ -1938,6 +1956,7 @@ export default function App() {
         <ChatPage
           activeTab={activeTab}
           onChangeTab={handleTabChange}
+          onPickSaved={onPickSaved}
         />
       )}
 
@@ -1964,6 +1983,7 @@ export default function App() {
                     LIVE
                   </span>
                   <AccountButton />
+                  <SavedMenu apiBase={API_BASE} onPick={onPickSaved} />
                 </span>
               </nav>
 
