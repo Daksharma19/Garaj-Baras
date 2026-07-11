@@ -777,8 +777,20 @@ def _sweep_alerts() -> dict:
     radars = sorted({_detect_radar(lat, lon) for lat, lon in coords})
     refreshed = []
     for name in radars:
-        # The blocking refresh runs process_alerts for all this radar's subs.
-        _ensure_radar_fresh_blocking(name)
+        reg = _RADAR_REGISTRY.get(name)
+        was_fresh = bool(reg and reg["ready"].is_set() and _is_fresh(reg["cache"], RADAR_CACHE_TTL_SEC))
+        state = _ensure_radar_fresh_blocking(name)
+        # A stale-cache refresh already runs process_alerts internally on
+        # completion. But if the cache was already fresh (e.g. a user browsed
+        # this radar's city a few minutes ago), the refresh above no-ops and
+        # alerts would otherwise be silently skipped for this sweep — so call
+        # it explicitly in that case.
+        if was_fresh and state and reg:
+            try:
+                alerts.process_alerts(name, state, reg["georef"].is_within_radar,
+                                      reg["georef"].latlon_to_pixel)
+            except Exception as e:
+                print(f"alert sweep: process_alerts {name} failed: {e}")
         refreshed.append(name)
     return {"ok": True, "subscriptions": len(coords), "radars_refreshed": refreshed}
 

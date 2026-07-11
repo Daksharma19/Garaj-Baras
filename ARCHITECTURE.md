@@ -249,9 +249,12 @@ unmatched → expired. `/stats/accuracy` aggregates POD, FAR, CSI.
 Web-push (VAPID) subscriptions stored in `alerts.db` with a per-subscription
 state machine `clear → approaching → raining`. After each radar refresh, each
 covered saved location gets a 4-slot nowcast:
-- `clear→approaching`: "Rain approaching (~N min)" heads-up.
+- `clear→approaching`: "Rain approaching (~N min)" heads-up (state decided from
+  the first 4 slots, 0-45 min).
 - `→raining`: "Rain right now" arrival ping (fires even after a heads-up);
-  adds "likely to ease within ~15 min" if the +15 slot is clear.
+  scans the full 8-slot horizon (0-105 min) and appends "Expected to ease in
+  ~N min" (and, if rain resumes afterward, "may pick up again around ~M min")
+  via `_ease_and_resume_note`.
 - Separate 45-min cooldowns for heads-up vs arrival; dead subscriptions
   (HTTP 404/410) are pruned. VAPID keys from env
   (`VAPID_PRIVATE_KEY_PEM`/`VAPID_PUBLIC_KEY`, paste-mistake-tolerant) or
@@ -264,13 +267,24 @@ covered saved location gets a 4-slot nowcast:
   already raining, the user is notified within seconds.
 - **Scheduled sweep:** `GET /tasks/sweep_alerts?token=` (`_sweep_alerts` in
   main.py) reads every subscription's coords (`alerts.all_subscription_coords`),
-  maps them to distinct radars via `_detect_radar`, and blocking-refreshes each
-  (which runs `process_alerts`). The `keepalive.yml` GitHub Action hits this
-  every 10 min, so alerts fire on schedule instead of only when someone browses
-  that city; `keep_alive.yml` still pings `/health` every 5 min as a cheap
-  awake-keeper. Optional `SWEEP_TOKEN` env gates the endpoint (matching repo
-  secret sent by the workflow). Both paths use the `_RADAR_REGISTRY` table
-  (name → refresh fn / cache / ready event / georef).
+  maps them to distinct radars via `_detect_radar`, and blocking-refreshes each.
+  A stale-cache refresh runs `process_alerts` internally on completion; if the
+  cache was already fresh (someone browsed that city recently), the refresh
+  no-ops so `_sweep_alerts` calls `process_alerts` explicitly itself — every
+  sweep tick checks alerts regardless of recent browsing traffic. The
+  `keepalive.yml` GitHub Action hits this every 10 min, so alerts fire on
+  schedule instead of only when someone browses that city; `keep_alive.yml`
+  still pings `/health` every 5 min as a cheap awake-keeper. Optional
+  `SWEEP_TOKEN` env gates the endpoint (matching repo secret sent by the
+  workflow). Both paths use the `_RADAR_REGISTRY` table (name → refresh fn /
+  cache / ready event / georef).
+  **Caveat:** GitHub Actions `schedule:` cron is best-effort, not exact — GitHub
+  queues scheduled runs and can delay them, especially at :00/:05/:10 minute
+  marks when load is high; delays of several minutes (occasionally more) are
+  normal, and workflows are auto-disabled after 60 days with no repo commits.
+  For tighter, more reliable timing, an external pinger (cron-job.org,
+  UptimeRobot, etc.) hitting `/tasks/sweep_alerts` is more dependable than
+  relying on GitHub's scheduler alone.
 
 ### Chatbot (chatbot.py)
 Gemini 2.5 Flash with function calling; tools are the **in-process** endpoint

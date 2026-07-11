@@ -262,6 +262,23 @@ def _mins_since(iso: str) -> float:
         return 1e9
 
 
+def _ease_and_resume_note(slots: list) -> str:
+    """Scan the full 8-slot horizon (0..105 min) past the current 'raining'
+    slot for when it eases and, if it picks back up afterward, when. Returns
+    a sentence fragment to append to the arrival ping, or "" if rain simply
+    continues through every slot we have."""
+    flags = [s["has_rain"] for s in slots]
+    stop_i = next((i for i in range(1, len(flags)) if not flags[i]), None)
+    if stop_i is None:
+        return ""
+    stop_min = slots[stop_i]["slot_mins"]
+    resume_i = next((i for i in range(stop_i + 1, len(flags)) if flags[i]), None)
+    if resume_i is not None:
+        resume_min = slots[resume_i]["slot_mins"]
+        return f" Expected to ease in ~{stop_min} min, may pick up again around ~{resume_min} min."
+    return f" Expected to ease in ~{stop_min} min."
+
+
 def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixel,
                    only_endpoint: str = None):
     """
@@ -305,16 +322,20 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
         for sid, endpoint, sub_json, lat, lon, label, sub_state, last_at, last_rain_at in covered:
             try:
                 px, py = latlon_to_pixel(lat, lon)
+                # Full 8-slot horizon (0..105 min): the first 4 (0-45) drive the
+                # clear/approaching/raining state machine unchanged; the full
+                # set lets the "raining now" ping also report when it eases and
+                # whether it picks back up later.
                 slots = compute_nowcast_slots(
                     user_px=float(px), user_py=float(py),
                     dx=float(dx), dy=float(dy),
                     rain_mask=rain_mask, rgb_arr=rgb_arr,
                     patch_tracks=state.get("decay_tracks") or [],
                     lag_mins=lag,
-                    num_slots=4, slot_interval=15,   # now, +15, +30, +45
                     patches_motion=state.get("patches") or [],
                 )
-                first_rainy = next((s for s in slots if s["has_rain"]), None)
+                approach_slots = slots[:4]   # now, +15, +30, +45
+                first_rainy = next((s for s in approach_slots if s["has_rain"]), None)
                 place = label or f"{lat:.3f}, {lon:.3f}"
 
                 if first_rainy is None:
@@ -335,8 +356,7 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                     if last_rain_at is None or _mins_since(last_rain_at) >= MIN_RENOTIFY_MINS:
                         title = f"⛈ Rain right now at {place}"
                         body = f"{first_rainy['intensity']} observed by radar."
-                        if len(slots) > 1 and not slots[1]["has_rain"]:
-                            body += " Likely to ease within ~15 min."
+                        body += _ease_and_resume_note(slots)
                         body += f" (Radar data ~{lag:.0f} min old.)"
                 elif desired == "approaching" and sub_state == "clear":
                     # First heads-up for incoming rain.
