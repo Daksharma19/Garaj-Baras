@@ -248,13 +248,18 @@ unmatched → expired. `/stats/accuracy` aggregates POD, FAR, CSI.
 ### Alerts (alerts.py)
 Web-push (VAPID) subscriptions stored in `alerts.db` with a per-subscription
 state machine `clear → approaching → raining`. After each radar refresh, each
-covered saved location gets a 4-slot nowcast:
-- `clear→approaching`: "Rain approaching (~N min)" heads-up (state decided from
-  the first 4 slots, 0-45 min).
+covered saved location gets the full 8-slot nowcast (0-105 min, same horizon
+as the Nowcast tab):
+- `clear→approaching`: "Rain approaching (~N min)" heads-up — can fire for
+  rain anywhere in the 0-105 min horizon, not just the near slots. Slots
+  beyond 45 min (`FAR_SLOT_MINS`) only count when probability > 70%
+  (`FAR_SLOT_MIN_PROB`), so distant low-confidence forecasts don't spam
+  false heads-ups (`_slot_is_rain`, applied to both the trigger and the
+  ease/resume scan).
 - `→raining`: "Rain right now" arrival ping (fires even after a heads-up);
-  scans the full 8-slot horizon (0-105 min) and appends "Expected to ease in
-  ~N min" (and, if rain resumes afterward, "may pick up again around ~M min")
-  via `_ease_and_resume_note`.
+  appends "Expected to ease in ~N min" (and, if rain resumes afterward, "may
+  pick up again around ~M min") via `_ease_and_resume_note`, scanning the same
+  8-slot horizon.
 - Separate 45-min cooldowns for heads-up vs arrival; dead subscriptions
   (HTTP 404/410) are pruned. VAPID keys from env
   (`VAPID_PRIVATE_KEY_PEM`/`VAPID_PUBLIC_KEY`, paste-mistake-tolerant) or

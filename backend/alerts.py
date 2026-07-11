@@ -262,12 +262,31 @@ def _mins_since(iso: str) -> float:
         return 1e9
 
 
+# Far-out slots (beyond this many minutes) are only trusted for a notification
+# when the model is confident: radar lag + long projection makes distant
+# forecasts noisy, so a low-probability far slot would spam false heads-ups.
+FAR_SLOT_MINS = 45
+FAR_SLOT_MIN_PROB = 70.0
+
+
+def _slot_is_rain(slot: dict) -> bool:
+    """Whether a slot counts as rain for alerting purposes. Near slots
+    (<= FAR_SLOT_MINS) use has_rain as-is; far slots additionally require
+    probability > FAR_SLOT_MIN_PROB so distant, low-confidence forecasts don't
+    trigger notifications."""
+    if not slot.get("has_rain"):
+        return False
+    if slot.get("slot_mins", 0) > FAR_SLOT_MINS:
+        return float(slot.get("probability") or 0) > FAR_SLOT_MIN_PROB
+    return True
+
+
 def _ease_and_resume_note(slots: list) -> str:
     """Scan the full 8-slot horizon (0..105 min) past the current 'raining'
     slot for when it eases and, if it picks back up afterward, when. Returns
     a sentence fragment to append to the arrival ping, or "" if rain simply
     continues through every slot we have."""
-    flags = [s["has_rain"] for s in slots]
+    flags = [_slot_is_rain(s) for s in slots]
     stop_i = next((i for i in range(1, len(flags)) if not flags[i]), None)
     if stop_i is None:
         return ""
@@ -322,10 +341,9 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
         for sid, endpoint, sub_json, lat, lon, label, sub_state, last_at, last_rain_at in covered:
             try:
                 px, py = latlon_to_pixel(lat, lon)
-                # Full 8-slot horizon (0..105 min): the first 4 (0-45) drive the
-                # clear/approaching/raining state machine unchanged; the full
-                # set lets the "raining now" ping also report when it eases and
-                # whether it picks back up later.
+                # Full 8-slot horizon (0..105 min) drives both the
+                # clear/approaching/raining state machine and the "raining now"
+                # ease/resume note — heads-up coverage matches the nowcast tab.
                 slots = compute_nowcast_slots(
                     user_px=float(px), user_py=float(py),
                     dx=float(dx), dy=float(dy),
@@ -334,8 +352,7 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                     lag_mins=lag,
                     patches_motion=state.get("patches") or [],
                 )
-                approach_slots = slots[:4]   # now, +15, +30, +45
-                first_rainy = next((s for s in approach_slots if s["has_rain"]), None)
+                first_rainy = next((s for s in slots if _slot_is_rain(s)), None)
                 place = label or f"{lat:.3f}, {lon:.3f}"
 
                 if first_rainy is None:
