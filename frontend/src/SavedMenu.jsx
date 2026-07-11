@@ -5,12 +5,22 @@
 // onPick (App switches to the Nowcast tab and loads it). Saved routes are
 // a Phase-5 placeholder for now.
 //
+// The Places search box does double duty: it filters your saved places AND
+// geocodes new places (Nominatim). Any geocoded result you haven't saved yet
+// shows a "+" to save it on the spot.
+//
 // `currentLoc` (optional {label, lat, lon}) enables a "Save this location"
 // action — passed only from the Nowcast nav, where a current scan exists.
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
 import { useAuth } from './auth'
+
+const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search'
+
+function shortName(name) {
+  return String(name ?? '').split(',')[0].trim()
+}
 
 export default function SavedMenu({ apiBase, currentLoc, onPick }) {
   const { user, authHeaders } = useAuth()
@@ -20,6 +30,12 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
   const [query, setQuery] = useState('')
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
+
+  // Geocoder results for the current query (places you could add).
+  const [geoResults, setGeoResults] = useState([])
+  const [geoLoading, setGeoLoading] = useState(false)
+  const debounceRef = useRef(null)
+  const abortRef = useRef(null)
 
   const load = useCallback(async () => {
     try {
@@ -44,17 +60,51 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
+  // Debounced geocoder search as you type.
+  useEffect(() => {
+    const q = query.trim()
+    if (abortRef.current) abortRef.current.abort()
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    if (q.length < 3) { setGeoResults([]); setGeoLoading(false); return }
+    setGeoLoading(true)
+    debounceRef.current = setTimeout(async () => {
+      const ac = new AbortController()
+      abortRef.current = ac
+      try {
+        const res = await axios.get(NOMINATIM_SEARCH_URL, {
+          timeout: 15000, signal: ac.signal,
+          params: { q, format: 'jsonv2', limit: 6, addressdetails: 1, countrycodes: 'in' },
+          headers: { Accept: 'application/json' },
+        })
+        const arr = (Array.isArray(res.data) ? res.data : [])
+          .filter((x) => x?.lat && x?.lon && x?.display_name)
+          .map((x) => ({
+            id: String(x.place_id ?? x.osm_id ?? x.display_name),
+            display_name: String(x.display_name),
+            lat: Number(x.lat), lon: Number(x.lon),
+          }))
+          .filter((x) => Number.isFinite(x.lat) && Number.isFinite(x.lon))
+        setGeoResults(arr)
+      } catch (e) {
+        if (e?.name !== 'CanceledError' && e?.name !== 'AbortError') setGeoResults([])
+      } finally {
+        setGeoLoading(false)
+      }
+    }, 400)
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
+  }, [query])
+
   if (!user) return null
 
-  async function saveCurrent() {
-    if (!currentLoc) return
+  const isSaved = (lat, lon) => (locations || []).some((l) =>
+    Math.abs(l.lat - lat) < 1e-3 && Math.abs(l.lon - lon) < 1e-3)
+
+  async function savePlace(label, lat, lon) {
     setBusy(true)
     try {
-      const label = (currentLoc.label ||
-        `${currentLoc.lat.toFixed(3)}, ${currentLoc.lon.toFixed(3)}`).slice(0, 60)
+      const lbl = (label || `${lat.toFixed(3)}, ${lon.toFixed(3)}`).slice(0, 60)
       await axios.post(`${apiBase}/locations`,
-        { label, lat: currentLoc.lat, lon: currentLoc.lon },
-        { headers: authHeaders() })
+        { label: lbl, lat, lon }, { headers: authHeaders() })
       await load()
     } catch (e) {
       setError(e?.response?.data?.detail || 'Could not save this place.')
@@ -75,11 +125,15 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
     }
   }
 
-  const filtered = (locations || []).filter((l) =>
-    l.label.toLowerCase().includes(query.trim().toLowerCase()))
+  const q = query.trim().toLowerCase()
+  const savedMatches = (locations || []).filter((l) =>
+    !q || l.label.toLowerCase().includes(q))
+  // Geocoded places not already in the saved list.
+  const addable = q.length >= 3
+    ? geoResults.filter((g) => !isSaved(g.lat, g.lon))
+    : []
 
-  const alreadySaved = currentLoc && (locations || []).some((l) =>
-    Math.abs(l.lat - currentLoc.lat) < 1e-4 && Math.abs(l.lon - currentLoc.lon) < 1e-4)
+  const alreadySaved = currentLoc && isSaved(currentLoc.lat, currentLoc.lon)
 
   return (
     <>
@@ -114,26 +168,46 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
               <div className="sm-body">
                 {currentLoc && !alreadySaved && (
                   <button type="button" className="sm-save-current" disabled={busy}
-                    onClick={saveCurrent}>
+                    onClick={() => savePlace(currentLoc.label, currentLoc.lat, currentLoc.lon)}>
                     + Save “{(currentLoc.label || 'current location').slice(0, 28)}”
                   </button>
                 )}
 
-                <input className="sm-search" placeholder="Search saved places…"
+                <input className="sm-search" placeholder="Search a place to save, or filter saved…"
                   value={query} onChange={(e) => setQuery(e.target.value)} />
 
+                {/* Add new (geocoded) results not yet saved */}
+                {addable.length > 0 && (
+                  <>
+                    <div className="sm-grouphdr">Add a new place</div>
+                    {addable.map((g) => (
+                      <div key={g.id} className="sm-row">
+                        <div className="sm-row__pick sm-row__pick--static">
+                          <span className="sm-row__label">{shortName(g.display_name)}</span>
+                          <span className="sm-row__coords">{g.display_name}</span>
+                        </div>
+                        <button type="button" className="sm-row__add"
+                          aria-label={`Save ${shortName(g.display_name)}`} disabled={busy}
+                          onClick={() => savePlace(shortName(g.display_name), g.lat, g.lon)}>+</button>
+                      </div>
+                    ))}
+                  </>
+                )}
+                {geoLoading && q.length >= 3 && <div className="sm-empty">Searching…</div>}
+
+                {/* Saved places */}
+                {(savedMatches.length > 0 || addable.length > 0) && (
+                  <div className="sm-grouphdr">Saved places</div>
+                )}
                 {locations === null && <div className="sm-empty">Loading…</div>}
                 {error && <div className="sm-error">{error}</div>}
-                {locations !== null && locations.length === 0 && !error && (
+                {locations !== null && locations.length === 0 && !error && addable.length === 0 && (
                   <div className="sm-empty">
-                    No saved places yet. Scan a location in Nowcast, then tap “Save”.
+                    No saved places yet. Search above and tap “+”, or scan a location
+                    in Nowcast and tap “Save”.
                   </div>
                 )}
-                {locations !== null && locations.length > 0 && filtered.length === 0 && (
-                  <div className="sm-empty">No places match “{query}”.</div>
-                )}
-
-                {filtered.map((l) => (
+                {savedMatches.map((l) => (
                   <div key={l.id} className="sm-row">
                     <button type="button" className="sm-row__pick"
                       onClick={() => { onPick && onPick(l); setOpen(false) }}>

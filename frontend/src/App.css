@@ -2360,3 +2360,36 @@
   color: var(--text-secondary, #8896b3);
   max-width: 260px; margin: 0 auto;
 }
+
+/* Nowcast quick-save button */
+.nc-save-loc-btn {
+  width: 100%;
+  margin-top: 10px;
+  font-family: inherit; font-size: 13px; font-weight: 700;
+  color: var(--accent-1);
+  background: rgba(79, 195, 247, 0.10);
+  border: 1px solid rgba(79, 195, 247, 0.35);
+  border-radius: 12px;
+  padding: 10px; cursor: pointer;
+}
+.nc-save-loc-btn:disabled { opacity: 0.75; cursor: default; }
+
+/* Saved-menu: group headers + add-row + static (non-clickable) pick */
+.sm-grouphdr {
+  font-size: 10.5px; font-weight: 800; letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-secondary, #8896b3);
+  margin: 14px 2px 4px;
+}
+.sm-row__pick--static { cursor: default; }
+.sm-row__pick--static:hover { background: transparent; }
+.sm-row__add {
+  font-family: inherit; font-size: 18px; line-height: 1; font-weight: 700;
+  color: var(--accent-1);
+  background: rgba(79, 195, 247, 0.12);
+  border: 1px solid rgba(79, 195, 247, 0.40);
+  border-radius: 8px;
+  width: 30px; height: 30px; cursor: pointer; flex-shrink: 0;
+}
+.sm-row__add:hover { background: rgba(79, 195, 247, 0.22); }
+.sm-row__add:disabled { opacity: 0.5; cursor: default; }

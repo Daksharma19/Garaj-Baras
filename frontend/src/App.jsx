@@ -1437,6 +1437,24 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
   const [ncScanStatus, setNcScanStatus] = useState('')
   const [radarDown, setRadarDown] = useState(false)
   const [forecastGif, setForecastGif] = useState(null)  // { url, loading }
+  const { user, authHeaders } = useAuth()
+  const [saveState, setSaveState] = useState('idle')    // idle | saving | saved | error
+
+  // Reset the save button whenever the selected location changes.
+  useEffect(() => { setSaveState('idle') }, [ncLat, ncLon])
+
+  async function saveThisLocation() {
+    if (ncLat == null || ncLon == null) return
+    setSaveState('saving')
+    try {
+      const label = (ncName || `${ncLat.toFixed(3)}, ${ncLon.toFixed(3)}`).slice(0, 60)
+      await axios.post(`${API_BASE}/locations`,
+        { label, lat: ncLat, lon: ncLon }, { headers: authHeaders() })
+      setSaveState('saved')
+    } catch {
+      setSaveState('error')
+    }
+  }
 
   useEffect(() => {
     if (userLoc && !ncLat) {
@@ -1628,6 +1646,21 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
             </>
           )}
         </button>
+
+        {/* Quick-save the selected location (signed-in only) */}
+        {hasLocation && user && (
+          <button
+            className="nc-save-loc-btn"
+            type="button"
+            onClick={saveThisLocation}
+            disabled={saveState === 'saving' || saveState === 'saved'}
+          >
+            {saveState === 'saved' ? '✓ Added to your saved places'
+              : saveState === 'saving' ? 'Saving…'
+              : saveState === 'error' ? 'Couldn’t save — tap to retry'
+              : '＋ Add to your saved locations'}
+          </button>
+        )}
       </div>
 
       {/* Signed-in extra: rain alerts (nowcast itself stays free; saved
