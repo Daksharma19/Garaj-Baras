@@ -24,9 +24,9 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_DECAY_DBZ_PER_10MIN,
-                     NEW_CELL_MIN_DBZ, NEW_CELL_MAX_ASSERT_MINS,
-                     _find_track_for_patch)
+from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_MIN_DBZ,
+                     FRESH_POPUP_VELOCITY_THRESH,
+                     new_cell_params, _find_track_for_patch)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -61,9 +61,13 @@ def _patch_fade(patch, tracks, eff_mins, slot_mins=0.0):
             return 0.0
         proj = proj * area_frac  # shrinking blob fades even at flat mean dBZ
     else:
-        if slot_mins > NEW_CELL_MAX_ASSERT_MINS:
+        # Texture-conditioned lifecycle (mirrors nowcast.new_cell_params):
+        # small spiky convective cells fade fast, stratiform blankets persist.
+        rate, max_assert = new_cell_params(
+            patch.get("area_px"), raw, patch.get("mean_dbz", 0.0))
+        if slot_mins > max_assert:
             return 0.0
-        proj = raw + NEW_CELL_DECAY_DBZ_PER_10MIN * (eff_mins / 10.0)
+        proj = raw + rate * (eff_mins / 10.0)
         if proj < NEW_CELL_MIN_DBZ:
             return 0.0
     return max(MIN_FADE, min(1.0, proj / raw))
@@ -146,6 +150,11 @@ def render_forecast_frames(frame_rgb, rain_mask, patches, tracks,
                 continue
             vx = float(p.get("dx_10", 0.0))
             vy = float(p.get("dy_10", 0.0))
+            if (abs(vx) < FRESH_POPUP_VELOCITY_THRESH
+                    and abs(vy) < FRESH_POPUP_VELOCITY_THRESH):
+                # Fresh pop-up with no measured motion: ride the global
+                # steering flow instead of parking in place (mirrors nowcast)
+                vx, vy = float(gdx), float(gdy)
             ys, xs = bm.nonzero_full()
             dxs = (xs + vx * shifts).round().astype(int)
             dys = (ys + vy * shifts).round().astype(int)

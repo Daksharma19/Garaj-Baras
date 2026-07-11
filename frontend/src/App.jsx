@@ -751,6 +751,7 @@ function NowcastSlots({ slots }) {
           : slot.decay_status === 'dead' ? 'Clearing'
           : slot.decay_status === 'weakening' ? 'Weakening'
           : slot.decay_status === 'new_cell' ? 'New storm'
+          : slot.decay_status === 'growing' ? 'Intensifying'
           : null
         const isNow = i === 0
 

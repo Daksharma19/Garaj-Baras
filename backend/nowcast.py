@@ -62,23 +62,81 @@ FRESH_POPUP_VELOCITY_THRESH: float = 0.3
 # ── New-cell (single-observation) lifecycle ───────────────────────────────────
 # A cell seen in only ONE frame has no measured motion or intensity trend.
 # Previously it was assumed "stable" forever, so a fresh pop-up sitting on the
-# user predicted unchanged heavy rain for the full 2-h horizon. Small convective
-# pop-ups typically live 30–60 min, so give unobserved cells a synthetic
-# climatological decay instead. Tracked patches (>= 2 observations) are NEVER
-# touched by this — their measured decay_rate (≈0 for a consistent mover) wins.
+# user predicted unchanged heavy rain for the full 2-h horizon. Instead of one
+# fixed climatological prior, the synthetic lifecycle is now conditioned on the
+# cell's radar "texture" (convective vs stratiform — see new_cell_params below).
+# Tracked patches (>= 2 observations) are NEVER touched by this — their
+# measured decay_rate (≈0 for a consistent mover) wins.
+# Legacy midpoint constants (kept as the neutral fallback when no texture
+# features are available):
 NEW_CELL_DECAY_DBZ_PER_10MIN: float = -2.5
-# A never-observed-moving cell is asserted for THREE checkpoints only
-# (now, +15, +30). Beyond that, only tracked motion / measured decay logic
-# may claim rain — a pop-up we've never seen move earns no longer horizon.
 NEW_CELL_MAX_ASSERT_MINS: float = 30.0
 # Projected dBZ below this → treat the new cell as rained out
 NEW_CELL_MIN_DBZ: float = 10.0
 
 # Widespread-rain detection: if rain covers >= this fraction of a wide circle
 # around the source point, it's a broad shield (stratiform / monsoon band),
-# not a convective pop-up — the 30-min new-cell kill must not apply.
+# not a convective pop-up — the short new-cell kill must not apply.
 WIDESPREAD_RADIUS_PX: int = 60
 WIDESPREAD_MIN_FRACTION: float = 0.5
+
+# ── Texture personality: convective (pulse storm) vs stratiform (shield) ─────
+# A small, intense, spiky blob is a heat-driven convective pop-up: short-lived,
+# fast decay. A large, smooth, moderate blanket is stratiform / system rain:
+# long-lived, gentle decay. Scored 0 (stratiform) → 1 (convective) from
+# features every patch already carries (area, peak dBZ, peak/mean spikiness)
+# plus the widespread-shield fraction around the point.
+CONV_AREA_SMALL_PX: float = 150.0   # ≤ this blob area → fully "small" (~115 km²)
+CONV_AREA_LARGE_PX: float = 3000.0  # ≥ this area → fully "large" (~2300 km²)
+CONV_PEAK_LO_DBZ: float = 30.0      # peak below this → no convective evidence
+CONV_PEAK_HI_DBZ: float = 45.0      # peak above this → strong convective core
+# Lifecycle endpoints, interpolated by the convective score
+STRATIFORM_DECAY_DBZ_PER_10MIN: float = -1.0
+CONVECTIVE_DECAY_DBZ_PER_10MIN: float = -4.0
+STRATIFORM_MAX_ASSERT_MINS: float = 105.0   # full slot horizon
+CONVECTIVE_MAX_ASSERT_MINS: float = 30.0
+
+
+def _clamp01(x: float) -> float:
+    return min(1.0, max(0.0, x))
+
+
+def convective_score(area_px, peak_dbz, mean_dbz: float = 0.0,
+                     widespread_frac: float = None) -> float:
+    """
+    0.0 = stratiform blanket (long-lived), 1.0 = convective pop-up (dies fast).
+    area_px may be None (unknown source blob) → neutral area evidence.
+    """
+    if area_px:
+        span = math.log(CONV_AREA_LARGE_PX) - math.log(CONV_AREA_SMALL_PX)
+        a = _clamp01((math.log(CONV_AREA_LARGE_PX) - math.log(max(1.0, float(area_px)))) / span)
+    else:
+        a = 0.5
+    p = _clamp01((float(peak_dbz or 0) - CONV_PEAK_LO_DBZ) / (CONV_PEAK_HI_DBZ - CONV_PEAK_LO_DBZ))
+    if mean_dbz and mean_dbz > 0:
+        # Spikiness: sharp core (max ≫ mean) reads convective; flat reads stratiform
+        s = _clamp01((float(peak_dbz) / float(mean_dbz) - 1.1) / 0.5)
+    else:
+        s = 0.5
+    score = 0.45 * a + 0.30 * p + 0.25 * s
+    if widespread_frac is not None:
+        # Embedded in a broad rain shield → pull hard toward stratiform
+        score *= 1.0 - 0.8 * _clamp01(widespread_frac / WIDESPREAD_MIN_FRACTION)
+    return _clamp01(score)
+
+
+def new_cell_params(area_px, peak_dbz, mean_dbz: float = 0.0,
+                    widespread_frac: float = None):
+    """
+    Texture-conditioned synthetic lifecycle for a cell with no observed trend.
+    Returns (decay_rate dBZ/10 min, max_assert_mins).
+    """
+    c = convective_score(area_px, peak_dbz, mean_dbz, widespread_frac)
+    rate = STRATIFORM_DECAY_DBZ_PER_10MIN + c * (
+        CONVECTIVE_DECAY_DBZ_PER_10MIN - STRATIFORM_DECAY_DBZ_PER_10MIN)
+    max_assert = STRATIFORM_MAX_ASSERT_MINS + c * (
+        CONVECTIVE_MAX_ASSERT_MINS - STRATIFORM_MAX_ASSERT_MINS)
+    return rate, max_assert
 
 
 def _track_has_history(track) -> bool:
@@ -86,14 +144,16 @@ def _track_has_history(track) -> bool:
     return track is not None and len(getattr(track, "mean_dbzs", []) or []) >= 2
 
 
-def _new_cell_projection(raw_dbz: float, eff_mins: float, slot_mins: float):
+def _new_cell_projection(raw_dbz: float, eff_mins: float, slot_mins: float,
+                         rate: float = NEW_CELL_DECAY_DBZ_PER_10MIN,
+                         max_assert: float = NEW_CELL_MAX_ASSERT_MINS):
     """
     Synthetic lifecycle for a cell with no observed history.
     Returns (proj_dbz, decay_status, has_rain).
     """
-    if slot_mins > NEW_CELL_MAX_ASSERT_MINS:
+    if slot_mins > max_assert:
         return 0.0, "new_cell", False
-    proj = max(0.0, float(raw_dbz) + NEW_CELL_DECAY_DBZ_PER_10MIN * (eff_mins / 10.0))
+    proj = max(0.0, float(raw_dbz) + rate * (eff_mins / 10.0))
     if proj < NEW_CELL_MIN_DBZ:
         return proj, "new_cell", False
     return proj, "new_cell", True
@@ -271,7 +331,7 @@ def _decay_factor(decay_status: str) -> float:
         return 0.75
     if decay_status == "new_cell":
         return 0.8
-    return 1.0
+    return 1.0  # stable and growing: no survival penalty
 
 
 # ── Arrival confidence (legacy lead-time table — kept for reference/compat) ──
@@ -370,6 +430,21 @@ def _find_track_for_patch(patch: dict, patch_tracks) -> Optional[object]:
             best_dist = dist
             best_track = track
     return best_track
+
+
+def _find_patch_for_pixel(orig_px: float, orig_py: float, patches) -> Optional[dict]:
+    """Return the patch dict whose blob mask contains (orig_px, orig_py), if any.
+    Used to fetch texture features (area, peak/mean dBZ) for the source blob."""
+    for p in (patches or []):
+        bm = p.get("mask")
+        if bm is None:
+            continue
+        try:
+            if bm.hit(int(orig_px), int(orig_py), radius=3):
+                return p
+        except Exception:
+            continue
+    return None
 
 
 def _find_patch_track(orig_px: float, orig_py: float, patch_tracks) -> Optional[object]:
@@ -516,10 +591,18 @@ def compute_nowcast_slots(
             cur_dist = math.sqrt((cx - user_px) ** 2 + (cy - user_py) ** 2)
             if cur_dist > search_radius_px:
                 continue
-            if abs(vx) < FRESH_POPUP_VELOCITY_THRESH and abs(vy) < FRESH_POPUP_VELOCITY_THRESH:
-                continue
+            is_popup = (abs(vx) < FRESH_POPUP_VELOCITY_THRESH
+                        and abs(vy) < FRESH_POPUP_VELOCITY_THRESH)
+            if is_popup:
+                # Fresh pop-up: no measured motion yet. Instead of skipping it
+                # (which left it parked over the user via the fallback), assume
+                # it rides the global steering flow — dwell time (blob extent ÷
+                # speed) then falls out of the projection geometry naturally.
+                eval_patch = dict(patch, dx_10=dx, dy_10=dy)
+            else:
+                eval_patch = patch
 
-            p = _ensemble_patch_prob(patch, user_px, user_py, eff, radius)
+            p = _ensemble_patch_prob(eval_patch, user_px, user_py, eff, radius)
             if p > geo_prob:
                 geo_prob = p
                 patch_hit = patch
@@ -547,13 +630,21 @@ def compute_nowcast_slots(
         if has_rain and patch_hit is not None:
             track = _find_track_for_patch(patch_hit, patch_tracks)
             raw = float(patch_hit.get("max_dbz", 0))
-            if track:
+            if _track_has_history(track):
                 proj_dbz = max(0.0, raw + dbz_change(track.decay_rate, eff))
                 decay_status = _classify(proj_dbz, track.decay_rate,
                                          project_area_fraction(track, eff))
             else:
-                proj_dbz = raw
-                decay_status = "stable"
+                # No measured trend (pop-up or 1-obs track): texture-conditioned
+                # lifecycle — convective spike dies fast, stratiform blanket
+                # persists across the horizon.
+                pcx, pcy = patch_hit["centroid_px"]
+                wf = _rain_fraction(rain_mask, pcx, pcy, WIDESPREAD_RADIUS_PX)
+                rate, max_assert = new_cell_params(
+                    patch_hit.get("area_px"), raw,
+                    patch_hit.get("mean_dbz", 0.0), wf)
+                proj_dbz, decay_status, has_rain = _new_cell_projection(
+                    raw, eff, t, rate, max_assert)
         elif has_rain:
             track = _find_patch_track(orig_px, orig_py, patch_tracks)
             raw = _sample_raw_dbz(rain_mask, rgb_arr, orig_px, orig_py, radius)
@@ -561,18 +652,23 @@ def compute_nowcast_slots(
                 proj_dbz = max(0.0, raw + dbz_change(track.decay_rate, eff))
                 decay_status = _classify(proj_dbz, track.decay_rate,
                                          project_area_fraction(track, eff))
-            elif _rain_fraction(rain_mask, orig_px, orig_py, WIDESPREAD_RADIUS_PX) >= WIDESPREAD_MIN_FRACTION:
-                # Broad rain shield around the source point — not a pop-up.
-                # Keep the climatological decay but allow the full horizon.
-                proj_dbz = max(0.0, raw + NEW_CELL_DECAY_DBZ_PER_10MIN * (eff / 10.0))
-                decay_status = "stable"
-                has_rain = proj_dbz >= NEW_CELL_MIN_DBZ
             else:
-                # Untracked / single-observation cell: synthetic lifecycle.
-                # Moving patches with a measured trend never reach this branch
-                # — they are handled by the patch-forward pass or the
-                # _track_has_history case above.
-                proj_dbz, decay_status, has_rain = _new_cell_projection(raw, eff, t)
+                # Untracked / single-observation source: texture-conditioned
+                # synthetic lifecycle. The source blob's features (area, peak,
+                # spikiness) plus the widespread-shield fraction decide whether
+                # this is a 30-min firecracker or an all-horizon soaker —
+                # replacing the old fixed 30-min kill + binary shield exception.
+                wf = _rain_fraction(rain_mask, orig_px, orig_py, WIDESPREAD_RADIUS_PX)
+                src_patch = _find_patch_for_pixel(orig_px, orig_py, _sorted_patches)
+                area = src_patch.get("area_px") if src_patch else None
+                peak = float(src_patch.get("max_dbz", raw)) if src_patch else raw
+                meanv = src_patch.get("mean_dbz", 0.0) if src_patch else 0.0
+                rate, max_assert = new_cell_params(area, peak, meanv, wf)
+                proj_dbz, decay_status, has_rain = _new_cell_projection(
+                    raw, eff, t, rate, max_assert)
+                if wf >= WIDESPREAD_MIN_FRACTION and has_rain:
+                    # Broad rain shield — not a pop-up; keep the legacy label
+                    decay_status = "stable"
 
         # ── 3b. Background rain override (slot 0 only) ────────────────────────
         # If the latest frame OBSERVES rain at the user's location, "now" must

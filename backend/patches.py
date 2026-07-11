@@ -61,20 +61,24 @@ def build_ncr_roi_mask(radius_km=150.0):
     return mask
 
 
-def _patch_max_dbz(img_rgb, px_mask):
-    """Vectorized max dBZ for pixels selected by px_mask (boolean H×W array)."""
+def _patch_dbz_stats(img_rgb, px_mask):
+    """Vectorized (max, mean) dBZ for pixels selected by px_mask (boolean H×W array).
+    The peak-to-mean spread is a texture cue: a sharp convective core has a
+    high max/mean ratio, a smooth stratiform blanket a low one."""
     pixels = img_rgb[px_mask].astype(np.int16)
     if len(pixels) == 0:
-        return 0
+        return 0, 0.0
     diff = pixels[:, None, :] - _CT_RGB[None, :, :]
     dist2 = np.sum(diff.astype(np.int32) ** 2, axis=2)
     nearest = dist2.argmin(axis=1)
     min_dist2 = dist2[np.arange(len(pixels)), nearest]
     valid = min_dist2 <= _MAX_DIST2
     if not valid.any():
-        return 0
+        return 0, 0.0
     dbz_vals = np.where(valid, _CT_DBZ[nearest], 0)
-    return int(dbz_vals.max())
+    pos = dbz_vals[dbz_vals > 0]
+    mean_dbz = float(pos.mean()) if len(pos) else 0.0
+    return int(dbz_vals.max()), mean_dbz
 
 
 def compute_patch_motion(frame_paths, gap_mins=10.0,
@@ -182,7 +186,7 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
             else:
                 in_ncr = False
 
-        max_dbz = _patch_max_dbz(img_rgb[by0:by0 + bh, bx0:bx0 + bw], crop)
+        max_dbz, mean_dbz = _patch_dbz_stats(img_rgb[by0:by0 + bh, bx0:bx0 + bw], crop)
         _ptl = pixel_to_latlon_fn if pixel_to_latlon_fn is not None else pixel_to_latlon
         lat, lon = _ptl(int(round(cx_f)), int(round(cy_f)))
 
@@ -197,6 +201,7 @@ def compute_patch_motion(frame_paths, gap_mins=10.0,
             "direction_from": direction_from,
             "direction_to": direction_to,
             "max_dbz": max_dbz,
+            "mean_dbz": mean_dbz,
             "in_ncr": in_ncr,
             "mask": bm,   # BBoxMask — tight crop, ~1/1000th of a full-frame array
         })

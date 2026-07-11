@@ -163,6 +163,10 @@ def project_area_fraction(track: Optional["PatchTrack"], mins_ahead: float) -> f
     return float(math.exp(log_change))
 
 
+# Measured dBZ trend at/above this (per 10 real min) → the cell is intensifying
+GROWING_RATE_DBZ_PER_10MIN = 1.0
+
+
 def _classify(dbz_at_eta: float, decay_rate: float, area_frac: float = 1.0) -> str:
     if dbz_at_eta < DEAD_DBZ_THRESHOLD or area_frac < AREA_DEAD_FRACTION:
         return "dead"
@@ -171,6 +175,10 @@ def _classify(dbz_at_eta: float, decay_rate: float, area_frac: float = 1.0) -> s
     if ((dbz_at_eta < WEAKENING_DBZ_THRESHOLD and decay_rate < -1.5)
             or area_frac < AREA_WEAKENING_FRACTION):
         return "weakening"
+    # Pre-peak cell: intensity climbing and footprint not shrinking — it will
+    # likely be at least as strong on arrival as it is now.
+    if decay_rate >= GROWING_RATE_DBZ_PER_10MIN and area_frac >= 1.0:
+        return "growing"
     return "stable"
 
 

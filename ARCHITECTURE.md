@@ -143,7 +143,9 @@ IMD GIF (every ~10 min)
   → patches.py: compute_patch_motion(): connectedComponents on latest rain mask →
       per-blob optical flow using only that blob's pixels, only frames where the
       blob existed (12-px centroid search) → per-blob {centroid px+latlon, area,
-      dx_10, dy_10, speed, direction, max_dbz}; masks stored as BBoxMask
+      dx_10, dy_10, speed, direction, max_dbz, mean_dbz}; masks stored as BBoxMask.
+      mean_dbz is a texture feature: the peak/mean dBZ ratio (spikiness) feeds
+      the convective-vs-stratiform score in nowcast.py.
   → decay.py: compute_decay_tracks(): link the same blob across all 6 frames
       (predict-next-position via global flow, nearest blob ≤35 px) → mean dBZ vs
       REAL minutes between frames (gaps vary) → Theil–Sen fit (median of pairwise
@@ -157,7 +159,8 @@ IMD GIF (every ~10 min)
       Theil–Sen trend on ln(area); project_area_fraction() (same τ damping,
       growth capped at 1.0) feeds _classify alongside projected dBZ.
       Status: dead (<8 dBZ or <15% area left) / dying (<18 or <35%) /
-      weakening (<32 & declining, or <65%) / stable.
+      weakening (<32 & declining, or <65%) / growing (measured rate ≥ +1
+      dBZ/10 min and footprint not shrinking — pre-peak cell) / stable.
       All consumers (nowcast, forecast_gif) use dbz_change() +
       project_area_fraction(); radar_scene exports the clamped dBZ rate only
       (its frontend player fades linearly and doesn't model area shrink).
@@ -230,10 +233,24 @@ dir_from, dir_to, speed), `latest_frame`, `latest_ts`, `lag_info`, `patches`,
 - Intensity: `projected_dbz = raw_pixel_dbz + dbz_change(decay_rate, eff_mins)`
   (damped, saturating trend — see decay.py above);
   dBZ → probability via a motion-ensemble mapping (~44 dBZ → ~92%, 20 → ~35%).
-- **New-cell lifecycle:** a blob observed in only 1 frame (no measured motion/
-  trend) gets synthetic decay −2.5 dBZ/10 min, may only assert rain for
-  ≤30 min ahead, and dies below 10 dBZ — unless rain is a widespread shield
-  (≥50% coverage in a 60-px circle), where the kill doesn't apply.
+- **New-cell lifecycle (texture-conditioned, "Tier 1"):** a blob with no
+  measured trend (single observation / untracked) no longer gets one fixed
+  prior. Two mechanisms replace it:
+  - **Motion:** a fresh pop-up (|v| below FRESH_POPUP_VELOCITY_THRESH) is
+    advected with the **global flow vector** instead of being skipped/parked —
+    so dwell time at a point (blob extent ÷ steering speed) falls out of the
+    projection geometry. Mirrored in forecast_gif.py and radar_scene.py so
+    the animations agree with the numbers.
+  - **Lifetime:** `new_cell_params(area, peak_dbz, mean_dbz, widespread_frac)`
+    computes a `convective_score` (0 = stratiform, 1 = convective) from blob
+    area (log-scaled 150→3000 px), peak dBZ (30→45), peak/mean spikiness, and
+    the widespread-shield fraction (≥50% coverage in a 60-px circle pulls hard
+    toward stratiform). The score interpolates the synthetic decay between
+    −1 (stratiform) and −4 dBZ/10 min (convective) and the max-assert horizon
+    between 105 and 30 min. Cells still die below 10 dBZ. The old fixed
+    −2.5/30-min constants remain only as the neutral fallback when no texture
+    features are available. This makes a small spiky heat-storm a ~30-min
+    firecracker and a broad moderate blanket an all-horizon soaker.
 
 ### Radar scene v2 (radar_scene.py) — data-driven animation
 `/nowcast/radar_scene?lat=&lon=` returns a compact JSON scene (~50–70 KB) the

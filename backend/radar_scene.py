@@ -21,8 +21,8 @@ import numpy as np
 from PIL import Image
 
 from fuzzy import COLOR_TABLE
-from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_DECAY_DBZ_PER_10MIN,
-                     NEW_CELL_MIN_DBZ, NEW_CELL_MAX_ASSERT_MINS,
+from nowcast import (PATCH_SEARCH_RADIUS_PX, NEW_CELL_MIN_DBZ,
+                     FRESH_POPUP_VELOCITY_THRESH, new_cell_params,
                      _find_track_for_patch)
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -123,7 +123,7 @@ def _frame_dbz_grid(frame_path: str, box, cell: int) -> np.ndarray:
     return _pool_max(_classify_dbz(rgb), cell)
 
 
-def _patch_params(patch: dict, tracks) -> dict:
+def _patch_params(patch: dict, tracks, gdx: float = 0.0, gdy: float = 0.0) -> dict:
     """Per-patch motion + decay parameters, mirroring nowcast/_patch_fade."""
     raw = float(patch.get("max_dbz", 0) or 0)
     track = _find_track_for_patch(patch, tracks)
@@ -135,10 +135,19 @@ def _patch_params(patch: dict, tracks) -> dict:
                       MAX_GROWTH_RATE_DBZ_PER_10MIN)
         mode, rate, min_dbz, max_assert = "track", clamped, DEAD_DBZ_THRESHOLD, None
     else:
-        mode, rate, min_dbz, max_assert = "new", NEW_CELL_DECAY_DBZ_PER_10MIN, NEW_CELL_MIN_DBZ, NEW_CELL_MAX_ASSERT_MINS
+        # Texture-conditioned new-cell lifecycle (mirrors nowcast.new_cell_params)
+        rate, max_assert = new_cell_params(
+            patch.get("area_px"), raw, patch.get("mean_dbz", 0.0))
+        mode, min_dbz = "new", NEW_CELL_MIN_DBZ
+    vx = float(patch.get("dx_10", 0.0))
+    vy = float(patch.get("dy_10", 0.0))
+    if (abs(vx) < FRESH_POPUP_VELOCITY_THRESH
+            and abs(vy) < FRESH_POPUP_VELOCITY_THRESH):
+        # Fresh pop-up with no measured motion rides the global steering flow
+        vx, vy = float(gdx), float(gdy)
     return {
-        "vx": float(patch.get("dx_10", 0.0)),   # px per 10 min
-        "vy": float(patch.get("dy_10", 0.0)),
+        "vx": vx,   # px per 10 min
+        "vy": vy,
         "raw_dbz": raw,
         "decay_mode": mode,
         "decay_rate": rate,                      # dBZ per 10 min
@@ -203,7 +212,7 @@ def build_radar_scene(frame_data, latest_rain_mask, patches, tracks,
         sub = np.zeros((h, w), bool)
         bm.paint_into(sub)
         owner_full[sub] = pid
-        scene_patches.append({"id": pid, **_patch_params(p, tracks)})
+        scene_patches.append({"id": pid, **_patch_params(p, tracks, gdx, gdy)})
     owner_grid = _pool_max(owner_full[y0:y1, x0:x1], cell_px)
 
     # --- named places inside the crop, in grid coordinates -------------------
