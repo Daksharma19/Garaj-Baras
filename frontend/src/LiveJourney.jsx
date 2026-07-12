@@ -423,11 +423,16 @@ export default function LiveJourneyPanel({
         }
       }
 
+      // Countdown + stats are always computed from the best progress estimate.
+      // Before a usable on-route GPS fix arrives (still locating, or the user
+      // is off-route / not at the start yet), progress is 0 = the route's
+      // start point — so the countdown matches the route prediction instead
+      // of silently claiming "clear ahead".
+      const progress = progressRef.current
+      setRemainKm(Math.max(0, totalKm - progress))
+      setSpeedKmh(speedRef.current)
+      setCountdown(computeCountdown(waypointsRef.current, progress, speedForEta()))
       if (fixRef.current || simRef.current) {
-        const progress = progressRef.current
-        setRemainKm(Math.max(0, totalKm - progress))
-        setSpeedKmh(speedRef.current)
-        setCountdown(computeCountdown(waypointsRef.current, progress, speedForEta()))
         if (progress >= totalKm - 0.05) { setArrived(true); endServerJourney() }
         const [lat, lon] = pointAtKm(routeCoords, cumKm, progress)
         onLivePos({ lat, lon })
@@ -465,7 +470,7 @@ export default function LiveJourneyPanel({
         <span className="live-hero__sub">{geoMsg}</span>
       </div>
     )
-  } else if (phase === 'starting') {
+  } else if (phase === 'starting' && !countdown) {
     hero = (
       <div className="live-hero">
         <span className="live-hero__big live-hero__big--dim">Locating…</span>
@@ -521,6 +526,13 @@ export default function LiveJourneyPanel({
       </div>
 
       {hero}
+
+      {!arrived && !simOn && (offRoute || phase === 'starting') && countdown && (
+        <p className="live-anchor-note">
+          📍 You're not on the route yet — predictions count from the route's
+          start point and will lock onto your GPS once you're on the way.
+        </p>
+      )}
 
       <div className="live-stats">
         <div className="live-stat">

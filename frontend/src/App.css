@@ -2887,3 +2887,15 @@
   background: rgba(34, 197, 94, 0.07);
   border-color: rgba(34, 197, 94, 0.22);
 }
+
+.live-anchor-note {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  text-align: center;
+  color: rgba(253, 211, 141, 0.9);
+  background: rgba(245, 158, 11, 0.07);
+  border: 1px solid rgba(245, 158, 11, 0.22);
+}
