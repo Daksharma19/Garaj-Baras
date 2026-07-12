@@ -29,6 +29,7 @@ from fuzzy import enrich_results  # type: ignore
 from decay import compute_decay_tracks, get_decay_status_at_pixel  # type: ignore
 import verification  # type: ignore
 import alerts  # type: ignore
+import journeys  # type: ignore
 import accounts  # type: ignore
 from auth import get_current_user, get_optional_user  # type: ignore
 from patches import (  # type: ignore
@@ -1043,7 +1044,14 @@ def _sweep_alerts() -> dict:
     except Exception as e:
         print(f"alert sweep: could not read subscriptions: {e}")
         return {"ok": False, "error": str(e)}
-    radars = sorted({_detect_radar(lat, lon) for lat, lon in coords})
+    # Active journeys also pin radars: their ESTIMATED current positions
+    # (server-side dead reckoning) decide which radars must be fresh.
+    try:
+        journey_coords = journeys.estimated_positions()
+    except Exception as e:
+        print(f"alert sweep: could not read journeys: {e}")
+        journey_coords = []
+    radars = sorted({_detect_radar(lat, lon) for lat, lon in coords + journey_coords})
     refreshed = []
     for name in radars:
         reg = _RADAR_REGISTRY.get(name)
@@ -1061,7 +1069,22 @@ def _sweep_alerts() -> dict:
             except Exception as e:
                 print(f"alert sweep: process_alerts {name} failed: {e}")
         refreshed.append(name)
-    return {"ok": True, "subscriptions": len(coords), "radars_refreshed": refreshed}
+
+    # Journey guardian: dead-reckon each active journey and warn about rain
+    # ahead on its route (uses the states just refreshed above).
+    def _journey_bundle(name: str):
+        reg = _RADAR_REGISTRY.get(name)
+        if not reg:
+            return None
+        state = reg["cache"]
+        if not (reg["ready"].is_set() and state.get("latest_frame")):
+            return None
+        return {"state": state, "georef": reg["georef"], "lag_info": _fresh_lag_info(state)}
+
+    journey_stats = journeys.process_journeys(_detect_radar, _journey_bundle)
+
+    return {"ok": True, "subscriptions": len(coords), "radars_refreshed": refreshed,
+            "journeys": journey_stats}
 
 
 # ENDPOINT 1: Health Check
@@ -1877,6 +1900,65 @@ def alerts_subscribe(req: AlertSubscribeRequest, user=Depends(get_optional_user)
 @app.post("/alerts/unsubscribe")
 def alerts_unsubscribe(req: AlertEndpointRequest):
     return {"ok": alerts.unsubscribe(req.endpoint)}
+
+
+# ── Journey guardian: server-side rain watch while the phone screen is off ──
+
+class JourneyWaypoint(BaseModel):
+    lat: float
+    lon: float
+    cum_km: float
+
+
+class JourneyStartRequest(BaseModel):
+    subscription: dict
+    waypoints: List[JourneyWaypoint]
+    speed_kmh: float
+
+
+class JourneyUpdateRequest(BaseModel):
+    journey_id: int
+    progress_km: float
+    speed_kmh: float | None = None
+
+
+class JourneyEndRequest(BaseModel):
+    journey_id: int
+
+
+@app.post("/journey/start")
+def journey_start(req: JourneyStartRequest):
+    """Register an in-progress journey for server-side rain watch. The sweep
+    dead-reckons the position from start time + speed (re-anchored by
+    /journey/update whenever the app is open) and pushes a notification when
+    radar shows rain ahead on the route."""
+    if len(req.waypoints) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 waypoints.")
+    for wp in req.waypoints:
+        if not (6 < wp.lat < 38 and 68 < wp.lon < 98):
+            raise HTTPException(status_code=400, detail="Coordinates outside India bounds.")
+    if not (0 < req.speed_kmh < 160):
+        raise HTTPException(status_code=400, detail="Speed out of range.")
+    try:
+        jid = journeys.start_journey(
+            req.subscription,
+            [{"lat": w.lat, "lon": w.lon, "cum_km": w.cum_km} for w in req.waypoints],
+            req.speed_kmh,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "journey_id": jid}
+
+
+@app.post("/journey/update")
+def journey_update(req: JourneyUpdateRequest):
+    """Re-anchor the server's position estimate with real GPS progress."""
+    return {"ok": journeys.update_journey(req.journey_id, req.progress_km, req.speed_kmh)}
+
+
+@app.post("/journey/end")
+def journey_end(req: JourneyEndRequest):
+    return {"ok": journeys.end_journey(req.journey_id)}
 
 
 @app.get("/tasks/sweep_alerts")

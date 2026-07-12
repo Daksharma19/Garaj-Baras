@@ -73,6 +73,7 @@ Garaj Baras/
 │   ├── bbox_mask.py             ← BBoxMask: patch masks as tight crops (~1/1000 memory)
 │   ├── timestamp_match.py       ← digit template-matching timestamp reader (prod, no Tesseract)
 │   ├── alerts.py                ← web-push rain alerts, SQLite alerts.db, state machine
+│   ├── journeys.py              ← "journey guardian": server-side dead-reckoned rain watch for live journeys (push warnings while the phone screen is off)
 │   ├── verification.py          ← prediction logging + auto-grading, SQLite verification.db, POD/FAR/CSI
 │   ├── chatbot.py               ← Gemini/Groq chatbot with function calling, SSE streaming
 │   ├── cloud_cover.py           ← Open-Meteo cloud-cover cross-check (utility; NOT currently imported by the pipeline)
@@ -85,7 +86,8 @@ Garaj Baras/
 │   └── debug_*.png, *_verify*.png ← throwaway debug images (ignore)
 ├── frontend/
 │   ├── src/App.jsx              ← ~1900 lines; entire app UI: tabs, route page, nowcast page, chat page
-│   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car
+│   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car + live GPS marker (follow mode)
+│   ├── src/LiveJourney.jsx      ← live journey mode: GPS tracking, per-second rain countdown, 5-min radar re-sync, journey-guardian registration
 │   ├── src/NetworkLayers.jsx    ← UNRELATED OSI-layers demo component; not imported anywhere
 │   ├── public/sw.js             ← service worker: push notifications + offline fallback
 │   ├── public/manifest.webmanifest, icon-*.png, apple-touch-icon.png, offline.html ← PWA assets
@@ -338,6 +340,24 @@ as the Nowcast tab):
   UptimeRobot, etc.) hitting `/tasks/sweep_alerts` is more dependable than
   relying on GitHub's scheduler alone.
 
+### Journey guardian (journeys.py)
+Server-side rain watch for in-progress live journeys — solves "web pages can't
+run GPS with the screen off". `/journey/start` registers the route samples
+(lat, lon, cum_km), planned/observed speed, and a push subscription (one
+active journey per endpoint; re-start replaces). The server **dead-reckons**
+the user's position (anchor progress + speed × elapsed); whenever the app is
+open, each 5-min live sync re-anchors via `/journey/update` with real GPS
+progress, so drift only accumulates while the screen is off. Each scheduled
+sweep (`_sweep_alerts`) includes journeys' estimated positions in the radar
+refresh set, then `process_journeys()` checks the route waypoints ahead of
+each estimate (≤45 min lookahead, same engine as `/predict_waypoints`:
+`check_route_rain` + `enrich_results`) and pushes "🌧 {label} ahead on your
+journey (~N min)" when rain falls within 30 min of travel (25-min per-journey
+cooldown; ≤5 min ETA uses "right ahead" copy). Journeys auto-expire at
+estimated arrival or 1.5× planned duration + 30 min; dead push subscriptions
+deactivate their journey. Table `journeys` lives in the alerts DB
+(Postgres in prod via db.py, alerts.db SQLite in dev).
+
 ### Chatbot (chatbot.py)
 Gemini 2.5 Flash with function calling; tools are the **in-process** endpoint
 functions registered by main.py (`get_nowcast`, `get_route_rain`,
@@ -386,6 +406,9 @@ reusing any GCP numbers.
 | `/nowcast/radar_scene?lat=&lon=` | GET | v2 animation scene JSON (dBZ history grids + patch motion/decay params) |
 | `/nowcast/forecast_gif?lat=&lon=` | GET | Forecast animation GIF |
 | `/nowcast/forecast_frames?lat=&lon=` | GET | Same as base64 PNG frames for the scrubber |
+| `/journey/start` | POST | Register a live journey for the server-side guardian: `{subscription, waypoints:[{lat,lon,cum_km}], speed_kmh}` → `{journey_id}` |
+| `/journey/update` | POST | Re-anchor the guardian's dead-reckoning with real GPS progress: `{journey_id, progress_km, speed_kmh?}` |
+| `/journey/end` | POST | Deactivate a journey (explicit end or arrival) |
 | `/alerts/vapid_public_key` | GET | Push public key |
 | `/alerts/subscribe` / `/alerts/unsubscribe` / `/alerts/test` | POST | Push subscription management |
 | `/stats/accuracy?days=` | GET | Verified POD/FAR/CSI |
@@ -426,7 +449,24 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   timeline), colored route polyline segments, and **RouteMap.jsx** — a
   lazy-loaded Leaflet map that animates a car driving the route (~3.2 s),
   pausing at each rainy stop; clicking a stop opens `JourneyStopCard` with an
-  on-demand `/nowcast` for that point.
+  on-demand `/nowcast` for that point. Merged waypoints carry `_cumKm` (their
+  real distance along the route) so segment coloring survives live-journey
+  re-predictions where passed waypoints clamp to eta 0.
+- **Live journey mode (`LiveJourney.jsx`):** "Start Live Journey" on the
+  results screen. Two clocks: a 1 s client tick (GPS `watchPosition` snapped
+  to the route + dead-reckoned between fixes at an EMA rolling speed) drives
+  a live "rain in ~N min" countdown, remaining km, and arrival time; every
+  5 min a radar sync POSTs `/radar/refresh` then re-sends all waypoints to
+  `/predict_waypoints` with ETAs recomputed from observed speed, recoloring
+  the map and re-anchoring the countdown (honest "updated from radar" note
+  when it shifts >2 min or a new frame landed). Extras: screen wake-lock,
+  missed-sync catch-up on `visibilitychange`, off-route chip (>1 km), a
+  dev-only simulated drive (`import.meta.env.DEV`). On start it also registers
+  the server-side **journey guardian** (push subscription + route + speed →
+  `/journey/start`; each sync re-anchors via `/journey/update`; End/arrival →
+  `/journey/end`) so rain warnings arrive as push notifications while the
+  screen is off. RouteMap shows a pulsing live GPS marker with follow mode
+  (pan pauses on drag; Re-center button).
 - **Nowcast tab:** location search or geolocation → `NowcastSlots` (8 slot
   cards with probability bars), `RadarScenePlayer` (canvas player over
   `/nowcast/radar_scene`; `ForecastRadarPlayer` remains as unused fallback),

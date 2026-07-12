@@ -107,6 +107,13 @@ function stopIcon(color) {
   })
 }
 
+const liveIcon = L.divIcon({
+  className: 'live-marker-wrap',
+  html: '<div class="live-marker"><div class="live-marker__pulse"></div><div class="live-marker__dot"></div></div>',
+  iconSize: [36, 36],
+  iconAnchor: [18, 18],
+})
+
 function endpointIcon(kind) {
   // kind: 'start' | 'end'
   const label = kind === 'start' ? 'A' : 'B'
@@ -127,8 +134,10 @@ export default function RouteMap({
   setActiveSeg,
   openSegmentPopup,
   onStopDetails,
+  livePos,          // {lat, lon} while a live journey is running, else null
 }) {
   const [mapRef, setMapRef] = useState(null)
+  const isLive = !!livePos
 
   // ── Journey state ────────────────────────────────────────────────────────
   const journey = useMemo(
@@ -206,11 +215,28 @@ export default function RouteMap({
     setActiveStop(null)
     setCarT(0)
     cancelAnim()
-    if (!journey) return
+    if (!journey || isLive) return
     const t = setTimeout(startJourney, 700)
     return () => { clearTimeout(t); cancelAnim() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [journey])
+  }, [journey, isLive])
+
+  // ── Live journey: follow the real GPS marker ─────────────────────────────
+  const followRef = useRef(true)
+  const [follow, setFollow] = useState(true)
+
+  useEffect(() => {
+    if (!mapRef) return
+    const onDrag = () => { followRef.current = false; setFollow(false) }
+    mapRef.on('dragstart', onDrag)
+    return () => { mapRef.off('dragstart', onDrag) }
+  }, [mapRef])
+
+  useEffect(() => {
+    if (!isLive) { followRef.current = true; setFollow(true); return }
+    if (!mapRef || !followRef.current) return
+    mapRef.panTo([livePos.lat, livePos.lon], { animate: true, duration: 0.6 })
+  }, [isLive, livePos, mapRef])
 
   const carPos = useMemo(() => {
     if (!journey || !routeCoords?.length) return null
@@ -302,9 +328,14 @@ export default function RouteMap({
           />
         ))}
 
-        {/* The car */}
-        {carPos && journeyMode !== 'idle' && (
+        {/* The car (preview animation — hidden during a live journey) */}
+        {carPos && journeyMode !== 'idle' && !isLive && (
           <Marker position={carPos} icon={carIcon} zIndexOffset={1000} interactive={false} />
+        )}
+
+        {/* Live GPS marker */}
+        {isLive && (
+          <Marker position={[livePos.lat, livePos.lon]} icon={liveIcon} zIndexOffset={1200} interactive={false} />
         )}
 
         {activeSeg?.mid && (
@@ -367,8 +398,23 @@ export default function RouteMap({
         </div>
       )}
 
+      {/* Re-center on the live marker after the user pans away */}
+      {isLive && !follow && (
+        <button
+          type="button"
+          className="journeyBtn recenterBtn"
+          onClick={() => {
+            followRef.current = true
+            setFollow(true)
+            if (mapRef) mapRef.panTo([livePos.lat, livePos.lon], { animate: true, duration: 0.6 })
+          }}
+        >
+          ◎ Re-center
+        </button>
+      )}
+
       {/* Journey control */}
-      {journey && (journeyMode === 'done' || journeyMode === 'idle') && (
+      {journey && !isLive && (journeyMode === 'done' || journeyMode === 'idle') && (
         <button type="button" className="journeyBtn" onClick={startJourney}>
           {journeyMode === 'done' ? '↻ Replay journey' : '▶ Preview journey'}
         </button>

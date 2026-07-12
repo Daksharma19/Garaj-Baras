@@ -16,6 +16,7 @@ const NOMINATIM_REVERSE_URL = 'https://nominatim.openstreetmap.org/reverse'
 const ORS_KEY = import.meta.env.VITE_ORS_API_KEY
 
 const RouteMap = lazy(() => import('./RouteMap.jsx'))
+const LiveJourneyPanel = lazy(() => import('./LiveJourney.jsx'))
 
 function warmBackend() {
   try {
@@ -341,7 +342,11 @@ function buildColoredSegments(routeLonLat, predictedWaypoints) {
   const wpEta = predictedWaypoints.map((w) => Number(w?.eta_mins || 0))
   const maxEta = Math.max(...wpEta, 0)
   const totalKm = cumKm[cumKm.length - 1] || 1e-6
+  // Prefer the real sampled distance (_cumKm) when present — during a live
+  // journey the passed waypoints all have eta 0, which breaks the
+  // eta-proportional fallback mapping.
   const wpKm = predictedWaypoints.map((w) => {
+    if (Number.isFinite(w?._cumKm)) return w._cumKm
     const eta = Number(w?.eta_mins || 0)
     return (maxEta > 0 ? Math.max(0, Math.min(1, eta / maxEta)) : 0) * totalKm
   })
@@ -1931,6 +1936,8 @@ export default function App() {
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
   const [avgSpeedKmh, setAvgSpeedKmh] = useState('')
+  const [tripInputMode, setTripInputMode] = useState('speed') // 'speed' (km/h) | 'time' (journey minutes)
+  const [journeyMins, setJourneyMins] = useState('')
   const [sourcePlace, setSourcePlace] = useState(null)
   const [destPlace, setDestPlace] = useState(null)
   const [userLoc, setUserLoc] = useState(null)
@@ -1959,10 +1966,34 @@ export default function App() {
   const [showLongJourneyModal, setShowLongJourneyModal] = useState(false)
   const longJourneyResolveRef = useRef(null)
 
+  // ── Live journey mode ──
+  const [liveActive, setLiveActive] = useState(false)
+  const [livePos, setLivePos] = useState(null)
+  const sampledRef = useRef([])          // original sampled waypoints (with cumKm)
+  const routeLonLatRef = useRef(null)    // ORS geometry ([lon,lat]) for recoloring
+  const liveSpeedRef = useRef(null)      // planned avg speed (km/h)
+
   const reverseAbortRef = useRef(null)
   const reverseCacheRef = useRef(new Map())
 
   const routeName = useMemo(() => toCityRouteName(source, destination), [source, destination])
+
+  // Live pre-scan estimate from approximate road distance (straight-line × 1.3):
+  // speed mode → estimated journey time; time mode → estimated avg speed.
+  const plannerEstimate = useMemo(() => {
+    if (!sourcePlace || !destPlace) return null
+    const straight = haversine(sourcePlace.lat, sourcePlace.lon, destPlace.lat, destPlace.lon)
+    const roadKm = straight * 1.3
+    if (!(roadKm > 0)) return null
+    if (tripInputMode === 'speed') {
+      const spd = Number(avgSpeedKmh)
+      if (!Number.isFinite(spd) || spd <= 0) return null
+      return { km: roadKm, mins: (roadKm / spd) * 60, kmh: spd }
+    }
+    const mins = Number(journeyMins)
+    if (!Number.isFinite(mins) || mins <= 0) return null
+    return { km: roadKm, mins, kmh: roadKm / (mins / 60) }
+  }, [sourcePlace, destPlace, avgSpeedKmh, journeyMins, tripInputMode])
 
   useEffect(() => { warmBackend() }, [])
 
@@ -2022,9 +2053,14 @@ export default function App() {
   async function handlePredict() {
     const startCity = source.trim()
     const endCity = destination.trim()
-    const speedNum = Number(avgSpeedKmh)
+    let speedNum = Number(avgSpeedKmh)
+    const journeyMinsNum = Number(journeyMins)
     if (!startCity || !endCity) { setError('Please enter both Source and Destination city names.'); return }
-    if (!Number.isFinite(speedNum) || speedNum <= 0) { setError('Please enter a valid average speed (km/h).'); return }
+    if (tripInputMode === 'speed') {
+      if (!Number.isFinite(speedNum) || speedNum <= 0) { setError('Please enter a valid average speed (km/h).'); return }
+    } else {
+      if (!Number.isFinite(journeyMinsNum) || journeyMinsNum <= 0) { setError('Please enter a valid journey time (minutes).'); return }
+    }
     if (!ORS_KEY) { setError('Missing ORS API key. Set `VITE_ORS_API_KEY` in frontend/.env.'); return }
 
     setError(null); setLoading(true); setResult(null)
@@ -2062,6 +2098,15 @@ export default function App() {
       }
       setRouteDistanceKm(totalKm)
 
+      // Time mode: derive the avg speed from the real road distance,
+      // then the existing speed-based waypoint logic works unchanged.
+      if (tripInputMode === 'time') {
+        speedNum = totalKm / (journeyMinsNum / 60)
+        if (!Number.isFinite(speedNum) || speedNum <= 0) {
+          throw new Error('Could not derive speed from the journey time.')
+        }
+      }
+
       if ((totalKm / speedNum) * 60 > 180) {
         setShowLongJourneyModal(true)
         const proceed = await new Promise((resolve) => { longJourneyResolveRef.current = resolve })
@@ -2072,6 +2117,11 @@ export default function App() {
       const sampled = sampleRouteEvery5Min(routeLonLat, speedNum, 5)
       if (!sampled.length) throw new Error('Could not sample route into waypoints.')
 
+      sampledRef.current = sampled
+      routeLonLatRef.current = routeLonLat
+      liveSpeedRef.current = speedNum
+      setLiveActive(false)
+      setLivePos(null)
       setJourneyStop(null)
       setRouteCoords(routeLonLat.map(([lon, lat]) => [lat, lon]))
       setResult({
@@ -2091,10 +2141,11 @@ export default function App() {
       )
 
       const predictWaypoints = Array.isArray(predictRes.data?.waypoints) ? predictRes.data.waypoints : []
-      const mergedWaypoints = predictWaypoints.map((wp) => ({
+      const mergedWaypoints = predictWaypoints.map((wp, i) => ({
         ...wp,
         rainGroup: getRainGroupLabel(wp.label),
         rainColor: getRainColor(wp.label),
+        _cumKm: Number.isFinite(sampled[i]?.cumKm) ? sampled[i].cumKm : null,
       }))
 
       setRouteSegments(buildColoredSegments(routeLonLat, mergedWaypoints))
@@ -2117,6 +2168,31 @@ export default function App() {
     } finally {
       setLoading(false); setScanning(false); setScanStatus('')
     }
+  }
+
+  // Live journey re-prediction landed: re-merge waypoints (keeping their real
+  // route distance) and recolor the map segments from the fresh radar picture.
+  function applyLivePrediction(data) {
+    const rawWps = Array.isArray(data?.waypoints) ? data.waypoints : []
+    if (!rawWps.length || !routeLonLatRef.current) return
+    const merged = rawWps.map((wp, i) => ({
+      ...wp,
+      rainGroup: getRainGroupLabel(wp.label),
+      rainColor: getRainColor(wp.label),
+      _cumKm: Number.isFinite(sampledRef.current[i]?.cumKm) ? sampledRef.current[i].cumKm : null,
+    }))
+    setRouteSegments(buildColoredSegments(routeLonLatRef.current, merged))
+    setResult((prev) => ({
+      ...(prev || {}),
+      ...data,
+      route_distance_km: prev?.route_distance_km ?? data?.route_distance_km,
+      waypoints: merged,
+    }))
+  }
+
+  function endLiveJourney() {
+    setLiveActive(false)
+    setLivePos(null)
   }
 
   async function openSegmentPopup(seg) {
@@ -2154,14 +2230,19 @@ export default function App() {
       .map((w) => Number(w?.eta_mins))
       .filter((n) => Number.isFinite(n))
     if (etas.length) return Math.max(...etas)
+    if (tripInputMode === 'time') {
+      const mins = Number(journeyMins)
+      return Number.isFinite(mins) && mins > 0 ? mins : null
+    }
     const spd = Number(avgSpeedKmh)
     if (shownDistanceKm != null && Number.isFinite(spd) && spd > 0) {
       return (shownDistanceKm / spd) * 60
     }
     return null
-  }, [result, avgSpeedKmh, shownDistanceKm])
+  }, [result, avgSpeedKmh, journeyMins, tripInputMode, shownDistanceKm])
 
   function handleBackToPlanner() {
+    endLiveJourney()
     setResult(null); setError(null); setActiveSeg(null); setJourneyStop(null)
     setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null); setShowBreakdown(false)
     setRadarDown(false)
@@ -2349,21 +2430,66 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Speed */}
+                {/* Speed / journey time (either one; backend works off speed) */}
                 <div className="speed-field">
-                  <label className="rf-label">AVG SPEED</label>
+                  <div className="trip-mode-row">
+                    <label className="rf-label">
+                      {tripInputMode === 'speed' ? 'AVG SPEED' : 'JOURNEY TIME'}
+                    </label>
+                    <div className="trip-mode-toggle" role="tablist" aria-label="Input mode">
+                      <button
+                        type="button"
+                        className={`trip-mode-btn${tripInputMode === 'speed' ? ' is-active' : ''}`}
+                        onClick={() => setTripInputMode('speed')}
+                      >
+                        Speed
+                      </button>
+                      <button
+                        type="button"
+                        className={`trip-mode-btn${tripInputMode === 'time' ? ' is-active' : ''}`}
+                        onClick={() => setTripInputMode('time')}
+                      >
+                        Time
+                      </button>
+                    </div>
+                  </div>
                   <div className="speed-row">
                     <div className="rf-shell rf-shell--speed">
-                      <input
-                        className="rf-input"
-                        inputMode="decimal"
-                        placeholder="55"
-                        value={avgSpeedKmh}
-                        onChange={(e) => setAvgSpeedKmh(e.target.value)}
-                      />
+                      {tripInputMode === 'speed' ? (
+                        <input
+                          className="rf-input"
+                          inputMode="decimal"
+                          placeholder="55"
+                          value={avgSpeedKmh}
+                          onChange={(e) => setAvgSpeedKmh(e.target.value)}
+                        />
+                      ) : (
+                        <input
+                          className="rf-input"
+                          inputMode="decimal"
+                          placeholder="90"
+                          value={journeyMins}
+                          onChange={(e) => setJourneyMins(e.target.value)}
+                        />
+                      )}
                     </div>
-                    <span className="speed-unit">km/h</span>
+                    <span className="speed-unit">{tripInputMode === 'speed' ? 'km/h' : 'min'}</span>
                   </div>
+                  {plannerEstimate && (
+                    <p className="speed-estimate">
+                      {tripInputMode === 'speed' ? (
+                        <>
+                          ≈ {fmtDuration(plannerEstimate.mins)} journey
+                          <span className="speed-estimate__dim"> · ~{Math.round(plannerEstimate.km)} km at {Math.round(plannerEstimate.kmh)} km/h</span>
+                        </>
+                      ) : (
+                        <>
+                          ≈ {Math.round(plannerEstimate.kmh)} km/h avg speed
+                          <span className="speed-estimate__dim"> · ~{Math.round(plannerEstimate.km)} km in {fmtDuration(plannerEstimate.mins)}</span>
+                        </>
+                      )}
+                    </p>
+                  )}
                 </div>
 
                 {/* Scan CTA */}
@@ -2371,7 +2497,10 @@ export default function App() {
                   className="scan-btn"
                   type="button"
                   onClick={handlePredict}
-                  disabled={!source.trim() || !destination.trim() || !String(avgSpeedKmh).trim() || loading}
+                  disabled={
+                    !source.trim() || !destination.trim() || loading ||
+                    !(tripInputMode === 'speed' ? String(avgSpeedKmh).trim() : String(journeyMins).trim())
+                  }
                 >
                   Scan My Route
                   <svg className="scan-btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden>
@@ -2423,8 +2552,8 @@ export default function App() {
                   </svg>
                   Back
                 </button>
-                <span className={`status-pill status-pill--${result._pending ? 'pending' : hasRain ? 'rain' : 'clear'}`}>
-                  {result._pending ? 'Scanning…' : hasRain ? 'Rain ahead' : 'Clear skies'}
+                <span className={`status-pill status-pill--${result._pending ? 'pending' : liveActive ? 'live' : hasRain ? 'rain' : 'clear'}`}>
+                  {result._pending ? 'Scanning…' : liveActive ? '● LIVE' : hasRain ? 'Rain ahead' : 'Clear skies'}
                 </span>
               </nav>
 
@@ -2494,6 +2623,32 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Live journey: GPS-tracked countdown + auto radar re-sync */}
+              {!result._pending && routeCoords.length >= 2 && (
+                liveActive ? (
+                  <Suspense fallback={null}>
+                    <LiveJourneyPanel
+                      apiBase={API_BASE}
+                      routeCoords={routeCoords}
+                      waypoints={result.waypoints || []}
+                      plannedSpeedKmh={liveSpeedRef.current}
+                      onLivePos={setLivePos}
+                      onWaypointsUpdated={applyLivePrediction}
+                      onEnd={endLiveJourney}
+                    />
+                  </Suspense>
+                ) : (
+                  <button
+                    type="button"
+                    className="live-start-btn"
+                    onClick={() => setLiveActive(true)}
+                  >
+                    <span className="live-start-btn__dot" aria-hidden />
+                    Start Live Journey
+                  </button>
+                )
+              )}
+
               {/* Map */}
               <div className="map-wrap">
                 <Suspense
@@ -2513,6 +2668,7 @@ export default function App() {
                     setActiveSeg={setActiveSeg}
                     openSegmentPopup={openSegmentPopup}
                     onStopDetails={(stop) => setJourneyStop({ ...stop, requestId: Date.now() })}
+                    livePos={liveActive ? livePos : null}
                   />
                 </Suspense>
                 {scanning && (
