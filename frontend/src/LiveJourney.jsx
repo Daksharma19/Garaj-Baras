@@ -541,13 +541,11 @@ export default function LiveJourneyPanel({
 
       {updateNote && <p className="live-note">{updateNote}</p>}
 
-      {!arrived && guardian !== 'starting' && (
+      {!arrived && (guardian === 'on' || guardian === 'denied') && (
         <p className={`live-guardian${guardian === 'on' ? ' live-guardian--on' : ''}`}>
           {guardian === 'on'
             ? '🛡 Screen-off watch on — you\'ll get a notification if rain nears your route, even with the phone locked.'
-            : guardian === 'denied'
-              ? '🔕 Notifications blocked — with the screen off you won\'t get rain warnings. Allow notifications to enable.'
-              : '🔕 Screen-off warnings unavailable on this browser — keep the app open to stay updated.'}
+            : '🔕 Notifications blocked — with the screen off you won\'t get rain warnings. Allow notifications to enable.'}
         </p>
       )}
 
