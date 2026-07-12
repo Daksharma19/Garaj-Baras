@@ -1879,6 +1879,53 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
+function InstallPrompt() {
+  const [deferredPrompt, setDeferredPrompt] = useState(null)
+  const [visible, setVisible] = useState(false)
+
+  useEffect(() => {
+    if (localStorage.getItem('gb_install_dismissed')) return
+    if (window.matchMedia('(display-mode: standalone)').matches) return // already installed
+    const onPrompt = (e) => {
+      e.preventDefault()
+      setDeferredPrompt(e)
+      setVisible(true)
+    }
+    const onInstalled = () => { setVisible(false); setDeferredPrompt(null) }
+    window.addEventListener('beforeinstallprompt', onPrompt)
+    window.addEventListener('appinstalled', onInstalled)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onPrompt)
+      window.removeEventListener('appinstalled', onInstalled)
+    }
+  }, [])
+
+  if (!visible || !deferredPrompt) return null
+
+  const install = async () => {
+    setVisible(false)
+    deferredPrompt.prompt()
+    try { await deferredPrompt.userChoice } catch {}
+    setDeferredPrompt(null)
+  }
+  const dismiss = () => {
+    setVisible(false)
+    localStorage.setItem('gb_install_dismissed', '1')
+  }
+
+  return (
+    <div className="install-banner" role="dialog" aria-label="Install app">
+      <img src="/icon-192.png" alt="" className="install-banner__icon" />
+      <div className="install-banner__text">
+        <strong>Install Garaj Baras</strong>
+        <span>Get rain alerts &amp; forecasts from your home screen</span>
+      </div>
+      <button className="install-banner__btn" onClick={install}>Install</button>
+      <button className="install-banner__close" onClick={dismiss} aria-label="Dismiss">×</button>
+    </div>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('route')
   const [pendingNcLoc, setPendingNcLoc] = useState(null)  // saved place → Nowcast
@@ -2122,6 +2169,8 @@ export default function App() {
 
   return (
     <div className="app">
+
+      <InstallPrompt />
 
       {/* ── NOWCAST PAGE ── */}
       {activeTab === 'nowcast' && (

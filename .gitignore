@@ -37,6 +37,9 @@ backend/verification.db*
 # Timestamp glyph templates (required at runtime, tiny)
 !backend/ts_templates/*.png
 
+# PWA app icons (required assets, tiny)
+!frontend/public/*.png
+
 # Rain alert runtime data + dev push keys
 backend/alerts.db*
 backend/vapid_keys.json

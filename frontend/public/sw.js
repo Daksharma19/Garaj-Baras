@@ -1,4 +1,34 @@
-// Garaj Baras — service worker for rain alert push notifications.
+// Garaj Baras — service worker: rain alert push notifications + PWA offline fallback.
+
+const CACHE_NAME = 'garaj-baras-v1'
+const PRECACHE = [
+  '/offline.html',
+  '/icon-192.png',
+  '/manifest.webmanifest',
+]
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE)).then(() => self.skipWaiting())
+  )
+})
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
+  )
+})
+
+// Only page navigations get an offline fallback. API calls, radar frames, and
+// Vite dev modules are never cached — live radar data must always be fresh.
+self.addEventListener('fetch', (event) => {
+  if (event.request.mode !== 'navigate') return
+  event.respondWith(
+    fetch(event.request).catch(() => caches.match('/offline.html'))
+  )
+})
 
 self.addEventListener('push', (event) => {
   let data = { title: 'Garaj Baras', body: 'Rain update' }
@@ -8,8 +38,8 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || 'Garaj Baras', {
       body: data.body || '',
-      icon: '/favicon.svg',
-      badge: '/favicon.svg',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
       tag: 'garaj-baras-rain',   // replace older rain alerts instead of stacking
     })
   )

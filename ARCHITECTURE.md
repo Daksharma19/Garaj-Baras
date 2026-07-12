@@ -6,7 +6,7 @@
 > deployment, and operational constraints. Only open source files when you need
 > the exact implementation of something specific.
 >
-> Last updated: 2026-07-11.
+> Last updated: 2026-07-12.
 
 ---
 
@@ -87,7 +87,8 @@ Garaj Baras/
 │   ├── src/App.jsx              ← ~1900 lines; entire app UI: tabs, route page, nowcast page, chat page
 │   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car
 │   ├── src/NetworkLayers.jsx    ← UNRELATED OSI-layers demo component; not imported anywhere
-│   ├── public/sw.js             ← service worker: displays push notifications
+│   ├── public/sw.js             ← service worker: push notifications + offline fallback
+│   ├── public/manifest.webmanifest, icon-*.png, apple-touch-icon.png, offline.html ← PWA assets
 │   ├── dist/                    ← committed production build
 │   └── package.json, vite.config.js
 └── misc/                        ← pitch decks, debug images, logs (non-code)
@@ -440,6 +441,16 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   (Google OAuth + 6-digit email OTP), `SignInGate` prompt card. When
   `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` are unset the client is null
   and gated features show a "not configured" note; route + nowcast unaffected.
+
+**PWA:** the app is installable. `public/manifest.webmanifest` (name, purple
+theme, standalone display) + PNG icons (192/512/maskable + apple-touch-icon,
+generated from the brand SVG). `public/sw.js` is registered on app load in
+`main.jsx` (not just on alert subscribe); besides push it precaches
+`offline.html` and serves it as a fallback for failed page navigations —
+API calls, radar frames, and dev modules are deliberately never cached (live
+radar data must stay fresh). An `InstallPrompt` banner component in App.jsx
+listens for `beforeinstallprompt` and offers Install / dismiss (dismissal
+persisted in localStorage; hidden when already running standalone).
 
 Cold-start handling: `postWithWarmup` retries for up to 3 min with a
 "server warming up" status (Render free tier sleeps); `warmBackend()` pings
