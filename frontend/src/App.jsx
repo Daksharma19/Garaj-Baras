@@ -1883,6 +1883,11 @@ function fmtDuration(mins) {
 }
 
 function InstallPrompt() {
+  // Install banner temporarily disabled — will revisit later. All the logic
+  // below is intact; remove this early return to re-enable the popup.
+  return null
+
+  // eslint-disable-next-line no-unreachable
   const [deferredPrompt, setDeferredPrompt] = useState(null)
   const [visible, setVisible] = useState(false)
   const [helpVisible, setHelpVisible] = useState(false)
