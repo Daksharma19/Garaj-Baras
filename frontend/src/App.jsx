@@ -1885,6 +1885,7 @@ function fmtDuration(mins) {
 function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null)
   const [visible, setVisible] = useState(false)
+  const [helpVisible, setHelpVisible] = useState(false)
 
   useEffect(() => {
     if (localStorage.getItem('gb_install_dismissed')) return
@@ -1894,7 +1895,7 @@ function InstallPrompt() {
       setDeferredPrompt(e)
       setVisible(true)
     }
-    const onInstalled = () => { setVisible(false); setDeferredPrompt(null) }
+    const onInstalled = () => { setVisible(false); setDeferredPrompt(null); setHelpVisible(false) }
     window.addEventListener('beforeinstallprompt', onPrompt)
     window.addEventListener('appinstalled', onInstalled)
     return () => {
@@ -1903,18 +1904,52 @@ function InstallPrompt() {
     }
   }, [])
 
-  if (!visible || !deferredPrompt) return null
-
-  const install = async () => {
-    setVisible(false)
-    deferredPrompt.prompt()
-    try { await deferredPrompt.userChoice } catch {}
-    setDeferredPrompt(null)
-  }
   const dismiss = () => {
     setVisible(false)
+    setHelpVisible(false)
     localStorage.setItem('gb_install_dismissed', '1')
   }
+
+  const install = async () => {
+    const ev = deferredPrompt
+    if (!ev) { setHelpVisible(true); return }
+    try {
+      // prompt() is single-use and can be rejected (stale event, browser
+      // heuristics). Await it so BOTH sync throws and async rejections land
+      // in the catch instead of silently doing nothing.
+      await ev.prompt()
+      const choice = await ev.userChoice.catch(() => null)
+      setDeferredPrompt(null)
+      if (choice?.outcome === 'accepted') {
+        setVisible(false)
+      }
+      // dismissed → keep the banner; a fresh beforeinstallprompt may re-arm it
+    } catch (err) {
+      console.warn('PWA install prompt failed:', err)
+      setDeferredPrompt(null)
+      setHelpVisible(true) // fall back to manual instructions
+    }
+  }
+
+  if (helpVisible) {
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
+    return (
+      <div className="install-banner" role="dialog" aria-label="How to install">
+        <img src="/icon-192.png" alt="" className="install-banner__icon" />
+        <div className="install-banner__text">
+          <strong>Install manually</strong>
+          <span>
+            {isIOS
+              ? 'In Safari: tap Share (□↑) → “Add to Home Screen”.'
+              : 'In the browser menu (⋮): tap “Install app” or “Add to Home screen”.'}
+          </span>
+        </div>
+        <button className="install-banner__close" onClick={dismiss} aria-label="Dismiss">×</button>
+      </div>
+    )
+  }
+
+  if (!visible || !deferredPrompt) return null
 
   return (
     <div className="install-banner" role="dialog" aria-label="Install app">
