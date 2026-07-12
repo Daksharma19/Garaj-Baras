@@ -1255,6 +1255,35 @@
   border: none;
 }
 
+.endpoint-marker-wrap {
+  background: none;
+  border: none;
+}
+
+.endpoint-marker {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+}
+
+.endpoint-marker > span {
+  transform: rotate(45deg); /* keep the letter upright inside the rotated teardrop */
+  font-family: 'Syne', -apple-system, sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1;
+}
+
+.endpoint-marker--start { background: #22c55e; }
+.endpoint-marker--end   { background: #ef4444; }
+
 .car-marker {
   font-size: 22px;
   line-height: 30px;

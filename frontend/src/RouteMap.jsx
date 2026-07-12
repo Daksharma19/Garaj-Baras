@@ -107,6 +107,18 @@ function stopIcon(color) {
   })
 }
 
+function endpointIcon(kind) {
+  // kind: 'start' | 'end'
+  const label = kind === 'start' ? 'A' : 'B'
+  return L.divIcon({
+    className: 'endpoint-marker-wrap',
+    html: `<div class="endpoint-marker endpoint-marker--${kind}"><span>${label}</span></div>`,
+    iconSize: [28, 36],
+    iconAnchor: [14, 34],
+    popupAnchor: [0, -32],
+  })
+}
+
 export default function RouteMap({
   routeCoords,
   routeSegments,
@@ -261,6 +273,18 @@ export default function RouteMap({
               eventHandlers={{ click: () => openSegmentPopup(seg) }}
             />
           ))}
+
+        {/* Start / destination markers */}
+        {Array.isArray(routeCoords) && routeCoords.length >= 2 && (
+          <>
+            <Marker position={routeCoords[0]} icon={endpointIcon('start')} zIndexOffset={400}>
+              <Popup>Start</Popup>
+            </Marker>
+            <Marker position={routeCoords[routeCoords.length - 1]} icon={endpointIcon('end')} zIndexOffset={400}>
+              <Popup>Destination</Popup>
+            </Marker>
+          </>
+        )}
 
         {/* Rain stop markers (persist after the animation) */}
         {journey?.stops.map((stop, i) => (

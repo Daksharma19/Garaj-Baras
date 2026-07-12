@@ -1868,6 +1868,15 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
+function fmtDuration(mins) {
+  if (mins == null || !Number.isFinite(Number(mins))) return '—'
+  const total = Math.round(Number(mins))
+  if (total < 60) return `${total} min`
+  const h = Math.floor(total / 60)
+  const m = total % 60
+  return m === 0 ? `${h} h` : `${h} h ${m} min`
+}
+
 function InstallPrompt() {
   const [deferredPrompt, setDeferredPrompt] = useState(null)
   const [visible, setVisible] = useState(false)
@@ -2138,6 +2147,19 @@ export default function App() {
     if (!result || result._pending) return null
     return computeRainTimeline(result.waypoints)
   }, [result])
+
+  // Total journey time: prefer the last waypoint ETA, else distance ÷ avg speed.
+  const tripMinutes = useMemo(() => {
+    const etas = (result?.waypoints || [])
+      .map((w) => Number(w?.eta_mins))
+      .filter((n) => Number.isFinite(n))
+    if (etas.length) return Math.max(...etas)
+    const spd = Number(avgSpeedKmh)
+    if (shownDistanceKm != null && Number.isFinite(spd) && spd > 0) {
+      return (shownDistanceKm / spd) * 60
+    }
+    return null
+  }, [result, avgSpeedKmh, shownDistanceKm])
 
   function handleBackToPlanner() {
     setResult(null); setError(null); setActiveSeg(null); setJourneyStop(null)
@@ -2446,6 +2468,13 @@ export default function App() {
                   <span className="stat__label">Distance</span>
                   <span className="stat__value">
                     {shownDistanceKm == null ? '—' : `${shownDistanceKm.toFixed(1)} km`}
+                  </span>
+                </div>
+                <div className="stat-div" aria-hidden />
+                <div className="stat">
+                  <span className="stat__label">Journey time</span>
+                  <span className="stat__value">
+                    {result._pending ? '—' : fmtDuration(tripMinutes)}
                   </span>
                 </div>
                 <div className="stat-div" aria-hidden />
