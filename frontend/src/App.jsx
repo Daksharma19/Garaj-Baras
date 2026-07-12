@@ -1931,6 +1931,9 @@ function InstallPrompt() {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('route')
+  // Tabs mount on first visit and then stay mounted (hidden with CSS) so
+  // their state survives tab switches. Route mounts immediately (default tab).
+  const [visitedTabs, setVisitedTabs] = useState({ route: true, nowcast: false, chat: false })
   const [pendingNcLoc, setPendingNcLoc] = useState(null)  // saved place → Nowcast
 
   const [source, setSource] = useState('')
@@ -2250,6 +2253,7 @@ export default function App() {
 
   function handleTabChange(tab) {
     setActiveTab(tab)
+    setVisitedTabs((v) => (v[tab] ? v : { ...v, [tab]: true }))
     setError(null)
   }
 
@@ -2264,25 +2268,31 @@ export default function App() {
 
       <InstallPrompt />
 
-      {/* ── NOWCAST PAGE ── */}
-      {activeTab === 'nowcast' && (
-        <NowcastPage
-          userLoc={userLoc}
-          activeTab={activeTab}
-          onChangeTab={handleTabChange}
-          onPickSaved={onPickSaved}
-          pendingLoc={pendingNcLoc}
-          onPendingConsumed={() => setPendingNcLoc(null)}
-        />
+      {/* ── NOWCAST PAGE ──
+          Tabs stay MOUNTED after their first visit and are hidden with CSS,
+          so switching tabs never destroys their state (results, chat, etc.). */}
+      {visitedTabs.nowcast && (
+        <div style={{ display: activeTab === 'nowcast' ? '' : 'none' }}>
+          <NowcastPage
+            userLoc={userLoc}
+            activeTab={activeTab}
+            onChangeTab={handleTabChange}
+            onPickSaved={onPickSaved}
+            pendingLoc={pendingNcLoc}
+            onPendingConsumed={() => setPendingNcLoc(null)}
+          />
+        </div>
       )}
 
       {/* ── ASK AI (CHAT) PAGE ── */}
-      {activeTab === 'chat' && (
-        <ChatPage
-          activeTab={activeTab}
-          onChangeTab={handleTabChange}
-          onPickSaved={onPickSaved}
-        />
+      {visitedTabs.chat && (
+        <div style={{ display: activeTab === 'chat' ? '' : 'none' }}>
+          <ChatPage
+            activeTab={activeTab}
+            onChangeTab={handleTabChange}
+            onPickSaved={onPickSaved}
+          />
+        </div>
       )}
 
       {radarDown && <RadarDownModal onClose={() => setRadarDown(false)} />}
@@ -2295,8 +2305,7 @@ export default function App() {
       )}
 
       {/* ── ROUTE TAB SCREENS ── */}
-      {activeTab === 'route' && (
-        <>
+      <div style={{ display: activeTab === 'route' ? '' : 'none' }}>
           {/* PLANNER SCREEN */}
           {!loading && !result && (
             <div className="pg-planner">
@@ -2712,8 +2721,7 @@ export default function App() {
               </div>
             </div>
           )}
-        </>
-      )}
+      </div>
     </div>
   )
 }

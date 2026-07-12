@@ -253,6 +253,19 @@ export default function RouteMap({
     return L.latLngBounds(routeCoords)
   }, [routeCoords])
 
+  // The route tab is hidden with display:none while other tabs are active;
+  // Leaflet mis-sizes if anything changed while hidden. Re-measure whenever
+  // the container becomes visible / resizes.
+  useEffect(() => {
+    if (!mapRef || typeof ResizeObserver === 'undefined') return
+    const el = mapRef.getContainer()
+    const ro = new ResizeObserver(() => {
+      if (el.offsetWidth > 0) mapRef.invalidateSize()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [mapRef])
+
   useEffect(() => {
     if (!mapRef || !routeBounds || !routeBounds.isValid()) return
     const doFit = () => {
