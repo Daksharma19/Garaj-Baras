@@ -19,7 +19,7 @@ _OCR_CROP = (540, 175, 704, 268)
 # Previously this radar reused radar.py's Delhi-tuned box (0,125,527,650),
 # which on this smaller/differently-laid-out frame pulled in the RHI/legend
 # panel on the right and black-padded the bottom 56px — desyncing every pixel
-# from georef_lucknow.py's fit. See georef_lucknow.py for the matching GCPs.
+# from georef_lucknow.py's model (ring-derived AEQD; see georef_lucknow.py).
 CROP_BOX = (0, 176, 392, 568)
 
 import os

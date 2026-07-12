@@ -1,30 +1,26 @@
 # Garaj Baras - georef_lucknow.py
 #
 # Lucknow radar crop: 392 x 392 px, cropped from the raw 704x594 GIF at
-# CROP_BOX (0, 176, 392, 568) — see radar_lucknow.py. NOT the same layout as
-# Delhi (880x720, 527x525 crop): the raw frame size and panel offset differ.
+# CROP_BOX (0, 176, 392, 568) — see radar_lucknow.py.
 #
-# This module previously assumed a 527x525 crop reusing Delhi's crop box,
-# which on Lucknow's actual (smaller, differently-offset) frame pulled in the
-# right-side RHI/legend panel and black-padded the bottom — every pixel below
-# was silently wrong. The GCPs were originally measured against that crop's
-# real (non-padded) region, which only ever differed from the corrected crop
-# by a constant 51px vertical offset (176 - 125), so the fit was recovered by
-# shifting the py constant term by -51 rather than re-measuring from scratch;
-# verified by re-plotting all 7 GCPs against a live corrected-crop frame.
+# Model: exact azimuthal-equidistant (AEQD) projection centered on the radar,
+# derived from the range rings in the image itself — NOT a polynomial fit to
+# town markers. The 50/100/150/200/250 km rings are concentric circles
+# (axis ratio 0.999, residual < 1 px), so echoes are plotted in true
+# range/azimuth space:
 #
-# Quadratic georef model (identical form to georef.py):
-#   px = c0 + c1*lat + c2*lon + c3*lat*lon + c4*lat^2 + c5*lon^2
-#   py = d0 + d1*lat + d2*lon + d3*lat*lon + d4*lat^2 + d5*lon^2
+#   ring center = (196.547, 195.576) px,  scale = 0.78693 px/km
+#   (joint least-squares over all 5 rings x 4 frames; stable to 0.01 px)
 #
-# Least-squares fit to 7 GCPs, in corrected 392x392 crop space (max residual: 6 px):
-#   Lucknow    (26.8467, 80.9462) → (195, 195)
-#   Gonda      (27.1320, 81.9607) → (277, 165)
-#   Bareilly   (28.3670, 79.4304) → ( 82,  57)
-#   Prayagraj  (25.4358, 81.8463) → (275, 309)
-#   Jaunpur    (25.7464, 82.6836) → (340, 285)
-#   Banda      (25.4804, 80.3377) → (153, 308)
-#   Kannauj    (27.0535, 79.9207) → ( 92, 171)
+# History: this module previously used a quadratic fit to 7 ground control
+# points measured from IMD's basemap town dots. Those dots are drawn sloppily
+# (Kannauj's is ~20 km off), and the flexible quadratic bent to absorb the
+# errors, then extrapolated badly east of the easternmost GCP (Jaunpur,
+# 82.68E): an echo over Gorakhpur (83.37E, 241 km out) was displayed ~8 km
+# south of the city. Echoes follow the rings, not the basemap dots, so the
+# ring-derived AEQD model is ground truth for echo placement.
+
+import math
 
 IMAGE_WIDTH  = 392
 IMAGE_HEIGHT = 392
@@ -32,68 +28,53 @@ IMAGE_HEIGHT = 392
 CENTER_LAT = 26.8467   # Lucknow radar station
 CENTER_LON = 80.9462
 
-CPX = (
-    -11889.639397127024,
-      -895.2643334524814,
-       504.433517146317,
-         2.6721285484117283,
-        12.768499119722419,
-        -3.0108627514580952,
-)
+CENTER_PX = 196.547    # ring center, x (px)
+CENTER_PY = 195.576    # ring center, y (px)
+PX_PER_KM = 0.78693    # ring scale (250 km ring at 196.7 px)
 
-CPY = (
-    -4919.510862835962,
-        6.658676495472395,
-      152.62412436416002,
-       -0.33161483156016053,
-       -1.231601668492623,
-       -0.8872070967171704,
-)
+EARTH_RADIUS_KM = 6371.0
+
+_CLAT = math.radians(CENTER_LAT)
+_CLON = math.radians(CENTER_LON)
 
 
-def _features(lat, lon):
-    return (1.0, lat, lon, lat * lon, lat * lat, lon * lon)
-
-
-def _dot(coeffs, feat):
-    return sum(c * f for c, f in zip(coeffs, feat))
+def _latlon_to_pixel_float(lat, lon):
+    la2 = math.radians(lat)
+    dlon = math.radians(lon) - _CLON
+    cosc = math.sin(_CLAT) * math.sin(la2) + math.cos(_CLAT) * math.cos(la2) * math.cos(dlon)
+    d = math.acos(max(-1.0, min(1.0, cosc))) * EARTH_RADIUS_KM
+    theta = math.atan2(
+        math.sin(dlon) * math.cos(la2),
+        math.cos(_CLAT) * math.sin(la2) - math.sin(_CLAT) * math.cos(la2) * math.cos(dlon),
+    )
+    px = CENTER_PX + PX_PER_KM * d * math.sin(theta)
+    py = CENTER_PY - PX_PER_KM * d * math.cos(theta)
+    return px, py
 
 
 def latlon_to_pixel(lat, lon):
     """Convert WGS84 lat/lon to Lucknow radar image pixel (x, y)."""
-    feat = _features(lat, lon)
-    px   = _dot(CPX, feat)
-    py   = _dot(CPY, feat)
+    px, py = _latlon_to_pixel_float(lat, lon)
     return (int(round(px)), int(round(py)))
 
 
-def _latlon_to_pixel_float(lat, lon):
-    feat = _features(lat, lon)
-    return _dot(CPX, feat), _dot(CPY, feat)
-
-
 def pixel_to_latlon(px, py):
-    """Inverse of latlon_to_pixel via Newton-Raphson (same algorithm as georef.py)."""
-    lat = float(CENTER_LAT)
-    lon = float(CENTER_LON)
-    h   = 1e-5
-    for _ in range(40):
-        pxe, pye = _latlon_to_pixel_float(lat, lon)
-        ex, ey   = pxe - px, pye - py
-        if ex * ex + ey * ey < 0.04:
-            break
-        pxe_la, pye_la = _latlon_to_pixel_float(lat + h, lon)
-        pxe_lo, pye_lo = _latlon_to_pixel_float(lat, lon + h)
-        dpx_dlat = (pxe_la - pxe) / h
-        dpx_dlon = (pxe_lo - pxe) / h
-        dpy_dlat = (pye_la - pye) / h
-        dpy_dlon = (pye_lo - pye) / h
-        det = dpx_dlat * dpy_dlon - dpx_dlon * dpy_dlat
-        if abs(det) < 1e-14:
-            break
-        lat -= (dpy_dlon * ex - dpx_dlon * ey) / det
-        lon -= (-dpy_dlat * ex + dpx_dlat * ey) / det
-    return (round(lat, 4), round(lon, 4))
+    """Exact inverse: pixel -> lat/lon via the spherical direct geodesic."""
+    dx = px - CENTER_PX
+    dy = CENTER_PY - py
+    d = math.hypot(dx, dy) / PX_PER_KM
+    if d < 1e-9:
+        return (round(CENTER_LAT, 4), round(CENTER_LON, 4))
+    theta = math.atan2(dx, dy)          # azimuth from north, clockwise
+    delta = d / EARTH_RADIUS_KM
+    sin_lat = (math.sin(_CLAT) * math.cos(delta)
+               + math.cos(_CLAT) * math.sin(delta) * math.cos(theta))
+    lat = math.asin(max(-1.0, min(1.0, sin_lat)))
+    lon = _CLON + math.atan2(
+        math.sin(theta) * math.sin(delta) * math.cos(_CLAT),
+        math.cos(delta) - math.sin(_CLAT) * sin_lat,
+    )
+    return (round(math.degrees(lat), 4), round(math.degrees(lon), 4))
 
 
 def is_within_radar(lat, lon):
@@ -102,22 +83,25 @@ def is_within_radar(lat, lon):
 
 
 if __name__ == "__main__":
-    gcps = [
-        ("Lucknow",   26.8467, 80.9462, 195, 195),
-        ("Gonda",     27.1320, 81.9607, 277, 165),
-        ("Bareilly",  28.3670, 79.4304,  82,  57),
-        ("Prayagraj", 25.4358, 81.8463, 275, 309),
-        ("Jaunpur",   25.7464, 82.6836, 340, 285),
-        ("Banda",     25.4804, 80.3377, 153, 308),
-        ("Kannauj",   27.0535, 79.9207,  92, 171),
+    # Round-trip and reference checks. Towns listed with true coordinates;
+    # expected pixels are from this AEQD model (IMD's basemap dots may sit a
+    # few px away — they are drawn sloppily and are NOT ground truth).
+    towns = [
+        ("Lucknow",   26.8467, 80.9462),
+        ("Gonda",     27.1320, 81.9607),
+        ("Bareilly",  28.3670, 79.4304),
+        ("Prayagraj", 25.4358, 81.8463),
+        ("Jaunpur",   25.7464, 82.6836),
+        ("Banda",     25.4804, 80.3377),
+        ("Kannauj",   27.0535, 79.9207),
+        ("Gorakhpur", 26.7606, 83.3732),
+        ("Basti",     26.8140, 82.7630),
     ]
-    print("Lucknow GCP check:")
-    for name, la, lo, ex, ey in gcps:
-        px, py = latlon_to_pixel(la, lo)
-        print(f"  {name:<14}: want ({ex:3d},{ey:3d}) got ({px:3d},{py:3d}) err=({px-ex:+d},{py-ey:+d})")
-    print()
-    print("Inverse check (pixel -> latlon -> pixel):")
-    for name, la, lo, ex, ey in gcps:
+    print("Lucknow AEQD georef check (pixel -> latlon -> pixel round trip):")
+    for name, la, lo in towns:
         px, py = latlon_to_pixel(la, lo)
         la2, lo2 = pixel_to_latlon(px, py)
-        print(f"  {name:<14}: ({la},{lo}) -> pix({px},{py}) -> ({la2},{lo2})")
+        err_km = math.hypot((la2 - la) * 111.32,
+                            (lo2 - lo) * 111.32 * math.cos(math.radians(la)))
+        print(f"  {name:<10}: ({la:.4f},{lo:.4f}) -> pix({px:3d},{py:3d}) "
+              f"-> ({la2:.4f},{lo2:.4f})  rt_err={err_km:.2f} km")

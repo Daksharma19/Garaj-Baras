@@ -376,6 +376,18 @@ Ground Control Points (cities with known lat/lon and pixel positions; ≤4 px
 residual for Delhi). Exposes `latlon_to_pixel`, `pixel_to_latlon`,
 `is_within_radar`, `IMAGE_WIDTH/HEIGHT`, `CENTER_LAT/LON`. Scale ≈ 0.877 km/px.
 
+**Exception — Lucknow uses an exact azimuthal-equidistant (AEQD) model, not a
+quadratic GCP fit.** The IMD image's 50–250 km range rings are concentric
+circles, so echoes are plotted in true range/azimuth space; the ring center
+(196.547, 195.576 px) and scale (0.78693 px/km) were measured directly from
+the rings (joint fit across frames, <1 px residual), and forward/inverse are
+closed-form spherical geodesics. The old quadratic fit used GCPs read off
+IMD's basemap town dots, which are drawn sloppily (Kannauj's dot is ~20 km
+off); the quadratic bent to absorb those errors and extrapolated badly east
+of Jaunpur (82.68E), displaying Gorakhpur-area echoes ~8 km south of reality.
+When any other radar shows a similar edge-of-frame offset, re-derive it from
+its range rings the same way rather than adding more town-dot GCPs.
+
 **A georef's GCP fit is only valid for the exact crop box its own `radar_*.py`
 produces.** `extract_frames()` (radar.py) takes a `crop_box` param — Delhi,
 Patna, and Bhopal share its default (their raw GIFs are all 880×720 with the
