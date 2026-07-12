@@ -1297,11 +1297,6 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
           </span>
         ))}
       </div>
-      <p className="nc-forecast-note">
-        Rendered from extracted radar data — amber ticks are real observed frames
-        (latest is ~{Math.round(m.lag)} min old), the blue half is our motion + decay
-        simulation. Blue circle = the zone we scan around you.
-      </p>
     </>
   )
 }
@@ -1800,7 +1795,6 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
       {hasLocation && (
         <SignInGate
           title="Sign in for rain alerts & saved places"
-          sub="Get push alerts when rain approaches, and save Home/Work (⋮ menu, top-right) for one-tap checks. The nowcast above is free without login."
         >
           <RainAlertsCard lat={ncLat} lon={ncLon} label={ncName || null} />
         </SignInGate>
@@ -1861,11 +1855,6 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
                     lon={forecastGif.lon}
                     requestId={forecastGif.requestId}
                   />
-                  <p className="nc-forecast-note">
-                    Live simulation behind the predictions above — each rain patch moves
-                    with its own measured velocity and fades with its decay trend.
-                    Blue circle = radar scan zone around you.
-                  </p>
                 </div>
               )}
             </>
@@ -2225,7 +2214,6 @@ export default function App() {
               <section className="hero">
                 <div className="hero__glow" aria-hidden />
                 <h1 className="hero__title">Know the rain<br />before you leave.</h1>
-                <p className="hero__sub">Delhi NCR &amp; UP · IMD radar · Route-aware</p>
               </section>
 
               <div className="planner-card">
