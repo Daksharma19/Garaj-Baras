@@ -3,6 +3,7 @@ import axios from 'axios'
 import './App.css'
 import { useAuth, AccountButton, SignInGate } from './auth'
 import SavedMenu from './SavedMenu'
+import Onboarding, { ONBOARDING_KEY } from './Onboarding'
 
 const API_BASE = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
@@ -55,8 +56,18 @@ async function postWithRetry(url, body, config = {}, onAttempt = null) {
   throw lastErr
 }
 
+// Phased warmup copy: reads like progress instead of a raw seconds counter.
+// (The phases are approximate — Render cold boot ≈ 30-60 s, then the first
+// radar GIF download + processing ≈ 5-10 s.)
+function warmupStatusMessage(elapsedSec) {
+  if (elapsedSec < 15) return 'Waking the radar server…'
+  if (elapsedSec < 50) return 'Server starting up… downloading radar imagery'
+  if (elapsedSec < 100) return 'Analyzing the latest radar frames…'
+  return 'Almost there — first load can take a couple of minutes'
+}
+
 // Handles Render free-tier cold start: retries for up to 3 minutes,
-// showing elapsed time, never surfacing "not yet loaded" as a user error.
+// showing warmup progress, never surfacing "not yet loaded" as a user error.
 async function postWithWarmup(url, body, config = {}, onStatus = null) {
   const INTERVAL_MS = 10000
   const MAX_WAIT_MS = 180000
@@ -70,7 +81,7 @@ async function postWithWarmup(url, body, config = {}, onStatus = null) {
       if (attempt === 1) {
         onStatus('Scanning radar…')
       } else {
-        onStatus(`Server warming up… ${elapsed}s (radar downloads on first load)`)
+        onStatus(warmupStatusMessage(elapsed))
       }
     }
     try {
@@ -1882,6 +1893,48 @@ function fmtDuration(mins) {
   return m === 0 ? `${h} h` : `${h} h ${m} min`
 }
 
+// Pings /health on app load. If the server hasn't answered within ~3 s it is
+// almost certainly cold-booting on Render, so set expectations up front with
+// a friendly note instead of letting the first scan feel broken. Hides itself
+// the moment the server answers; shown at most once per app load.
+function ServerWakeNote() {
+  const [waking, setWaking] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    const timer = setTimeout(() => { if (alive) setWaking(true) }, 3000)
+    axios.get(`${API_BASE}/health`, { timeout: 120000 })
+      .catch(() => {})
+      .finally(() => {
+        if (!alive) return
+        clearTimeout(timer)
+        setWaking(false)
+      })
+    return () => { alive = false; clearTimeout(timer) }
+  }, [])
+
+  if (!waking || dismissed) return null
+
+  return (
+    <div className="wake-note" role="status" aria-live="polite">
+      <span className="wake-note__spinner" aria-hidden />
+      <span className="wake-note__text">
+        <strong>Radar server is waking up.</strong> Your first scan can take up to
+        a minute — after that everything is fast.
+      </span>
+      <button
+        type="button"
+        className="wake-note__close"
+        onClick={() => setDismissed(true)}
+        aria-label="Dismiss"
+      >
+        ×
+      </button>
+    </div>
+  )
+}
+
 function InstallPrompt() {
   // Install banner temporarily disabled — will revisit later. All the logic
   // below is intact; remove this early return to re-enable the popup.
@@ -1976,6 +2029,12 @@ export default function App() {
   const [visitedTabs, setVisitedTabs] = useState({ route: true, nowcast: false, chat: false })
   const [pendingNcLoc, setPendingNcLoc] = useState(null)  // saved place → Nowcast
 
+  // First-run onboarding: shown until dismissed once; re-openable from the
+  // "How it works" link on the planner screen.
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try { return !localStorage.getItem(ONBOARDING_KEY) } catch { return false }
+  })
+
   const [source, setSource] = useState('')
   const [destination, setDestination] = useState('')
   const [avgSpeedKmh, setAvgSpeedKmh] = useState('')
@@ -2038,8 +2097,8 @@ export default function App() {
     return { km: roadKm, mins, kmh: roadKm / (mins / 60) }
   }, [sourcePlace, destPlace, avgSpeedKmh, journeyMins, tripInputMode])
 
-  useEffect(() => { warmBackend() }, [])
-
+  // App-load /health warmup lives in <ServerWakeNote /> (it both warms the
+  // backend and surfaces a "waking up" note when the cold boot is slow).
 
   useEffect(() => {
     let alive = true
@@ -2307,6 +2366,9 @@ export default function App() {
     <div className="app">
 
       <InstallPrompt />
+      <ServerWakeNote />
+
+      {showOnboarding && <Onboarding onClose={() => setShowOnboarding(false)} />}
 
       {/* ── NOWCAST PAGE ──
           Tabs stay MOUNTED after their first visit and are hidden with CSS,
@@ -2366,6 +2428,18 @@ export default function App() {
               <section className="hero">
                 <div className="hero__glow" aria-hidden />
                 <h1 className="hero__title">Know the rain<br />before you leave.</h1>
+                <button
+                  type="button"
+                  className="hero__how"
+                  onClick={() => setShowOnboarding(true)}
+                >
+                  <svg viewBox="0 0 20 20" fill="none" width="14" height="14" aria-hidden>
+                    <circle cx="10" cy="10" r="8" stroke="currentColor" strokeWidth="1.8" />
+                    <path d="M8 8a2 2 0 1 1 2.8 1.83c-.5.22-.8.62-.8 1.17v.3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                    <circle cx="10" cy="14.2" r="1" fill="currentColor" />
+                  </svg>
+                  How it works
+                </button>
               </section>
 
               <div className="planner-card">

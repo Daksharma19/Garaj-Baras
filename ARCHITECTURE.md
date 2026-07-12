@@ -454,6 +454,14 @@ Supabase is wired; never run prod like that.
 Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
 (`route` / `nowcast` / `chat`) via `TabBar`:
 
+- **First-run onboarding (`Onboarding.jsx`):** 3-card stepped intro (route
+  colors = live radar not a forecast / Nowcast ~2 h horizon / alerts + live
+  journeys), shown once (`gb_onboarded` in localStorage) and re-openable via
+  the "How it works" link under the planner hero. A `ServerWakeNote` banner
+  (App.jsx) pings `/health` on load and warns about the Render cold boot if
+  it takes >3 s; `postWithWarmup` shows phased warmup copy instead of a
+  seconds counter.
+
 - **Route tab (default):** Nominatim place search with autocomplete
   (viewbox-biased), route fetched via OSRM/ORS (needs `VITE_ORS_API_KEY` for
   OpenRouteService), waypoints sampled every ~5 driving minutes and POSTed to
