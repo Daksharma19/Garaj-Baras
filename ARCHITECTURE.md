@@ -57,9 +57,9 @@ Garaj Baras/
 ├── backend/                     ← FastAPI app (run from inside this dir)
 │   ├── main.py                  ← API endpoints + per-radar state cache + LRU eviction (THE hub)
 │   ├── radar.py                 ← Delhi GIF download/frame-extraction/OCR-timestamp + shared helpers
-│   ├── radar_lucknow.py / radar_patna.py / radar_bhopal.py / radar_jaipur.py / radar_paradip.py ← per-radar wrappers over radar.py helpers
+│   ├── radar_lucknow.py / radar_patna.py / radar_bhopal.py / radar_jaipur.py / radar_paradip.py / radar_patiala.py ← per-radar wrappers over radar.py helpers
 │   ├── georef.py                ← Delhi pixel↔latlon quadratic GCP model
-│   ├── georef_lucknow.py / georef_patna.py / georef_bhopal.py / georef_jaipur.py / georef_paradip.py ← per-radar georef models
+│   ├── georef_lucknow.py / georef_patna.py / georef_bhopal.py / georef_jaipur.py / georef_paradip.py / georef_patiala.py ← per-radar georef models
 │   ├── optical_flow.py          ← rain mask isolation + global movement vector (Farneback)
 │   ├── patches.py               ← per-storm-cell (blob) motion + route intercept scoring
 │   ├── decay.py                 ← per-cell dBZ trend tracks (stable/weakening/dying/dead)
@@ -105,7 +105,7 @@ Each GIF ≈ 18 frames ≈ last 3 hours. The Delhi frame is 880×720 but only a
 text. Rain intensity (reflectivity, **dBZ**) is encoded as 10 legend colors
 (dark blue ≈ 20 dBZ light drizzle → yellow 44 heavy → red 55 → white 60 extreme).
 
-**Six radars, each with its own `radar_*.py` + `georef_*.py` pair:**
+**Seven radars, each with its own `radar_*.py` + `georef_*.py` pair:**
 
 | Radar | Center | Notes |
 |---|---|---|
@@ -115,6 +115,7 @@ text. Rain intensity (reflectivity, **dBZ**) is encoded as 10 legend colors
 | Bhopal | 23.288 N, 77.337 E | **Re-enabled** (older docs say disabled). BBoxMask compression + LRU state eviction (max 2 radars in RAM) made it fit in 512 MB. Current image: `caz_bhp.gif`. |
 | Jaipur | 26.824 N, 75.812 E | Raw GIF is 880×720 but the map panel is at the bottom-left, so it has its own crop box `(0,200,520,720)` → 520×520 (Delhi's OCR box works). **250 km radar** (not 300): disc radius 257 px → 0.973 km/px true scale. GCPs generated from an azimuthal-equidistant fit around the disc center (= Jaipur airport), validated against the frame's airport markers. Current image: `caz_jpr.gif`. |
 | Paradip | 20.264 N, 86.611 E | **Coastal** radar (Odisha). Same bottom-left panel layout/crop box as Jaipur → 520×520, Delhi OCR box. **250 km radar**: disc center + scale (0.971 km/px) confirmed by fitting the range rings over the open sea, then GCPs from a north-up azimuthal-equidistant fit about the site, validated against Odisha city diamonds. Half the disc is ocean (grey). Current image: `caz_pdp.gif` (URL code `PDP`). |
+| Patiala | 30.354 N, 76.454 E | Punjab/Haryana. Same bottom-left panel layout/crop box as Jaipur/Paradip → 520×520, Delhi OCR box. **300 km radar**, but uses an **exact ring-derived AEQD model** (like Lucknow): station crosshair/ring-center at crop (260, 259), scale 0.867 px/km from the 100/200/300 km rings (radii 87/173/260 px). Center WGS84 fixed by the graticule (30/31/32 N at py 293/197/101; 75–78 E at px 138/223/305/389), which agrees with the rings and is IMD's own accurate grid — so the center is set to (30.354, 76.454), ~a few km off nominal "Patiala city". Current image: `caz_ptl.gif`; animation `PTL_MAXZ.gif` (URL code `PTL`). |
 
 **Current-image augmentation (all six radars):** IMD's animation GIF rebuilds
 lazily and can lag 50–60+ min behind its single "current radar" image
@@ -376,8 +377,9 @@ Ground Control Points (cities with known lat/lon and pixel positions; ≤4 px
 residual for Delhi). Exposes `latlon_to_pixel`, `pixel_to_latlon`,
 `is_within_radar`, `IMAGE_WIDTH/HEIGHT`, `CENTER_LAT/LON`. Scale ≈ 0.877 km/px.
 
-**Exception — Lucknow uses an exact azimuthal-equidistant (AEQD) model, not a
-quadratic GCP fit.** The IMD image's 50–250 km range rings are concentric
+**Exception — Lucknow and Patiala use an exact azimuthal-equidistant (AEQD)
+model, not a quadratic GCP fit.** (Patiala's ring-derived center is also
+cross-checked against the graticule; see the radar table in §4.) The IMD image's 50–250 km range rings are concentric
 circles, so echoes are plotted in true range/azimuth space; the ring center
 (196.547, 195.576 px) and scale (0.78693 px/km) were measured directly from
 the rings (joint fit across frames, <1 px residual), and forward/inverse are
@@ -408,7 +410,7 @@ reusing any GCP numbers.
 | `/health` | GET | Liveness (also the keep-alive target) |
 | `/debug/cache` | GET | Per-radar cache freshness/ready diagnostics |
 | `/movement` | GET | Global rain movement over Delhi NCR |
-| `/radar/gif?radar=` | GET | Latest downloaded radar GIF (delhi/lucknow/patna/bhopal/jaipur/paradip) |
+| `/radar/gif?radar=` | GET | Latest downloaded radar GIF (delhi/lucknow/patna/bhopal/jaipur/paradip/patiala) |
 | `/frames/latest?n=&force=` | GET | Latest frame URLs + timestamps + lag info |
 | `/radar/refresh` | POST | User-triggered "check for a new frame". Body `{lat,lon}` → detects radar, forces a **blocking** re-download + reprocess (bypasses TTL), returns `new_frame` (did IMD publish a newer frame than cached), plus latest/previous timestamps + lag. Bounded by a bg-lock (no double-refresh) and a frontend 60 s cooldown. |
 | `/radar/frames*` | static | Extracted PNGs per radar (`frames_lucknow` etc.) |

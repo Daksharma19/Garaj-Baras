@@ -44,11 +44,13 @@ import georef_patna  # type: ignore
 import georef_bhopal  # type: ignore
 import georef_jaipur  # type: ignore
 import georef_paradip  # type: ignore
+import georef_patiala  # type: ignore
 import radar_lucknow   # type: ignore
 import radar_patna  # type: ignore
 import radar_bhopal  # type: ignore
 import radar_jaipur  # type: ignore
 import radar_paradip  # type: ignore
+import radar_patiala  # type: ignore
 
 
 def _detect_radar(lat: float, lon: float) -> str:
@@ -61,6 +63,7 @@ def _detect_radar(lat: float, lon: float) -> str:
     in_bhopal = georef_bhopal.is_within_radar(lat, lon)
     in_jaipur = georef_jaipur.is_within_radar(lat, lon)
     in_paradip = georef_paradip.is_within_radar(lat, lon)
+    in_patiala = georef_patiala.is_within_radar(lat, lon)
 
     candidates = []
     if in_delhi:  candidates.append(('delhi',   haversine_km(lat, lon, 28.5562, 77.1000)))
@@ -69,6 +72,7 @@ def _detect_radar(lat: float, lon: float) -> str:
     if in_bhopal: candidates.append(('bhopal',  haversine_km(lat, lon, 23.2875, 77.3374)))
     if in_jaipur: candidates.append(('jaipur',  haversine_km(lat, lon, 26.8242, 75.8122)))
     if in_paradip: candidates.append(('paradip', haversine_km(lat, lon, 20.2640, 86.6110)))
+    if in_patiala: candidates.append(('patiala', haversine_km(lat, lon, 30.3540, 76.4540)))
 
     if not candidates:
         return 'delhi'   # fallback
@@ -130,6 +134,13 @@ except Exception:
 try:
     os.makedirs(radar_paradip.FRAMES_FOLDER, exist_ok=True)
     app.mount("/radar/frames_paradip", StaticFiles(directory=radar_paradip.FRAMES_FOLDER), name="radar_frames_paradip")
+except Exception:
+    pass
+
+# Serve Patiala radar frame PNGs
+try:
+    os.makedirs(radar_patiala.FRAMES_FOLDER, exist_ok=True)
+    app.mount("/radar/frames_patiala", StaticFiles(directory=radar_patiala.FRAMES_FOLDER), name="radar_frames_patiala")
 except Exception:
     pass
 
@@ -237,6 +248,7 @@ patna_cache   = {"clutter_mask": None, "last_loaded": None}
 bhopal_cache  = {"clutter_mask": None, "last_loaded": None}
 jaipur_cache  = {"clutter_mask": None, "last_loaded": None}
 paradip_cache = {"clutter_mask": None, "last_loaded": None}
+patiala_cache = {"clutter_mask": None, "last_loaded": None}
 
 _radar_state_lock   = threading.Lock()
 _lucknow_state_lock = threading.Lock()
@@ -244,6 +256,7 @@ _patna_state_lock   = threading.Lock()
 _bhopal_state_lock  = threading.Lock()
 _jaipur_state_lock  = threading.Lock()
 _paradip_state_lock = threading.Lock()
+_patiala_state_lock = threading.Lock()
 
 _delhi_bg_lock   = threading.Lock()
 _lucknow_bg_lock = threading.Lock()
@@ -251,6 +264,7 @@ _patna_bg_lock   = threading.Lock()
 _bhopal_bg_lock  = threading.Lock()
 _jaipur_bg_lock  = threading.Lock()
 _paradip_bg_lock = threading.Lock()
+_patiala_bg_lock = threading.Lock()
 
 _delhi_ready   = threading.Event()
 _lucknow_ready = threading.Event()
@@ -258,6 +272,7 @@ _patna_ready   = threading.Event()
 _bhopal_ready  = threading.Event()
 _jaipur_ready  = threading.Event()
 _paradip_ready = threading.Event()
+_patiala_ready = threading.Event()
 
 RADAR_CACHE_TTL_SEC = RADAR_TTL_SEC
 
@@ -295,6 +310,7 @@ def _touch_radar_and_evict(name: str) -> None:
         "bhopal":  (bhopal_cache,  _bhopal_state_lock,  _bhopal_ready),
         "jaipur":  (jaipur_cache,  _jaipur_state_lock,  _jaipur_ready),
         "paradip": (paradip_cache, _paradip_state_lock, _paradip_ready),
+        "patiala": (patiala_cache, _patiala_state_lock, _patiala_ready),
     }
     cache, lock, _evt = entries.get(name, entries["delhi"])
     with lock:
@@ -986,6 +1002,113 @@ def _load_paradip_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bo
     return paradip_cache
 
 
+# ── Patiala ───────────────────────────────────────────────────────────────────
+
+def _do_patiala_refresh(ttl_sec: float, force: bool = False) -> None:
+    if not _patiala_bg_lock.acquire(blocking=False):
+        return
+    try:
+        print("Patiala radar: refresh started")
+        ptl_gif = radar_patiala.GIF_SAVE_PATH
+        now = time.time()
+        try:
+            gif_fresh = os.path.exists(ptl_gif) and (now - os.path.getmtime(ptl_gif) < ttl_sec)
+        except Exception:
+            gif_fresh = False
+
+        frame_data, did_refresh = radar_patiala.refresh_frames_if_stale(ttl_sec=ttl_sec, force=force, clear_pngs=False)
+        if did_refresh:
+            all_frame_data = frame_data
+        else:
+            all_frame_data = radar_patiala.extract_frames(ptl_gif, radar_patiala.FRAMES_FOLDER) if gif_fresh else radar_patiala.get_all_frames()
+
+        # Same lazy-GIF fix as Delhi: IMD's current image often updates before
+        # the animation GIF — append it as the newest frame when strictly newer.
+        try:
+            all_frame_data = radar_patiala.augment_current(all_frame_data)
+        except Exception as _ae:
+            print(f"Patiala current-image augmentation failed: {_ae}")
+
+        recent_frame_data = all_frame_data[-6:] if len(all_frame_data) > 6 else all_frame_data
+        verification.verify_pending("patiala", all_frame_data, isolate_rain, clutter_mask=None)
+        del all_frame_data
+        clutter_mask = None
+        gc.collect()
+
+        dx, dy, dir_from, dir_to, speed = get_movement_vector(recent_frame_data, clutter_mask=clutter_mask)
+        latest_frame = recent_frame_data[-1][0] if recent_frame_data else None
+        latest_ts    = recent_frame_data[-1][1] if recent_frame_data else None
+        lag_info     = radar_patiala.get_radar_lag_mins(latest_ts)
+
+        patches_motion, roi_mask = [], None
+        try:
+            roi_mask = build_roi_mask(
+                georef_patiala.latlon_to_pixel, georef_patiala.IMAGE_WIDTH,
+                georef_patiala.IMAGE_HEIGHT, georef_patiala.CENTER_LAT,
+                georef_patiala.CENTER_LON, radius_km=150.0,
+            )
+            motion_frames = [p for p, _ in recent_frame_data[-4:]]
+            ts_prev = recent_frame_data[-2][1] if len(recent_frame_data) >= 2 else None
+            ts_last = recent_frame_data[-1][1] if recent_frame_data else None
+            gap = 10.0
+            if ts_prev and ts_last:
+                gap = max(1.0, (ts_last - ts_prev).total_seconds() / 60.0)
+            if len(motion_frames) >= 2:
+                patches_motion = compute_patch_motion(
+                    motion_frames, gap_mins=gap, clutter_mask=clutter_mask,
+                    roi_mask=roi_mask, min_area_px=4,
+                    pixel_to_latlon_fn=georef_patiala.pixel_to_latlon,
+                )
+                print(f"  Patiala per-patch: {len(patches_motion)} patch(es) (gap={gap:.0f}m)")
+        except Exception as _pe:
+            print(f"  Patiala per-patch failed: {_pe}")
+
+        decay_tracks = []
+        try:
+            decay_tracks = compute_decay_tracks(recent_frame_data, dx, dy, clutter_mask=clutter_mask)
+            print(f"  Patiala decay tracks: {len(decay_tracks)} patch(es)")
+        except Exception as _de:
+            print(f"  Patiala decay tracking failed: {_de}")
+
+        new_state = {
+            "frame_data": recent_frame_data,
+            "recent_frame_data": recent_frame_data,
+            "clutter_mask": clutter_mask,
+            "movement": (dx, dy, dir_from, dir_to, speed),
+            "latest_frame": latest_frame,
+            "latest_ts": latest_ts,
+            "lag_info": lag_info,
+            "patches": patches_motion,
+            "roi_mask": roi_mask,
+            "decay_tracks": decay_tracks,
+            "last_loaded": time.time(),
+            "gif_mtime": os.path.getmtime(ptl_gif) if os.path.exists(ptl_gif) else None,
+        }
+        with _patiala_state_lock:
+            patiala_cache.update(new_state)
+        print("Patiala radar: refresh complete")
+        try:
+            alerts.process_alerts("patiala", new_state, georef_patiala.is_within_radar, georef_patiala.latlon_to_pixel)
+        except Exception as _al:
+            print(f"alerts hook failed: {_al}")
+    except Exception as e:
+        print(f"Patiala radar: refresh failed: {e}\n{traceback.format_exc()}")
+    finally:
+        _patiala_ready.set()
+        _patiala_bg_lock.release()
+
+
+def _load_patiala_radar_state(ttl_sec: float = RADAR_CACHE_TTL_SEC, *, force: bool = False) -> dict:
+    if not _patiala_ready.is_set():
+        threading.Thread(target=_do_patiala_refresh, args=(ttl_sec, True), daemon=True).start()
+        _patiala_ready.wait(timeout=60)
+        return patiala_cache
+    if not force and _is_fresh(patiala_cache, ttl_sec):
+        return patiala_cache
+    threading.Thread(target=_do_patiala_refresh, args=(ttl_sec, force), daemon=True).start()
+    return patiala_cache
+
+
 # ── Radar registry + alert plumbing ───────────────────────────────────────────
 # One table mapping a radar name to everything the alert paths need: its
 # blocking refresh fn (which also runs process_alerts on completion), its cache,
@@ -998,6 +1121,7 @@ _RADAR_REGISTRY = {
     "bhopal":  {"refresh": _do_bhopal_refresh,  "cache": bhopal_cache,  "ready": _bhopal_ready,  "georef": georef_bhopal},
     "jaipur":  {"refresh": _do_jaipur_refresh,  "cache": jaipur_cache,  "ready": _jaipur_ready,  "georef": georef_jaipur},
     "paradip": {"refresh": _do_paradip_refresh, "cache": paradip_cache, "ready": _paradip_ready, "georef": georef_paradip},
+    "patiala": {"refresh": _do_patiala_refresh, "cache": patiala_cache, "ready": _patiala_ready, "georef": georef_patiala},
 }
 
 
@@ -1124,6 +1248,7 @@ def debug_cache():
         "bhopal":  _summary(bhopal_cache,  _bhopal_ready,  radar_bhopal.GIF_SAVE_PATH),
         "jaipur":  _summary(jaipur_cache,  _jaipur_ready,  radar_jaipur.GIF_SAVE_PATH),
         "paradip": _summary(paradip_cache, _paradip_ready, radar_paradip.GIF_SAVE_PATH),
+        "patiala": _summary(patiala_cache, _patiala_ready, radar_patiala.GIF_SAVE_PATH),
     }
 
 # ENDPOINT 2: Current Rain Movement
@@ -1182,6 +1307,9 @@ def get_radar_gif(radar: str = "delhi"):
     elif radar == "paradip":
         gif_path = radar_paradip.GIF_SAVE_PATH
         filename  = "paradip_radar.gif"
+    elif radar == "patiala":
+        gif_path = radar_patiala.GIF_SAVE_PATH
+        filename  = "patiala_radar.gif"
     else:
         gif_path = GIF_SAVE_PATH
         filename  = "delhi_radar.gif"
@@ -1326,6 +1454,9 @@ def predict_waypoints(payload: PredictWaypointsRequest):
         elif radar == "paradip":
             _georef = georef_paradip
             state   = _load_paradip_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        elif radar == "patiala":
+            _georef = georef_patiala
+            state   = _load_patiala_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         else:
             _georef = _georef_delhi
             state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
@@ -1631,6 +1762,9 @@ def nowcast_location(req: NowcastRequest):
         elif radar == "paradip":
             _georef = georef_paradip
             state   = _load_paradip_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+        elif radar == "patiala":
+            _georef = georef_patiala
+            state   = _load_patiala_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
         else:
             _georef = _georef_delhi
             state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
@@ -1750,6 +1884,9 @@ def _forecast_render_args(lat: float, lon: float) -> dict:
     elif radar == "paradip":
         _georef = georef_paradip
         state   = _load_paradip_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
+    elif radar == "patiala":
+        _georef = georef_patiala
+        state   = _load_patiala_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
     else:
         _georef = _georef_delhi
         state   = _load_radar_state(ttl_sec=RADAR_CACHE_TTL_SEC, force=False)
