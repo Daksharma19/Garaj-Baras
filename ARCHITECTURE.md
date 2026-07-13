@@ -329,6 +329,14 @@ as the Nowcast tab):
   (`FAR_SLOT_MIN_PROB`), so distant low-confidence forecasts don't spam
   false heads-ups (`_slot_is_rain`, applied to both the trigger and the
   ease/resume scan).
+- **Peak-intensity naming:** when a heavier category is due within the next
+  ~45 min (`PEAK_LOOKAHEAD_SLOTS` = 3 slots past the first rainy one), the
+  alert names THAT intensity, not the light rain at the leading edge — a
+  "Very Light → Heavy" ramp fires "Heavy Rain approaching … building to Heavy
+  Rain by ~30 min" (`_peak_rain_slot` returns the earliest slot at the peak
+  category; `_intensity_rank` orders the `fuzzy.dbz_to_label` categories).
+  Only the message copy changes; the clear/approaching/raining state
+  transition is still driven by the leading-edge slot.
 - `→raining`: "Rain right now" arrival ping (fires even after a heads-up);
   appends "Expected to ease in ~N min" (and, if rain resumes afterward, "may
   pick up again around ~M min") via `_ease_and_resume_note`, scanning the same

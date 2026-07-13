@@ -281,6 +281,38 @@ def _slot_is_rain(slot: dict) -> bool:
     return True
 
 
+# Intensity categories, ordered — used to decide when an upcoming slot is a
+# HEAVIER category than the rain at the leading edge (matches fuzzy.dbz_to_label).
+_INTENSITY_RANK = {
+    "No Rain": 0, "Very Light Rain": 1, "Light Rain": 2,
+    "Moderate Rain": 3, "Heavy Rain": 4, "Very Heavy Rain": 5,
+}
+
+
+def _intensity_rank(label: str) -> int:
+    return _INTENSITY_RANK.get(label or "", 0)
+
+
+# How far past the first rainy slot to look for a heavier burst. Slots are
+# 15 min apart, so 3 slots ≈ the next ~45 min: if very light rain at the
+# leading edge leads straight into a heavier cell, the alert should name that
+# heavier intensity, not the drizzle the user feels first.
+PEAK_LOOKAHEAD_SLOTS = 3
+
+
+def _peak_rain_slot(slots: list, first_idx: int) -> dict:
+    """Among the first rainy slot and the next PEAK_LOOKAHEAD_SLOTS slots,
+    return the EARLIEST slot at the heaviest intensity category about to hit
+    (so a 'Heavy at +30 then +45' ramp reports +30, not the marginally-higher
+    dBZ at +45). Falls back to the first rainy slot."""
+    window = slots[first_idx: first_idx + PEAK_LOOKAHEAD_SLOTS + 1]
+    rainy = [s for s in window if _slot_is_rain(s)]
+    if not rainy:
+        return slots[first_idx]
+    top_rank = max(_intensity_rank(s["intensity"]) for s in rainy)
+    return next(s for s in rainy if _intensity_rank(s["intensity"]) == top_rank)
+
+
 def _ease_and_resume_note(slots: list) -> str:
     """Scan the full 8-slot horizon (0..105 min) past the current 'raining'
     slot for when it eases and, if it picks back up afterward, when. Returns
@@ -352,7 +384,8 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                     lag_mins=lag,
                     patches_motion=state.get("patches") or [],
                 )
-                first_rainy = next((s for s in slots if _slot_is_rain(s)), None)
+                first_idx = next((i for i, s in enumerate(slots) if _slot_is_rain(s)), None)
+                first_rainy = slots[first_idx] if first_idx is not None else None
                 place = label or f"{lat:.3f}, {lon:.3f}"
 
                 if first_rainy is None:
@@ -365,23 +398,43 @@ def process_alerts(radar_name: str, state: dict, is_within_radar, latlon_to_pixe
                 now_iso = datetime.now(timezone.utc).isoformat()
                 title = body = None
 
+                # If a heavier category is due within the next ~45 min, the
+                # alert names THAT intensity rather than the light rain at the
+                # leading edge (a "very light -> heavy" ramp must warn about the
+                # heavy part).
+                peak = _peak_rain_slot(slots, first_idx) if first_idx is not None else None
+                building = (peak is not None and peak is not first_rainy
+                            and _intensity_rank(peak["intensity"])
+                            > _intensity_rank(first_rainy["intensity"]))
+
                 if desired == "raining" and sub_state != "raining":
                     # Rain has arrived — fire whether it came out of a clear sky
                     # or after an earlier heads-up (approaching->raining escalation).
                     # Own cooldown so a rain edge flickering across the pixel can't
                     # spam; a prior heads-up does NOT count against this cooldown.
                     if last_rain_at is None or _mins_since(last_rain_at) >= MIN_RENOTIFY_MINS:
-                        title = f"⛈ Rain right now at {place}"
-                        body = f"{first_rainy['intensity']} observed by radar."
+                        if building:
+                            title = f"⛈ {peak['intensity']} building at {place}"
+                            body = (f"{first_rainy['intensity']} now, intensifying to "
+                                    f"{peak['intensity']} in ~{int(peak['slot_mins'])} min.")
+                        else:
+                            title = f"⛈ Rain right now at {place}"
+                            body = f"{first_rainy['intensity']} observed by radar."
                         body += _ease_and_resume_note(slots)
                         body += f" (Radar data ~{lag:.0f} min old.)"
                 elif desired == "approaching" and sub_state == "clear":
                     # First heads-up for incoming rain.
                     if last_at is None or _mins_since(last_at) >= MIN_RENOTIFY_MINS:
                         eta = int(first_rainy["slot_mins"])
-                        title = f"🌧 Rain approaching {place}"
-                        body = (f"{first_rainy['intensity']} expected in roughly {eta} minutes "
-                                f"(radar-based estimate, ±10 min).")
+                        if building:
+                            title = f"🌧 {peak['intensity']} approaching {place}"
+                            body = (f"{first_rainy['intensity']} expected in ~{eta} min, "
+                                    f"building to {peak['intensity']} by ~{int(peak['slot_mins'])} min "
+                                    f"(radar-based estimate, ±10 min).")
+                        else:
+                            title = f"🌧 Rain approaching {place}"
+                            body = (f"{first_rainy['intensity']} expected in roughly {eta} minutes "
+                                    f"(radar-based estimate, ±10 min).")
 
                 log_msg = None
                 with _db_lock, _conn() as c:
