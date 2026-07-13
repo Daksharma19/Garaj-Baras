@@ -8,10 +8,12 @@ import requests
 from PIL import Image, ImageSequence
 from datetime import datetime, timezone, timedelta
 
-# DELHI_MAXZ and DLH_MAXZ are BOTH products of DWRDELHI(PALAM); DELHI_MAXZ is
-# the actively maintained one (18 frames, fresh), DLH_MAXZ rebuilds lazily and
-# was observed lagging it by 60+ minutes.
-GIF_URL = "https://mausam.imd.gov.in/Radar/animation/Converted/DELHI_MAXZ.gif"
+# DELHI_MAXZ and DLH_MAXZ are BOTH products of DWRDELHI(PALAM). Use DLH_MAXZ:
+# it is the actively maintained Palam feed (verified newest frame current to
+# the minute, no stray frames). DELHI_MAXZ was observed lagging AND serving a
+# cross-day glitched frame (a 4-JUL frame stuck as the "newest" of a 13-JUL
+# feed) while DLH_MAXZ for the same station was clean and fresh to 19:42.
+GIF_URL = "https://mausam.imd.gov.in/Radar/animation/Converted/DLH_MAXZ.gif"
 GIF_SAVE_PATH = os.path.join(os.path.dirname(__file__), "delhi_radar.gif")
 FRAMES_FOLDER = os.path.join(os.path.dirname(__file__), "frames")
 
