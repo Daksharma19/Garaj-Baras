@@ -247,6 +247,16 @@ def augment_with_current_image(frame_data, output_folder,
             print("current-image: timestamp unreadable, skipping augmentation")
             return frame_data
 
+        # IMD's current image is glitched the same way the animation GIF can
+        # be — it sometimes serves a frame from a different day (observed: a
+        # 4-JUL frame, panel time 16:12:24Z → a FUTURE IST time today). A radar
+        # frame can never post-date now, so a future timestamp means a stale
+        # stray, not a fresher frame; never append it.
+        if cur_ts > datetime.now(IST) + timedelta(minutes=5):
+            print(f"current-image: future-glitched timestamp "
+                  f"{cur_ts.strftime('%d %b %H:%M IST')}, skipping augmentation")
+            return frame_data
+
         if last_ts is not None and cur_ts <= last_ts + timedelta(minutes=1):
             # Equal or older than the animation's last frame — GIF wins.
             return frame_data
@@ -324,15 +334,41 @@ def extract_frames(gif_path, output_folder, ocr_crop=None, crop_box=None):
         if ocr_fail:
             print(f"OCR failed on {ocr_fail}/{len(unique_frames)} frame(s)")
 
-        # Drop any frame stamped in the future BEFORE the monotonic pass. A
-        # radar frame can never post-date now; a stray future read (e.g. a
-        # stale previous-cycle frame IMD left at the front) would otherwise
-        # become the monotonic baseline and reject every real frame after it,
-        # back-filling the whole history with bogus future timestamps.
+        # DROP glitched frames outright (remove them — do NOT null the
+        # timestamp, or the gap-fill below would revive the frame with a
+        # fabricated "current" timestamp on top of stale imagery). IMD
+        # sometimes wedges a frame from a completely different day into the
+        # animation GIF (observed: a 4-JUL frame stuck in a 13-JUL feed,
+        # panel date "4 JUL 2026 UTC", time 16:12:24Z). Two signatures, both
+        # relative to the freshest good read so a genuinely-down radar (all
+        # frames uniformly old but clustered) is left intact:
+        #   - future: a radar frame can never post-date now (guard even though
+        #     the readers already roll a future read back a day); and
+        #   - stray-past: a MAXZ GIF spans ~3 h nominally but ~4.5 h in
+        #     practice (irregular IMD cadence), while a stray is a whole day+
+        #     off, so a 6 h window past the newest read cleanly separates them
+        #     without discarding real early frames.
+        # Left unhandled, a future stray becomes the monotonic baseline and
+        # rejects every real frame after it; a past stray shows up as an
+        # ancient "21:42" tick in the scene.
         now_ist = datetime.now(IST)
-        for i, (full, crop, ts) in enumerate(timestamped):
-            if ts is not None and ts > now_ist + timedelta(minutes=5):
-                timestamped[i] = (full, crop, None)
+        _valid = [ts for _f, _c, ts in timestamped
+                  if ts is not None and ts <= now_ist + timedelta(minutes=5)]
+        _newest = max(_valid) if _valid else None
+        _kept = []
+        for full, crop, ts in timestamped:
+            if ts is not None:
+                if ts > now_ist + timedelta(minutes=5):
+                    print(f"dropped future-glitched frame @ {ts.strftime('%d %b %H:%M IST')}")
+                    continue
+                if _newest is not None and ts < _newest - timedelta(hours=6):
+                    print(f"dropped stale-glitched frame @ {ts.strftime('%d %b %H:%M IST')} "
+                          f"(newest {_newest.strftime('%d %b %H:%M IST')})")
+                    continue
+            _kept.append((full, crop, ts))
+        timestamped = _kept
+        if not timestamped:
+            print("all frames dropped as glitched — keeping nothing")
 
         # Reject non-monotonic reads (an OCR misread, not time travel) and
         # drop same-timestamp duplicates (IMD re-renders; keep the later one).
