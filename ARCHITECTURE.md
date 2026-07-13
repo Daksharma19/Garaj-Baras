@@ -180,6 +180,18 @@ computes image age vs now (fallback default 25 min). Every prediction uses
 was taken. Lag is **recomputed per request** (`_fresh_lag_info`), not frozen at
 refresh time.
 
+**Timestamp date inference (no future frames):** the IMD panel carries only a
+time, no date. Both readers (`timestamp_match.py`, `radar.py
+parse_radar_timestamp_text`) assume "today" in the panel's timezone but **roll
+back a day when the built time lands >2 h in the future** — IMD's animation GIF
+often keeps a stale frame from the previous cycle/day at the front, and
+stamping it "today" put it in the future. As a second defense,
+`extract_frames` **drops any frame stamped >5 min in the future** before the
+monotonic-ordering pass. Without these, one stray future-dated frame became the
+monotonic baseline, rejected every real frame after it, and back-filled the
+whole history with bogus future timestamps (symptom: newest frame showing
+~night IST + lag falling back to the flat 25-min estimate).
+
 **Clutter mask is intentionally disabled** (`clutter_mask=None` everywhere) —
 it misflagged persistent monsoon rain as ground clutter.
 

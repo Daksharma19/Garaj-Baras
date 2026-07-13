@@ -177,9 +177,16 @@ def match_timestamp(full_rgb_img, ocr_crop):
         hh, mm, ss = int(text[0:2]), int(text[3:5]), int(text[6:8])
         if not (0 <= hh < 24 and 0 <= mm < 60 and 0 <= ss < 60):
             return None
-        today = datetime.now(timezone.utc).date()
-        dt_utc = datetime(today.year, today.month, today.day, hh, mm, ss,
+        # The panel carries only a UTC time, no date. Assume "today" in UTC, but
+        # a radar frame can never be in the future — IMD's animation GIF often
+        # keeps a stale frame from the previous cycle/day at the front, and
+        # stamping it "today" would put it in the future and poison ordering.
+        # If the built time lands ahead of now, it belongs to the previous day.
+        now_utc = datetime.now(timezone.utc)
+        dt_utc = datetime(now_utc.year, now_utc.month, now_utc.day, hh, mm, ss,
                           tzinfo=timezone.utc)
+        if dt_utc > now_utc + timedelta(hours=2):
+            dt_utc -= timedelta(days=1)
         return dt_utc.astimezone(IST)
     except Exception:
         return None

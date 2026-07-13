@@ -53,8 +53,16 @@ def parse_radar_timestamp_text(text):
         return None
 
     def _to_ist(h, m, s, tz):
-        today = datetime.now(tz).date()
-        dt = datetime(today.year, today.month, today.day, h, m, s, tzinfo=tz)
+        # The panel carries only a time, no date. Assume "today" in the panel's
+        # timezone, but a radar frame can never be in the future — IMD's
+        # animation GIF often leaves a stale frame from the previous cycle/day
+        # at the front, and stamping it "today" would place it in the future
+        # and poison frame ordering. If the built time lands ahead of now,
+        # it belongs to the previous day.
+        now = datetime.now(tz)
+        dt = datetime(now.year, now.month, now.day, h, m, s, tzinfo=tz)
+        if dt > now + timedelta(hours=2):
+            dt -= timedelta(days=1)
         return dt.astimezone(IST)
 
     utc_match = re.search(_TIME_TOKEN + r'\s*[Z2S]', up)
@@ -315,6 +323,16 @@ def extract_frames(gif_path, output_folder, ocr_crop=None, crop_box=None):
             timestamped.append((full, frame_cropped, timestamp))
         if ocr_fail:
             print(f"OCR failed on {ocr_fail}/{len(unique_frames)} frame(s)")
+
+        # Drop any frame stamped in the future BEFORE the monotonic pass. A
+        # radar frame can never post-date now; a stray future read (e.g. a
+        # stale previous-cycle frame IMD left at the front) would otherwise
+        # become the monotonic baseline and reject every real frame after it,
+        # back-filling the whole history with bogus future timestamps.
+        now_ist = datetime.now(IST)
+        for i, (full, crop, ts) in enumerate(timestamped):
+            if ts is not None and ts > now_ist + timedelta(minutes=5):
+                timestamped[i] = (full, crop, None)
 
         # Reject non-monotonic reads (an OCR misread, not time travel) and
         # drop same-timestamp duplicates (IMD re-renders; keep the later one).
