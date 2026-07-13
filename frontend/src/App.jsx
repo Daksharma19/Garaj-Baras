@@ -4,6 +4,7 @@ import './App.css'
 import { useAuth, AccountButton, SignInGate } from './auth'
 import SavedMenu from './SavedMenu'
 import Onboarding, { ONBOARDING_KEY } from './Onboarding'
+import { useT, tr, LangToggle } from './i18n'
 
 const API_BASE = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
@@ -60,10 +61,10 @@ async function postWithRetry(url, body, config = {}, onAttempt = null) {
 // (The phases are approximate — Render cold boot ≈ 30-60 s, then the first
 // radar GIF download + processing ≈ 5-10 s.)
 function warmupStatusMessage(elapsedSec) {
-  if (elapsedSec < 15) return 'Waking the radar server…'
-  if (elapsedSec < 50) return 'Server starting up… downloading radar imagery'
-  if (elapsedSec < 100) return 'Analyzing the latest radar frames…'
-  return 'Almost there — first load can take a couple of minutes'
+  if (elapsedSec < 15) return tr('Waking the radar server…', 'रडार सर्वर जगाया जा रहा है…')
+  if (elapsedSec < 50) return tr('Server starting up… downloading radar imagery', 'सर्वर शुरू हो रहा है… रडार इमेज डाउनलोड हो रही है')
+  if (elapsedSec < 100) return tr('Analyzing the latest radar frames…', 'नवीनतम रडार फ्रेम का विश्लेषण हो रहा है…')
+  return tr('Almost there — first load can take a couple of minutes', 'बस थोड़ा और — पहली बार लोड होने में कुछ मिनट लग सकते हैं')
 }
 
 // Handles Render free-tier cold start: retries for up to 3 minutes,
@@ -79,7 +80,7 @@ async function postWithWarmup(url, body, config = {}, onStatus = null) {
     const elapsed = Math.round((Date.now() - start) / 1000)
     if (typeof onStatus === 'function') {
       if (attempt === 1) {
-        onStatus('Scanning radar…')
+        onStatus(tr('Scanning radar…', 'रडार स्कैन हो रहा है…'))
       } else {
         onStatus(warmupStatusMessage(elapsed))
       }
@@ -115,6 +116,26 @@ function getRainGroupLabel(label) {
   if (l.includes('Moderate')) return 'Medium'
   if (l.includes('Heavy')) return 'Heavy'
   return 'No Rain'
+}
+
+// Translate a rain-intensity label for DISPLAY only. The raw English value is
+// still used everywhere for logic/CSS classes — this just localizes the text.
+function tRainLabel(label) {
+  const map = {
+    'No Rain': ['No Rain', 'बारिश नहीं'],
+    'Rain': ['Rain', 'बारिश'],
+    'Very Light Rain': ['Very Light Rain', 'बहुत हल्की बारिश'],
+    'Light Rain': ['Light Rain', 'हल्की बारिश'],
+    'Moderate Rain': ['Moderate Rain', 'मध्यम बारिश'],
+    'Heavy Rain': ['Heavy Rain', 'तेज़ बारिश'],
+    'Very Heavy Rain': ['Very Heavy Rain', 'बहुत तेज़ बारिश'],
+    'Light': ['Light', 'हल्की'],
+    'Medium': ['Medium', 'मध्यम'],
+    'Heavy': ['Heavy', 'तेज़'],
+    'Unknown': ['Unknown', 'अज्ञात'],
+  }
+  const m = map[String(label || '').trim()]
+  return m ? tr(m[0], m[1]) : label
 }
 
 function computeRainTimeline(waypoints) {
@@ -165,8 +186,8 @@ function computeRainTimeline(waypoints) {
   if (!patches.length) {
     return {
       tone: 'clear',
-      headline: 'No rain on route',
-      secondary: 'Clear skies expected all the way.',
+      headline: tr('No rain on route', 'रास्ते में बारिश नहीं'),
+      secondary: tr('Clear skies expected all the way.', 'पूरे रास्ते साफ आसमान की उम्मीद है।'),
       patches: [],
       closest: null,
       lastEta,
@@ -177,7 +198,7 @@ function computeRainTimeline(waypoints) {
   const isNow = closest.startMin <= firstEta + 2
   const continuesToEnd = closest.endMin >= lastEta - 2.5
 
-  const fmt = (m) => `${Math.max(0, Math.round(Number(m) || 0))} min`
+  const fmt = (m) => `${Math.max(0, Math.round(Number(m) || 0))} ${tr('min', 'मिनट')}`
 
   const closestDecay = closest.decayStatus || 'stable'
   const isDying = closestDecay === 'dying' || closestDecay === 'dead'
@@ -187,32 +208,32 @@ function computeRainTimeline(waypoints) {
 
   if (isDying) {
     headline = isNow
-      ? "Rain nearby — but it's fading fast"
-      : `Rain detected in ${fmt(closest.startMin)} — likely to clear`
-    secondary = 'This patch is losing intensity. By the time you reach it, skies may already be clearing.'
+      ? tr("Rain nearby — but it's fading fast", 'पास में बारिश — पर तेज़ी से कम हो रही है')
+      : tr(`Rain detected in ${fmt(closest.startMin)} — likely to clear`, `${fmt(closest.startMin)} में बारिश — पर साफ होने की संभावना`)
+    secondary = tr('This patch is losing intensity. By the time you reach it, skies may already be clearing.', 'यह बादल कमज़ोर हो रहा है। जब तक आप वहाँ पहुँचेंगे, आसमान शायद साफ हो चुका होगा।')
     decayNote = 'dying'
   } else if (isWeakening) {
     headline = isNow
-      ? 'Light rain right now — weakening as you travel'
-      : `Rain in ${fmt(closest.startMin)} — and it's weakening`
-    secondary = 'This patch is losing intensity. Rain will likely be lighter than current radar shows.'
+      ? tr('Light rain right now — weakening as you travel', 'अभी हल्की बारिश — सफ़र के साथ कम होती जाएगी')
+      : tr(`Rain in ${fmt(closest.startMin)} — and it's weakening`, `${fmt(closest.startMin)} में बारिश — और यह कमज़ोर हो रही है`)
+    secondary = tr('This patch is losing intensity. Rain will likely be lighter than current radar shows.', 'यह बादल कमज़ोर हो रहा है। बारिश शायद अभी रडार में दिख रही बारिश से हल्की होगी।')
     decayNote = 'weakening'
   } else {
     if (isNow) {
       headline = continuesToEnd
-        ? 'Rain right now — continues to destination'
-        : `Rain right now — clearing in ${fmt(closest.endMin)}`
+        ? tr('Rain right now — continues to destination', 'अभी बारिश — मंज़िल तक जारी रहेगी')
+        : tr(`Rain right now — clearing in ${fmt(closest.endMin)}`, `अभी बारिश — ${fmt(closest.endMin)} में साफ होगी`)
       secondary = continuesToEnd
-        ? `Expect rain for the full ${fmt(lastEta)} trip.`
-        : 'After that, skies clear for the rest of the route.'
+        ? tr(`Expect rain for the full ${fmt(lastEta)} trip.`, `पूरे ${fmt(lastEta)} के सफ़र में बारिश की उम्मीद रखें।`)
+        : tr('After that, skies clear for the rest of the route.', 'उसके बाद बाकी रास्ते में आसमान साफ रहेगा।')
     } else {
       if (continuesToEnd) {
-        headline = `Rain starts in ${fmt(closest.startMin)}`
-        secondary = 'Once it starts, rain continues to your destination.'
+        headline = tr(`Rain starts in ${fmt(closest.startMin)}`, `${fmt(closest.startMin)} में बारिश शुरू होगी`)
+        secondary = tr('Once it starts, rain continues to your destination.', 'एक बार शुरू होने पर बारिश आपकी मंज़िल तक जारी रहेगी।')
       } else {
         const duration = Math.max(1, Math.round(closest.endMin - closest.startMin))
-        headline = `Rain starts in ${fmt(closest.startMin)}, clearing in ${fmt(closest.endMin)}`
-        secondary = `Rainy stretch ~${duration} min.`
+        headline = tr(`Rain starts in ${fmt(closest.startMin)}, clearing in ${fmt(closest.endMin)}`, `${fmt(closest.startMin)} में बारिश शुरू, ${fmt(closest.endMin)} में साफ`)
+        secondary = tr(`Rainy stretch ~${duration} min.`, `बारिश वाला हिस्सा ~${duration} मिनट।`)
       }
     }
   }
@@ -239,20 +260,20 @@ function toShortCityName(name) {
 }
 
 function toCityRouteName(a, b) {
-  const left = toShortCityName(a) || 'Source'
-  const right = toShortCityName(b) || 'Destination'
+  const left = toShortCityName(a) || tr('Source', 'शुरुआत')
+  const right = toShortCityName(b) || tr('Destination', 'मंज़िल')
   return `${left} → ${right}`
 }
 
 async function geocode(place) {
   const q = String(place ?? '').trim()
-  if (!q) throw new Error('Please enter both Source and Destination.')
+  if (!q) throw new Error(tr('Please enter both Source and Destination.', 'कृपया शुरुआत और मंज़िल दोनों दर्ज करें।'))
   const res = await axios.get(
     `${NOMINATIM_SEARCH_URL}?q=${encodeURIComponent(q)}&format=json&limit=1&countrycodes=in`,
     { timeout: 15000, headers: { Accept: 'application/json' } }
   )
   const data = Array.isArray(res.data) ? res.data[0] : null
-  if (!data?.lat || !data?.lon) throw new Error('No geocoding results.')
+  if (!data?.lat || !data?.lon) throw new Error(tr('No geocoding results.', 'कोई स्थान नहीं मिला।'))
   return { lat: parseFloat(data.lat), lon: parseFloat(data.lon), display_name: data.display_name }
 }
 
@@ -395,6 +416,7 @@ function toIST(etaMins) {
 // ── Shared Components ─────────────────────────────────────────────────────────
 
 function RadarDownModal({ onClose }) {
+  const t = useT()
   return (
     <div className="radar-down-overlay" role="dialog" aria-modal="true" aria-labelledby="radar-down-title">
       <div className="radar-down-modal">
@@ -405,17 +427,18 @@ function RadarDownModal({ onClose }) {
             <path d="M24 14v12M24 32v2" stroke="#EF4444" strokeWidth="2.5" strokeLinecap="round" />
           </svg>
         </div>
-        <h2 className="radar-down-title" id="radar-down-title">Radar Unavailable</h2>
+        <h2 className="radar-down-title" id="radar-down-title">{t('Radar Unavailable', 'रडार उपलब्ध नहीं')}</h2>
         <p className="radar-down-msg">
-          Sorry for the inconvenience.<br />Radar is down for now.
+          {t('Sorry for the inconvenience.', 'असुविधा के लिए क्षमा करें।')}<br />{t('Radar is down for now.', 'रडार अभी बंद है।')}
         </p>
-        <button className="radar-down-btn" type="button" onClick={onClose}>OK</button>
+        <button className="radar-down-btn" type="button" onClick={onClose}>{t('OK', 'ठीक है')}</button>
       </div>
     </div>
   )
 }
 
 function LongJourneyModal({ onContinue, onDismiss }) {
+  const t = useT()
   return (
     <div className="radar-down-overlay" role="dialog" aria-modal="true" aria-labelledby="lj-title">
       <div className="radar-down-modal">
@@ -425,20 +448,20 @@ function LongJourneyModal({ onContinue, onDismiss }) {
             <path d="M24 14v12M24 32v2" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
           </svg>
         </div>
-        <h2 className="radar-down-title" id="lj-title" style={{ color: '#f59e0b' }}>Long Journey</h2>
+        <h2 className="radar-down-title" id="lj-title" style={{ color: '#f59e0b' }}>{t('Long Journey', 'लंबा सफ़र')}</h2>
         <p className="radar-down-msg">
-          This journey is over 3 hours.<br />
-          Radar predictions beyond 2 hours are less reliable.<br /><br />
-          Try planning the journey <strong>in parts</strong> for better accuracy.
+          {t('This journey is over 3 hours.', 'यह सफ़र 3 घंटे से ज़्यादा का है।')}<br />
+          {t('Radar predictions beyond 2 hours are less reliable.', '2 घंटे के बाद रडार अनुमान कम भरोसेमंद होते हैं।')}<br /><br />
+          {t('Try planning the journey', 'सफ़र की योजना')} <strong>{t('in parts', 'हिस्सों में')}</strong> {t('for better accuracy.', 'बनाएँ ताकि सटीकता बेहतर हो।')}
         </p>
         <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
           <button className="radar-down-btn" type="button" onClick={onDismiss}
             style={{ background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.7)' }}>
-            Got it
+            {t('Got it', 'समझ गया')}
           </button>
           <button className="radar-down-btn" type="button" onClick={onContinue}
             style={{ background: '#f59e0b', color: '#000' }}>
-            Continue anyway
+            {t('Continue anyway', 'फिर भी जारी रखें')}
           </button>
         </div>
       </div>
@@ -447,6 +470,7 @@ function LongJourneyModal({ onContinue, onDismiss }) {
 }
 
 function TabBar({ activeTab, onChangeTab }) {
+  const t = useT()
   return (
     <div className="tab-bar" role="tablist">
       <button
@@ -455,7 +479,7 @@ function TabBar({ activeTab, onChangeTab }) {
         className={`tab-bar__btn${activeTab === 'route' ? ' tab-bar__btn--active' : ''}`}
         onClick={() => onChangeTab('route')}
       >
-        Route
+        {t('Route', 'रास्ता')}
       </button>
       <button
         role="tab"
@@ -463,7 +487,7 @@ function TabBar({ activeTab, onChangeTab }) {
         className={`tab-bar__btn${activeTab === 'nowcast' ? ' tab-bar__btn--active' : ''}`}
         onClick={() => onChangeTab('nowcast')}
       >
-        Nowcast
+        {t('Nowcast', 'तात्कालिक पूर्वानुमान')}
       </button>
       <button
         role="tab"
@@ -471,7 +495,7 @@ function TabBar({ activeTab, onChangeTab }) {
         className={`tab-bar__btn${activeTab === 'chat' ? ' tab-bar__btn--active' : ''}`}
         onClick={() => onChangeTab('chat')}
       >
-        Ask AI
+        {t('Ask AI', 'AI से पूछें')}
       </button>
     </div>
   )
@@ -480,21 +504,22 @@ function TabBar({ activeTab, onChangeTab }) {
 // ── Ask AI (rain chatbot) ──────────────────────────────────────────────────────
 const CHAT_URL = `${API_BASE}/chat`
 
-const TOOL_LABELS = {
-  geocode_place: 'Finding location…',
-  get_nowcast: 'Checking radar…',
-  get_route_rain: 'Scanning your route…',
-  get_rain_movement: 'Reading rain movement…',
-  get_accuracy_stats: 'Fetching accuracy stats…',
-}
+const toolLabel = (key) => ({
+  geocode_place: tr('Finding location…', 'स्थान खोजा जा रहा है…'),
+  get_nowcast: tr('Checking radar…', 'रडार जाँचा जा रहा है…'),
+  get_route_rain: tr('Scanning your route…', 'आपका रास्ता स्कैन हो रहा है…'),
+  get_rain_movement: tr('Reading rain movement…', 'बारिश की गति पढ़ी जा रही है…'),
+  get_accuracy_stats: tr('Fetching accuracy stats…', 'सटीकता आँकड़े लाए जा रहे हैं…'),
+}[key])
 
-const CHAT_SUGGESTIONS = [
-  'Will it rain in Connaught Place in the next hour?',
-  'Should I leave now or wait 30 minutes?',
-  'Is it raining on the route from Noida to Gurgaon?',
+const chatSuggestions = () => [
+  tr('Will it rain in Connaught Place in the next hour?', 'क्या अगले एक घंटे में कनॉट प्लेस में बारिश होगी?'),
+  tr('Should I leave now or wait 30 minutes?', 'क्या मैं अभी निकलूँ या 30 मिनट रुकूँ?'),
+  tr('Is it raining on the route from Noida to Gurgaon?', 'क्या नोएडा से गुड़गांव के रास्ते में बारिश हो रही है?'),
 ]
 
 function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
+  const t = useT()
   const { user } = useAuth()
   const [messages, setMessages] = useState([])   // {role:'user'|'model', text}
   const [input, setInput] = useState('')
@@ -529,11 +554,11 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
       })
 
       if (resp.status === 503) {
-        appendToModel('⚠️ The AI assistant isn’t configured yet on the server (missing API key).')
+        appendToModel(t('⚠️ The AI assistant isn’t configured yet on the server (missing API key).', '⚠️ AI सहायक अभी सर्वर पर कॉन्फ़िगर नहीं है (API key नहीं है)।'))
         return
       }
       if (!resp.ok || !resp.body) {
-        appendToModel(`⚠️ Something went wrong (HTTP ${resp.status}). Please try again.`)
+        appendToModel(t(`⚠️ Something went wrong (HTTP ${resp.status}). Please try again.`, `⚠️ कुछ गड़बड़ हो गई (HTTP ${resp.status})। कृपया फिर से कोशिश करें।`))
         return
       }
 
@@ -559,7 +584,7 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
             setToolStatus('')
             appendToModel(evt.delta)
           } else if (evt.type === 'tool') {
-            setToolStatus(TOOL_LABELS[evt.name] || 'Working…')
+            setToolStatus(toolLabel(evt.name) || t('Working…', 'काम चल रहा है…'))
           } else if (evt.type === 'error') {
             setToolStatus('')
             appendToModel((prev) => (prev ? prev + '\n\n' : '') + `⚠️ ${evt.message}`)
@@ -569,7 +594,7 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
         }
       }
     } catch (err) {
-      appendToModel('⚠️ Couldn’t reach the server. Check your connection and try again.')
+      appendToModel(t('⚠️ Couldn’t reach the server. Check your connection and try again.', '⚠️ सर्वर तक नहीं पहुँच पाए। अपना कनेक्शन जाँचें और फिर कोशिश करें।'))
     } finally {
       setSending(false)
       setToolStatus('')
@@ -599,16 +624,17 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
           <span className="nav__right">
             <span className="nav__live" aria-hidden>
               <span className="nav__live-dot" />
-              LIVE
+              {t('LIVE', 'लाइव')}
             </span>
+            <LangToggle />
             <AccountButton />
             <SavedMenu apiBase={API_BASE} onPick={onPickSaved} />
           </span>
         </nav>
         <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
         <SignInGate
-          title="Sign in to ask the AI"
-          sub="The rain assistant is tied to your account. Route check and nowcast stay free — no login needed there."
+          title={t('Sign in to ask the AI', 'AI से पूछने के लिए साइन इन करें')}
+          sub={t('The rain assistant is tied to your account. Route check and nowcast stay free — no login needed there.', 'बारिश सहायक आपके खाते से जुड़ा है। रास्ता जाँच और तात्कालिक पूर्वानुमान मुफ़्त हैं — वहाँ लॉगिन की ज़रूरत नहीं।')}
         />
       </div>
     )
@@ -621,8 +647,9 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
         <span className="nav__right">
           <span className="nav__live" aria-hidden>
             <span className="nav__live-dot" />
-            LIVE
+            {t('LIVE', 'लाइव')}
           </span>
+          <LangToggle />
           <AccountButton />
           <SavedMenu apiBase={API_BASE} onPick={onPickSaved} />
         </span>
@@ -633,9 +660,9 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
       <div className="chat" ref={scrollRef}>
         {isEmpty && (
           <div className="chat__intro">
-            <div className="chat__intro-title">Ask about the rain 🌧️</div>
+            <div className="chat__intro-title">{t('Ask about the rain 🌧️', 'बारिश के बारे में पूछें 🌧️')}</div>
             <div className="chat__suggestions">
-              {CHAT_SUGGESTIONS.map((s) => (
+              {chatSuggestions().map((s) => (
                 <button key={s} className="chat__chip" type="button" onClick={() => send(s)}>
                   {s}
                 </button>
@@ -666,13 +693,13 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
         <input
           className="chat__input"
           type="text"
-          placeholder="Ask about the rain…"
+          placeholder={t('Ask about the rain…', 'बारिश के बारे में पूछें…')}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={sending}
         />
         <button className="chat__send" type="submit" disabled={sending || !input.trim()}>
-          {sending ? '…' : 'Send'}
+          {sending ? '…' : t('Send', 'भेजें')}
         </button>
       </form>
     </div>
@@ -681,11 +708,12 @@ function ChatPage({ activeTab, onChangeTab, onPickSaved }) {
 
 // ── Rain Timeline Bar ─────────────────────────────────────────────────────────
 function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown }) {
+  const t = useT()
   if (!patches?.length || !lastEta || lastEta <= 0) return null
   const first = patches[0]
   const duration = Math.round(first.endMin - first.startMin)
   const firstLabel = duration <= 1
-    ? `Rain at ${toIST(first.startMin)}`
+    ? t(`Rain at ${toIST(first.startMin)}`, `${toIST(first.startMin)} पर बारिश`)
     : `${toIST(first.startMin)} – ${toIST(first.endMin)}`
 
   return (
@@ -713,8 +741,8 @@ function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown })
 
       <button className="breakdown-toggle" type="button" onClick={onToggleBreakdown}>
         {showBreakdown
-          ? 'Hide breakdown'
-          : `See full breakdown (${patches.length} rain ${patches.length === 1 ? 'zone' : 'zones'})`}
+          ? t('Hide breakdown', 'विवरण छिपाएँ')
+          : t(`See full breakdown (${patches.length} rain ${patches.length === 1 ? 'zone' : 'zones'})`, `पूरा विवरण देखें (${patches.length} बारिश ${patches.length === 1 ? 'क्षेत्र' : 'क्षेत्र'})`)}
       </button>
 
       {showBreakdown && (
@@ -722,9 +750,9 @@ function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown })
           {patches.map((p, i) => {
             const decay = p.decayStatus || 'stable'
             const decayLabel =
-              decay === 'dead' ? 'Likely clear'
-              : decay === 'dying' ? 'Fading fast'
-              : decay === 'weakening' ? 'Weakening'
+              decay === 'dead' ? t('Likely clear', 'साफ होने की संभावना')
+              : decay === 'dying' ? t('Fading fast', 'तेज़ी से कम हो रही')
+              : decay === 'weakening' ? t('Weakening', 'कमज़ोर हो रही')
               : null
             return (
               <div
@@ -737,7 +765,7 @@ function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown })
                 />
                 <div className="breakdown__info">
                   <span className="breakdown__time">{toIST(p.startMin)} – {toIST(p.endMin)}</span>
-                  <span className="breakdown__intensity">{p.intensity || 'Light'} Rain</span>
+                  <span className="breakdown__intensity">{tRainLabel(p.intensity || 'Light')} {t('Rain', 'बारिश')}</span>
                 </div>
                 {decayLabel && (
                   <span className={`decay-chip decay-chip--${decay}`}>{decayLabel}</span>
@@ -754,6 +782,7 @@ function RainTimelineBar({ patches, lastEta, showBreakdown, onToggleBreakdown })
 // ── Nowcast Components ────────────────────────────────────────────────────────
 
 function NowcastSlots({ slots }) {
+  const t = useT()
   if (!Array.isArray(slots) || !slots.length) return null
   return (
     <div className="nc-slots">
@@ -763,11 +792,11 @@ function NowcastSlots({ slots }) {
         const filled = Math.round(conf / 10)
         const hasRain = slot.has_rain
         const decayLabel =
-          slot.decay_status === 'dying' ? 'Fading'
-          : slot.decay_status === 'dead' ? 'Clearing'
-          : slot.decay_status === 'weakening' ? 'Weakening'
-          : slot.decay_status === 'new_cell' ? 'New storm'
-          : slot.decay_status === 'growing' ? 'Intensifying'
+          slot.decay_status === 'dying' ? t('Fading', 'कम हो रही')
+          : slot.decay_status === 'dead' ? t('Clearing', 'साफ हो रही')
+          : slot.decay_status === 'weakening' ? t('Weakening', 'कमज़ोर हो रही')
+          : slot.decay_status === 'new_cell' ? t('New storm', 'नया बादल')
+          : slot.decay_status === 'growing' ? t('Intensifying', 'तेज़ हो रही')
           : null
         const isNow = i === 0
 
@@ -777,7 +806,7 @@ function NowcastSlots({ slots }) {
             className={`nc-slot${hasRain ? ' nc-slot--rain' : ' nc-slot--clear'}${isNow ? ' nc-slot--now' : ''}`}
           >
             <span className="nc-slot__time">
-              {isNow ? 'Now' : timeIST}
+              {isNow ? t('Now', 'अभी') : timeIST}
             </span>
             <div className="nc-slot__bar" aria-hidden>
               {Array.from({ length: 10 }, (_, j) => (
@@ -788,7 +817,7 @@ function NowcastSlots({ slots }) {
               ))}
             </div>
             <span className="nc-slot__label">
-              {hasRain ? (slot.intensity || 'Rain') : 'No Rain'}
+              {hasRain ? tRainLabel(slot.intensity || 'Rain') : t('No Rain', 'बारिश नहीं')}
             </span>
             <span className={`nc-slot__prob${!hasRain ? ' nc-slot__prob--clear' : ''}`}>
               {hasRain ? `${conf}%` : '—'}
@@ -804,6 +833,7 @@ function NowcastSlots({ slots }) {
 }
 
 function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
+  const t = useT()
   const [frames, setFrames] = useState(null)
   const [idx, setIdx] = useState(0)
   const [playing, setPlaying] = useState(true)
@@ -826,7 +856,7 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
     setFrames(null); setIdx(0); setPlaying(true); setFcError(null)
     axios.get(`${API_BASE}/nowcast/forecast_frames`, { params: { lat, lon, _: requestId } })
       .then((r) => { if (alive && Array.isArray(r.data?.frames) && r.data.frames.length) setFrames(r.data.frames) })
-      .catch(() => { if (alive) setFcError('Forecast animation unavailable right now.') })
+      .catch(() => { if (alive) setFcError(t('Forecast animation unavailable right now.', 'पूर्वानुमान एनिमेशन अभी उपलब्ध नहीं है।')) })
     return () => { alive = false }
   }, [lat, lon, requestId])
 
@@ -842,7 +872,7 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
   }, [playing, frames])
 
   if (fcError) return <p className="nc-forecast-note">{fcError}</p>
-  if (!frames) return <p className="nc-forecast-note">Rendering forecast animation…</p>
+  if (!frames) return <p className="nc-forecast-note">{t('Rendering forecast animation…', 'पूर्वानुमान एनिमेशन बन रहा है…')}</p>
 
   const cur = frames[idx]
   return (
@@ -853,7 +883,7 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
           type="button"
           className="nc-forecast-playbtn"
           onClick={() => setPlaying((p) => !p)}
-          aria-label={playing ? 'Pause animation' : 'Play animation'}
+          aria-label={playing ? t('Pause animation', 'एनिमेशन रोकें') : t('Play animation', 'एनिमेशन चलाएँ')}
         >
           {playing ? (
             <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden>
@@ -867,7 +897,7 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
           )}
         </button>
       </div>
-      <div className="nc-forecast-scrub" role="tablist" aria-label="Forecast frames">
+      <div className="nc-forecast-scrub" role="tablist" aria-label={t('Forecast frames', 'पूर्वानुमान फ्रेम')}>
         {frames.map((f, i) => (
           <button
             key={f.slot_mins}
@@ -880,8 +910,8 @@ function ForecastRadarPlayer({ lat, lon, requestId, highlightEta = null }) {
             }
             onClick={() => { setIdx(i); setPlaying(false) }}
           >
-            {f.slot_mins === 0 ? 'Now' : `+${f.slot_mins}m`}
-            {i === highlightIdx && <span className="nc-forecast-dot__eta-badge">ETA</span>}
+            {f.slot_mins === 0 ? t('Now', 'अभी') : `+${f.slot_mins}${t('m', 'मि')}`}
+            {i === highlightIdx && <span className="nc-forecast-dot__eta-badge">{t('ETA', 'पहुँच')}</span>}
           </button>
         ))}
       </div>
@@ -975,6 +1005,7 @@ function b64ToBytes(b64) {
 }
 
 function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
+  const t = useT()
   const [scene, setScene] = useState(null)
   const [error, setError] = useState(null)
   const [playing, setPlaying] = useState(true)
@@ -989,7 +1020,7 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
     setScene(null); setError(null); setPlaying(true); playingRef.current = true; tRef.current = null
     axios.get(`${API_BASE}/nowcast/radar_scene`, { params: { lat, lon, _: requestId } })
       .then((r) => { if (alive && r.data?.history?.length) setScene(r.data) })
-      .catch(() => { if (alive) setError('Radar animation unavailable right now.') })
+      .catch(() => { if (alive) setError(t('Radar animation unavailable right now.', 'रडार एनिमेशन अभी उपलब्ध नहीं है।')) })
     return () => { alive = false }
   }, [lat, lon, requestId])
 
@@ -1168,10 +1199,11 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
     if (t <= -m.lag) {
       let nearest = m.history[0]
       for (const h of m.history) if (Math.abs(h.t - t) < Math.abs(nearest.t - t)) nearest = h
-      timeLabel = `${nearest.timeIst} IST`
+      timeLabel = `${nearest.timeIst} ${tr('IST', 'IST')}`
     } else {
-      timeLabel = tt === 0 ? 'NOW' : (tt > 0 ? `+${tt} MIN` : `−${-tt} MIN`)
+      timeLabel = tt === 0 ? tr('NOW', 'अभी') : (tt > 0 ? `+${tt} ${tr('MIN', 'मिनट')}` : `−${-tt} ${tr('MIN', 'मिनट')}`)
     }
+    // mode stays an English token (used for CSS class); translated at render.
     const mode = t <= -m.lag ? 'OBSERVED' : t <= 0 ? 'RADAR LAG · EST' : 'FORECAST'
     setBadge((old) => (old.time === timeLabel && old.mode === mode ? old : { time: timeLabel, mode }))
     const track = trackRef.current
@@ -1228,13 +1260,18 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
   }
 
   if (error) return <p className="nc-forecast-note">{error}</p>
-  if (!scene) return <p className="nc-forecast-note">Loading radar scene…</p>
+  if (!scene) return <p className="nc-forecast-note">{t('Loading radar scene…', 'रडार दृश्य लोड हो रहा है…')}</p>
 
   const m = model
+  const modeLabel = (mode) => (
+    mode === 'FORECAST' ? t('FORECAST', 'पूर्वानुमान')
+    : mode === 'OBSERVED' ? t('OBSERVED', 'देखा गया')
+    : t('RADAR LAG · EST', 'रडार देरी · अनुमान')
+  )
   const jumpTargets = [
     ...m.history.map((h) => ({ t: h.t, label: h.timeIst })),
-    { t: 0, label: 'Now' },
-    ...[15, 30, 45, 60].map((x) => ({ t: x, label: `+${x}m` })),
+    { t: 0, label: t('Now', 'अभी') },
+    ...[15, 30, 45, 60].map((x) => ({ t: x, label: `+${x}${t('m', 'मि')}` })),
   ]
   const etaNum = Number(highlightEta)
   const etaPct = Number.isFinite(etaNum) && etaNum >= 0 && etaNum <= 60
@@ -1243,16 +1280,16 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
   return (
     <>
       <div className="nc-forecast-stage rsp-stage">
-        <canvas ref={canvasRef} width={480} height={480} className="rsp-canvas" aria-label="Radar animation" />
+        <canvas ref={canvasRef} width={480} height={480} className="rsp-canvas" aria-label={t('Radar animation', 'रडार एनिमेशन')} />
         <span className="rsp-badge rsp-badge--time">{badge.time}</span>
         <span className={`rsp-badge rsp-badge--mode rsp-mode-${badge.mode === 'FORECAST' ? 'fc' : badge.mode === 'OBSERVED' ? 'obs' : 'est'}`}>
-          {badge.mode}
+          {modeLabel(badge.mode)}
         </span>
         <button
           type="button"
           className="nc-forecast-playbtn"
           onClick={() => { playingRef.current = !playingRef.current; setPlaying(playingRef.current) }}
-          aria-label={playing ? 'Pause animation' : 'Play animation'}
+          aria-label={playing ? t('Pause animation', 'एनिमेशन रोकें') : t('Play animation', 'एनिमेशन चलाएँ')}
         >
           {playing ? (
             <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden>
@@ -1272,7 +1309,7 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
         onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); seek(e) }}
         onPointerMove={(e) => { if (e.buttons) seek(e) }}
         role="slider"
-        aria-label="Timeline"
+        aria-label={t('Timeline', 'समयरेखा')}
         tabIndex={0}
       >
         <div className="rsp-rail" style={{ '--zero': `${((0 - m.tMin) / (60 - m.tMin)) * 100}%` }} />
@@ -1283,7 +1320,7 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
             style={{ left: `${((j.t - m.tMin) / (60 - m.tMin)) * 100}%` }}
           />
         ))}
-        {etaPct != null && <span className="rsp-tick rsp-tick--eta" style={{ left: `${etaPct}%` }} title="Your ETA" />}
+        {etaPct != null && <span className="rsp-tick rsp-tick--eta" style={{ left: `${etaPct}%` }} title={t('Your ETA', 'आपकी पहुँच')} />}
         <div className="rsp-thumb" />
       </div>
       <div className="nc-forecast-scrub">
@@ -1298,14 +1335,14 @@ function RadarScenePlayer({ lat, lon, requestId, highlightEta = null }) {
           </button>
         ))}
       </div>
-      <div className="rsp-legend" aria-label="Rain intensity colors">
+      <div className="rsp-legend" aria-label={t('Rain intensity colors', 'बारिश तीव्रता के रंग')}>
         {[
-          ['#256cc7', 'Drizzle'],
-          ['#3ac8b2', 'Light'],
-          ['#f9d02e', 'Moderate'],
-          ['#fb9c26', 'Heavy'],
-          ['#ee363e', 'Very heavy'],
-          ['#c846ff', 'Extreme'],
+          ['#256cc7', t('Drizzle', 'बूँदाबाँदी')],
+          ['#3ac8b2', t('Light', 'हल्की')],
+          ['#f9d02e', t('Moderate', 'मध्यम')],
+          ['#fb9c26', t('Heavy', 'तेज़')],
+          ['#ee363e', t('Very heavy', 'बहुत तेज़')],
+          ['#c846ff', t('Extreme', 'अत्यधिक')],
         ].map(([c, label]) => (
           <span key={label} className="rsp-legend__item">
             <span className="rsp-legend__chip" style={{ background: c }} />
@@ -1327,6 +1364,7 @@ function urlBase64ToUint8Array(base64String) {
 }
 
 function RainAlertsCard({ lat, lon, label }) {
+  const t = useT()
   const { authHeaders } = useAuth()
   const [status, setStatus] = useState('idle') // idle|working|enabled|unsupported|denied|error
   const [note, setNote] = useState(null)
@@ -1387,7 +1425,7 @@ function RainAlertsCard({ lat, lon, label }) {
     } catch (e) {
       console.error('rain alerts enable failed:', e)
       setStatus('error')
-      setNote(`${e?.name || 'Error'}: ${(e?.message || String(e)).slice(0, 140)}`)
+      setNote(`${e?.name || tr('Error', 'त्रुटि')}: ${(e?.message || String(e)).slice(0, 140)}`)
     }
   }
 
@@ -1414,20 +1452,20 @@ function RainAlertsCard({ lat, lon, label }) {
     <div className="alerts-card">
       <div className="alerts-card__row">
         <div className="alerts-card__text">
-          <span className="alerts-card__title">🔔 Rain alerts</span>
+          <span className="alerts-card__title">{t('🔔 Rain alerts', '🔔 बारिश अलर्ट')}</span>
           <span className="alerts-card__sub">
             {status === 'enabled'
-              ? `Watching ${note || 'your saved location'} — you'll be notified when rain is here or up to ~105 min away.`
+              ? t(`Watching ${note || 'your saved location'} — you'll be notified when rain is here or up to ~105 min away.`, `${note || 'आपका सहेजा गया स्थान'} पर नज़र रखी जा रही है — जब यहाँ बारिश हो या ~105 मिनट दूर हो, आपको सूचित किया जाएगा।`)
               : status === 'denied'
-                ? 'Notifications are blocked in your browser settings.'
+                ? t('Notifications are blocked in your browser settings.', 'आपके ब्राउज़र सेटिंग्स में सूचनाएँ अवरुद्ध हैं।')
                 : status === 'error'
-                  ? `Could not enable alerts${note ? ` — ${note}` : ' — try again in a moment.'}`
-                  : 'Get notified when rain reaches this location, or is up to ~105 min away (radar-based estimate).'}
+                  ? (note ? t(`Could not enable alerts — ${note}`, `अलर्ट चालू नहीं हो सके — ${note}`) : t('Could not enable alerts — try again in a moment.', 'अलर्ट चालू नहीं हो सके — कुछ देर में फिर कोशिश करें।'))
+                  : t('Get notified when rain reaches this location, or is up to ~105 min away (radar-based estimate).', 'जब बारिश इस स्थान पर पहुँचे या ~105 मिनट दूर हो, सूचना पाएँ (रडार-आधारित अनुमान)।')}
           </span>
         </div>
         {status === 'enabled' ? (
           <button type="button" className="alerts-card__btn alerts-card__btn--off" onClick={disable}>
-            Disable
+            {t('Disable', 'बंद करें')}
           </button>
         ) : (
           <button
@@ -1436,7 +1474,7 @@ function RainAlertsCard({ lat, lon, label }) {
             disabled={status === 'working' || lat == null || lon == null}
             onClick={enable}
           >
-            {status === 'working' ? 'Enabling…' : 'Enable'}
+            {status === 'working' ? t('Enabling…', 'चालू हो रहा है…') : t('Enable', 'चालू करें')}
           </button>
         )}
       </div>
@@ -1445,6 +1483,7 @@ function RainAlertsCard({ lat, lon, label }) {
 }
 
 function JourneyStopCard({ stop, onClose }) {
+  const t = useT()
   const [nc, setNc] = useState(null)
   const [ncErr, setNcErr] = useState(null)
   const [placeName, setPlaceName] = useState(null)
@@ -1454,7 +1493,7 @@ function JourneyStopCard({ stop, onClose }) {
     setNc(null); setNcErr(null); setPlaceName(null)
     axios.post(NOWCAST_URL, { lat: stop.lat, lon: stop.lon })
       .then((r) => { if (alive) setNc(r.data) })
-      .catch(() => { if (alive) setNcErr('Nowcast unavailable for this point right now.') })
+      .catch(() => { if (alive) setNcErr(t('Nowcast unavailable for this point right now.', 'इस स्थान के लिए तात्कालिक पूर्वानुमान अभी उपलब्ध नहीं है।')) })
     const ac = new AbortController()
     reversePlaceName(stop.lat, stop.lon, ac.signal)
       .then((n) => { if (alive && n) setPlaceName(n) })
@@ -1467,21 +1506,21 @@ function JourneyStopCard({ stop, onClose }) {
     <div className="nc-forecast-card journey-stop-card">
       <div className="journey-stop-card__head">
         <div>
-          <div className="nc-section-label">RAIN STOP · {stop.label?.toUpperCase() || 'RAIN'}</div>
+          <div className="nc-section-label">{t('RAIN STOP', 'बारिश पड़ाव')} · {stop.label ? tRainLabel(stop.label).toUpperCase() : t('RAIN', 'बारिश')}</div>
           <div className="journey-stop-card__place">
             {placeName || `${stop.lat.toFixed(3)}, ${stop.lon.toFixed(3)}`}
           </div>
           <div className="journey-stop-card__meta">
-            You arrive here ~{etaRounded} min into the trip · {toIST(stop.eta_mins)} IST
+            {t(`You arrive here ~${etaRounded} min into the trip`, `आप सफ़र में ~${etaRounded} मिनट पर यहाँ पहुँचेंगे`)} · {toIST(stop.eta_mins)} {t('IST', 'IST')}
           </div>
         </div>
-        <button type="button" className="journey-chip__close" onClick={onClose} aria-label="Close">
+        <button type="button" className="journey-chip__close" onClick={onClose} aria-label={t('Close', 'बंद करें')}>
           ×
         </button>
       </div>
 
       {ncErr && <p className="nc-forecast-note">{ncErr}</p>}
-      {!nc && !ncErr && <p className="nc-forecast-note">Scanning radar at this point…</p>}
+      {!nc && !ncErr && <p className="nc-forecast-note">{t('Scanning radar at this point…', 'इस स्थान पर रडार स्कैन हो रहा है…')}</p>}
       {nc && nc.in_radar_bounds && (
         <>
           <div className={`banner banner--${(nc.rain_slots ?? 0) > 0 ? 'rain' : 'clear'}`} style={{ marginTop: 10 }}>
@@ -1491,12 +1530,12 @@ function JourneyStopCard({ stop, onClose }) {
         </>
       )}
       {nc && !nc.in_radar_bounds && (
-        <p className="nc-forecast-note">This point is outside radar coverage.</p>
+        <p className="nc-forecast-note">{t('This point is outside radar coverage.', 'यह स्थान रडार कवरेज के बाहर है।')}</p>
       )}
 
       <div className="nc-section-label" style={{ marginTop: 14 }}>
-        FORECAST RADAR AT THIS POINT
-        {etaRounded <= 60 ? ' · YOUR ETA FRAME MARKED' : ''}
+        {t('FORECAST RADAR AT THIS POINT', 'इस स्थान पर पूर्वानुमान रडार')}
+        {etaRounded <= 60 ? t(' · YOUR ETA FRAME MARKED', ' · आपकी पहुँच का फ्रेम चिह्नित') : ''}
       </div>
       <RadarScenePlayer
         lat={stop.lat}
@@ -1506,14 +1545,15 @@ function JourneyStopCard({ stop, onClose }) {
       />
       <p className="nc-forecast-note">
         {etaRounded <= 60
-          ? 'The frame marked ETA shows the predicted radar at the time you reach this point.'
-          : 'Your arrival here is beyond the 1-hour animation window.'}
+          ? t('The frame marked ETA shows the predicted radar at the time you reach this point.', 'पहुँच वाला फ्रेम दिखाता है कि जब आप यहाँ पहुँचेंगे तब रडार का अनुमान क्या होगा।')
+          : t('Your arrival here is beyond the 1-hour animation window.', 'यहाँ आपकी पहुँच 1-घंटे की एनिमेशन सीमा से आगे है।')}
       </p>
     </div>
   )
 }
 
 function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc, onPendingConsumed }) {
+  const t = useT()
   const [ncLat, setNcLat] = useState(null)
   const [ncLon, setNcLon] = useState(null)
   const [ncName, setNcName] = useState('')
@@ -1523,7 +1563,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
   useEffect(() => {
     if (!pendingLoc) return
     setNcLat(pendingLoc.lat); setNcLon(pendingLoc.lon)
-    setNcName(pendingLoc.label || 'Saved place')
+    setNcName(pendingLoc.label || t('Saved place', 'सहेजा गया स्थान'))
     setIsMyLoc(false); setNcResult(null); setNcError(null)
     onPendingConsumed && onPendingConsumed()
   }, [pendingLoc])
@@ -1566,7 +1606,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
     if (userLoc && !ncLat) {
       setNcLat(userLoc.lat)
       setNcLon(userLoc.lon)
-      setNcName('My Location')
+      setNcName(t('My Location', 'मेरा स्थान'))
       setIsMyLoc(true)
     }
   }, [userLoc])
@@ -1592,7 +1632,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
     if (!userLoc) return
     setNcLat(userLoc.lat)
     setNcLon(userLoc.lon)
-    setNcName('My Location')
+    setNcName(t('My Location', 'मेरा स्थान'))
     setIsMyLoc(true)
     setNcSearchQuery('')
     setNcSuggestions([])
@@ -1601,13 +1641,13 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
   }
 
   async function handleScan() {
-    if (!ncLat || !ncLon) { setNcError('Please select a location first.'); return }
+    if (!ncLat || !ncLon) { setNcError(t('Please select a location first.', 'कृपया पहले एक स्थान चुनें।')); return }
     setNcError(null)
     setNcLoading(true)
     setNcResult(null)
     setForecastGif(null)
     setRefreshMsg('')
-    setNcScanStatus('Scanning radar…')
+    setNcScanStatus(t('Scanning radar…', 'रडार स्कैन हो रहा है…'))
     try {
       const res = await postWithWarmup(
         NOWCAST_URL,
@@ -1623,8 +1663,8 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
         setRadarDown(true)
       }
     } catch (e) {
-      const detail = e?.response?.data?.detail || e?.message || 'Something went wrong.'
-      setNcError(typeof detail === 'string' ? detail.slice(0, 300) : 'Nowcast failed.')
+      const detail = e?.response?.data?.detail || e?.message || t('Something went wrong.', 'कुछ गड़बड़ हो गई।')
+      setNcError(typeof detail === 'string' ? detail.slice(0, 300) : t('Nowcast failed.', 'तात्कालिक पूर्वानुमान विफल रहा।'))
     } finally {
       setNcLoading(false)
       setNcScanStatus('')
@@ -1653,15 +1693,15 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
       )
       const newFrame = !!res.data?.new_frame
       if (newFrame) {
-        setRefreshMsg('New radar frame arrived — updating…')
+        setRefreshMsg(t('New radar frame arrived — updating…', 'नया रडार फ्रेम आया — अपडेट हो रहा है…'))
         await handleScan()
-        setRefreshMsg('Updated to the newest radar frame.')
+        setRefreshMsg(t('Updated to the newest radar frame.', 'नवीनतम रडार फ्रेम पर अपडेट हो गया।'))
       } else {
-        setRefreshMsg('Already the latest frame — IMD refreshes about every 10 min.')
+        setRefreshMsg(t('Already the latest frame — IMD refreshes about every 10 min.', 'पहले से नवीनतम फ्रेम — IMD लगभग हर 10 मिनट में अपडेट करता है।'))
       }
     } catch (e) {
-      const detail = e?.response?.data?.detail || e?.message || 'Refresh failed.'
-      setRefreshMsg(typeof detail === 'string' ? detail.slice(0, 200) : 'Refresh failed.')
+      const detail = e?.response?.data?.detail || e?.message || t('Refresh failed.', 'रिफ्रेश विफल रहा।')
+      setRefreshMsg(typeof detail === 'string' ? detail.slice(0, 200) : t('Refresh failed.', 'रिफ्रेश विफल रहा।'))
     } finally {
       setRefreshing(false)
       setCooldownLeft(REFRESH_COOLDOWN_SEC)
@@ -1677,8 +1717,9 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
         <span className="nav__right">
           <span className="nav__live" aria-hidden>
             <span className="nav__live-dot" />
-            LIVE
+            {t('LIVE', 'लाइव')}
           </span>
+          <LangToggle />
           <AccountButton />
           <SavedMenu
             apiBase={API_BASE}
@@ -1692,7 +1733,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
       <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
 
       <div className="nc-card">
-        <div className="nc-section-label">SCAN LOCATION</div>
+        <div className="nc-section-label">{t('SCAN LOCATION', 'स्कैन स्थान')}</div>
 
         {/* Current selected location display */}
         {hasLocation && (
@@ -1703,14 +1744,14 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
                 stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
             </svg>
             <div className="nc-loc-text">
-              <span className="nc-loc-name">{ncName || 'Selected Location'}</span>
+              <span className="nc-loc-name">{ncName || t('Selected Location', 'चयनित स्थान')}</span>
               <span className="nc-loc-coords">
                 {Number(ncLat).toFixed(4)}°N, {Number(ncLon).toFixed(4)}°E
               </span>
             </div>
             {userLoc && !isMyLoc && (
               <button className="nc-use-me-btn" type="button" onClick={useMyLocation}>
-                Use me
+                {t('Use me', 'मुझे चुनें')}
               </button>
             )}
           </div>
@@ -1721,7 +1762,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
           <div className="rf-shell">
             <input
               className="rf-input"
-              placeholder={hasLocation ? 'Search a different location…' : 'Search location…'}
+              placeholder={hasLocation ? t('Search a different location…', 'कोई और स्थान खोजें…') : t('Search location…', 'स्थान खोजें…')}
               value={ncSearchQuery}
               onChange={(e) => { setNcSearchQuery(e.target.value); setNcSugOpen(true) }}
               onFocus={() => setNcSugOpen(true)}
@@ -1763,7 +1804,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
               <line x1="1" y1="10" x2="4" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               <line x1="16" y1="10" x2="19" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
-            Use my current location
+            {t('Use my current location', 'मेरा वर्तमान स्थान उपयोग करें')}
           </button>
         )}
 
@@ -1777,11 +1818,11 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
           {ncLoading ? (
             <>
               <span className="spinner" style={{ borderTopColor: '#05101F', borderColor: 'rgba(5,16,31,0.25)' }} />
-              {ncScanStatus || 'Scanning…'}
+              {ncScanStatus || t('Scanning…', 'स्कैन हो रहा है…')}
             </>
           ) : (
             <>
-              Scan Next 2 Hours
+              {t('Scan Next 2 Hours', 'अगले 2 घंटे स्कैन करें')}
               <svg className="scan-btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden>
                 <path d="M4 10h12M11 5l5 5-5 5" stroke="currentColor" strokeWidth="2.2"
                   strokeLinecap="round" strokeLinejoin="round" />
@@ -1798,10 +1839,10 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
             onClick={saveThisLocation}
             disabled={saveState === 'saving' || saveState === 'saved'}
           >
-            {saveState === 'saved' ? '✓ Added to your saved places'
-              : saveState === 'saving' ? 'Saving…'
-              : saveState === 'error' ? 'Couldn’t save — tap to retry'
-              : '＋ Add to your saved locations'}
+            {saveState === 'saved' ? t('✓ Added to your saved places', '✓ आपके सहेजे गए स्थानों में जोड़ा गया')
+              : saveState === 'saving' ? t('Saving…', 'सहेजा जा रहा है…')
+              : saveState === 'error' ? t('Couldn’t save — tap to retry', 'सहेजा नहीं जा सका — फिर कोशिश करें')
+              : t('＋ Add to your saved locations', '＋ अपने सहेजे गए स्थानों में जोड़ें')}
           </button>
         )}
       </div>
@@ -1810,7 +1851,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
           places live in the ⋮ menu in the top nav). */}
       {hasLocation && (
         <SignInGate
-          title="Sign in for rain alerts & saved places"
+          title={t('Sign in for rain alerts & saved places', 'बारिश अलर्ट और सहेजे गए स्थानों के लिए साइन इन करें')}
         >
           <RainAlertsCard lat={ncLat} lon={ncLon} label={ncName || null} />
         </SignInGate>
@@ -1820,7 +1861,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
         <div className="error-toast" role="alert" aria-live="polite">
           <span className="error-toast__icon" aria-hidden>!</span>
           <div>
-            <div className="error-toast__title">Scan failed</div>
+            <div className="error-toast__title">{t('Scan failed', 'स्कैन विफल')}</div>
             <div className="error-toast__body">{ncError}</div>
           </div>
         </div>
@@ -1831,9 +1872,9 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
 
           {!ncResult.in_radar_bounds ? (
             <div className="banner banner--dying">
-              <p className="banner__head">Outside radar coverage</p>
+              <p className="banner__head">{t('Outside radar coverage', 'रडार कवरेज के बाहर')}</p>
               <p className="banner__sub">
-                This location is outside IMD radar coverage. Try a location in Delhi NCR or Uttar Pradesh.
+                {t('This location is outside IMD radar coverage. Try a location in Delhi NCR or Uttar Pradesh.', 'यह स्थान IMD रडार कवरेज के बाहर है। दिल्ली NCR या उत्तर प्रदेश में कोई स्थान आज़माएँ।')}
               </p>
             </div>
           ) : (
@@ -1844,8 +1885,8 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
 
               <div className="nc-refresh-row">
                 <span className="nc-refresh-age">
-                  Radar as of {ncResult.radar_as_of || 'unknown'}
-                  {ncResult.lag_mins != null ? ` · ${Math.round(ncResult.lag_mins)} min ago` : ''}
+                  {t('Radar as of', 'रडार समय')} {ncResult.radar_as_of || t('unknown', 'अज्ञात')}
+                  {ncResult.lag_mins != null ? ` · ${Math.round(ncResult.lag_mins)} ${t('min ago', 'मिनट पहले')}` : ''}
                 </span>
                 <button
                   type="button"
@@ -1854,10 +1895,10 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
                   onClick={handleRefreshFrame}
                 >
                   {refreshing
-                    ? 'Checking…'
+                    ? t('Checking…', 'जाँचा जा रहा है…')
                     : cooldownLeft > 0
-                      ? `Check again in ${cooldownLeft}s`
-                      : '↻ Check for new frame'}
+                      ? t(`Check again in ${cooldownLeft}s`, `${cooldownLeft}से में फिर जाँचें`)
+                      : t('↻ Check for new frame', '↻ नया फ्रेम जाँचें')}
                 </button>
               </div>
               {refreshMsg && <p className="nc-refresh-msg">{refreshMsg}</p>}
@@ -1865,7 +1906,7 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
               <NowcastSlots slots={ncResult.slots} />
               {forecastGif && (
                 <div className="nc-forecast-card">
-                  <div className="nc-section-label">FORECAST RADAR · NEXT 1 HOUR</div>
+                  <div className="nc-section-label">{t('FORECAST RADAR · NEXT 1 HOUR', 'पूर्वानुमान रडार · अगला 1 घंटा')}</div>
                   <RadarScenePlayer
                     lat={forecastGif.lat}
                     lon={forecastGif.lon}
@@ -1887,10 +1928,10 @@ function NowcastPage({ userLoc, activeTab, onChangeTab, onPickSaved, pendingLoc,
 function fmtDuration(mins) {
   if (mins == null || !Number.isFinite(Number(mins))) return '—'
   const total = Math.round(Number(mins))
-  if (total < 60) return `${total} min`
+  if (total < 60) return `${total} ${tr('min', 'मिनट')}`
   const h = Math.floor(total / 60)
   const m = total % 60
-  return m === 0 ? `${h} h` : `${h} h ${m} min`
+  return m === 0 ? `${h} ${tr('h', 'घं')}` : `${h} ${tr('h', 'घं')} ${m} ${tr('min', 'मिनट')}`
 }
 
 // Pings /health on app load. If the server hasn't answered within ~3 s it is
@@ -1898,6 +1939,7 @@ function fmtDuration(mins) {
 // a friendly note instead of letting the first scan feel broken. Hides itself
 // the moment the server answers; shown at most once per app load.
 function ServerWakeNote() {
+  const t = useT()
   const [waking, setWaking] = useState(false)
   const [dismissed, setDismissed] = useState(false)
 
@@ -1920,14 +1962,13 @@ function ServerWakeNote() {
     <div className="wake-note" role="status" aria-live="polite">
       <span className="wake-note__spinner" aria-hidden />
       <span className="wake-note__text">
-        <strong>Radar server is waking up.</strong> Your first scan can take up to
-        a minute — after that everything is fast.
+        <strong>{t('Radar server is waking up.', 'रडार सर्वर जाग रहा है।')}</strong> {t('Your first scan can take up to a minute — after that everything is fast.', 'आपका पहला स्कैन एक मिनट तक ले सकता है — उसके बाद सब कुछ तेज़ है।')}
       </span>
       <button
         type="button"
         className="wake-note__close"
         onClick={() => setDismissed(true)}
-        aria-label="Dismiss"
+        aria-label={t('Dismiss', 'हटाएँ')}
       >
         ×
       </button>
@@ -2023,6 +2064,7 @@ function InstallPrompt() {
 }
 
 export default function App() {
+  const t = useT()
   const [activeTab, setActiveTab] = useState('route')
   // Tabs mount on first visit and then stay mounted (hidden with CSS) so
   // their state survives tab switches. Route mounts immediately (default tab).
@@ -2157,13 +2199,13 @@ export default function App() {
     const endCity = destination.trim()
     let speedNum = Number(avgSpeedKmh)
     const journeyMinsNum = Number(journeyMins)
-    if (!startCity || !endCity) { setError('Please enter both Source and Destination city names.'); return }
+    if (!startCity || !endCity) { setError(t('Please enter both Source and Destination city names.', 'कृपया शुरुआत और मंज़िल दोनों शहरों के नाम दर्ज करें।')); return }
     if (tripInputMode === 'speed') {
-      if (!Number.isFinite(speedNum) || speedNum <= 0) { setError('Please enter a valid average speed (km/h).'); return }
+      if (!Number.isFinite(speedNum) || speedNum <= 0) { setError(t('Please enter a valid average speed (km/h).', 'कृपया एक वैध औसत गति (किमी/घंटा) दर्ज करें।')); return }
     } else {
-      if (!Number.isFinite(journeyMinsNum) || journeyMinsNum <= 0) { setError('Please enter a valid journey time (minutes).'); return }
+      if (!Number.isFinite(journeyMinsNum) || journeyMinsNum <= 0) { setError(t('Please enter a valid journey time (minutes).', 'कृपया एक वैध सफ़र समय (मिनट) दर्ज करें।')); return }
     }
-    if (!ORS_KEY) { setError('Missing ORS API key. Set `VITE_ORS_API_KEY` in frontend/.env.'); return }
+    if (!ORS_KEY) { setError(t('Missing ORS API key. Set `VITE_ORS_API_KEY` in frontend/.env.', 'ORS API key नहीं है। frontend/.env में `VITE_ORS_API_KEY` सेट करें।')); return }
 
     setError(null); setLoading(true); setResult(null)
     setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null)
@@ -2189,7 +2231,7 @@ export default function App() {
       }
 
       if (!Array.isArray(routeLonLat) || routeLonLat.length < 2) {
-        throw new Error('Route planning failed (ORS returned empty geometry).')
+        throw new Error(t('Route planning failed (ORS returned empty geometry).', 'रास्ता योजना विफल (ORS ने खाली ज्यामिति लौटाई)।'))
       }
 
       let totalKm = 0
@@ -2205,7 +2247,7 @@ export default function App() {
       if (tripInputMode === 'time') {
         speedNum = totalKm / (journeyMinsNum / 60)
         if (!Number.isFinite(speedNum) || speedNum <= 0) {
-          throw new Error('Could not derive speed from the journey time.')
+          throw new Error(t('Could not derive speed from the journey time.', 'सफ़र समय से गति नहीं निकाली जा सकी।'))
         }
       }
 
@@ -2217,7 +2259,7 @@ export default function App() {
       }
 
       const sampled = sampleRouteEvery5Min(routeLonLat, speedNum, 5)
-      if (!sampled.length) throw new Error('Could not sample route into waypoints.')
+      if (!sampled.length) throw new Error(t('Could not sample route into waypoints.', 'रास्ते को वेपॉइंट में विभाजित नहीं किया जा सका।'))
 
       sampledRef.current = sampled
       routeLonLatRef.current = routeLonLat
@@ -2230,7 +2272,7 @@ export default function App() {
         total_waypoints: sampled.length, rain_waypoints: 0, clear_waypoints: sampled.length,
         first_rain_eta: null, first_rain_label: null, rain_direction_from: '—', rain_direction_to: '—',
         rain_speed_kmh: 0, radar_lag_mins: null, radar_freshness: 'pending',
-        radar_message: 'Scanning radar…', route_distance_km: totalKm, waypoints: [], _pending: true,
+        radar_message: t('Scanning radar…', 'रडार स्कैन हो रहा है…'), route_distance_km: totalKm, waypoints: [], _pending: true,
       })
       setLoading(false)
       setScanning(true)
@@ -2261,11 +2303,11 @@ export default function App() {
       const isTimeout = e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '')
       const isNetwork = !status && !e?.response
       const msg = (isTimeout || isNetwork)
-        ? "Couldn't reach the radar server. It may still be waking up — please try again in a minute."
+        ? t("Couldn't reach the radar server. It may still be waking up — please try again in a minute.", 'रडार सर्वर तक नहीं पहुँच पाए। यह अभी भी जाग रहा हो सकता है — कृपया एक मिनट में फिर कोशिश करें।')
         : status
-          ? `Request failed (${status}): ${detail || e?.message || 'Unknown error'}`
-          : e?.message || 'Something went wrong while scanning the radar.'
-      setError(typeof msg === 'string' ? msg : 'Something went wrong.')
+          ? t(`Request failed (${status}): ${detail || e?.message || 'Unknown error'}`, `अनुरोध विफल (${status}): ${detail || e?.message || 'अज्ञात त्रुटि'}`)
+          : e?.message || t('Something went wrong while scanning the radar.', 'रडार स्कैन करते समय कुछ गड़बड़ हो गई।')
+      setError(typeof msg === 'string' ? msg : t('Something went wrong.', 'कुछ गड़बड़ हो गई।'))
       setResult(null); setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null)
     } finally {
       setLoading(false); setScanning(false); setScanStatus('')
@@ -2416,8 +2458,9 @@ export default function App() {
                 <span className="nav__right">
                   <span className="nav__live" aria-hidden>
                     <span className="nav__live-dot" />
-                    LIVE
+                    {t('LIVE', 'लाइव')}
                   </span>
+                  <LangToggle />
                   <AccountButton />
                   <SavedMenu apiBase={API_BASE} onPick={onPickSaved} />
                 </span>
@@ -2427,7 +2470,7 @@ export default function App() {
 
               <section className="hero">
                 <div className="hero__glow" aria-hidden />
-                <h1 className="hero__title">Know the rain<br />before you leave.</h1>
+                <h1 className="hero__title">{t('Know the rain', 'बारिश जानें')}<br />{t('before you leave.', 'निकलने से पहले।')}</h1>
                 <button
                   type="button"
                   className="hero__how"
@@ -2438,7 +2481,7 @@ export default function App() {
                     <path d="M8 8a2 2 0 1 1 2.8 1.83c-.5.22-.8.62-.8 1.17v.3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                     <circle cx="10" cy="14.2" r="1" fill="currentColor" />
                   </svg>
-                  How it works
+                  {t('How it works', 'यह कैसे काम करता है')}
                 </button>
               </section>
 
@@ -2451,12 +2494,12 @@ export default function App() {
                       <div className="rf-dot rf-dot--src" />
                     </div>
                     <div className="rf-body">
-                      <label className="rf-label">FROM</label>
+                      <label className="rf-label">{t('FROM', 'कहाँ से')}</label>
                       <div className="typeahead-wrap">
                         <div className="rf-shell">
                           <input
                             className="rf-input"
-                            placeholder="Starting city"
+                            placeholder={t('Starting city', 'शुरुआती शहर')}
                             value={source}
                             onChange={(e) => { setSource(e.target.value); setSourcePlace(null); setSourceOpen(true) }}
                             onFocus={() => setSourceOpen(true)}
@@ -2471,8 +2514,8 @@ export default function App() {
                                 className="dropdown__item dropdown__item--myloc"
                                 onMouseDown={(e) => e.preventDefault()}
                                 onClick={() => {
-                                  setSource('My Location')
-                                  setSourcePlace({ lat: userLoc.lat, lon: userLoc.lon, display_name: 'My Location' })
+                                  setSource(t('My Location', 'मेरा स्थान'))
+                                  setSourcePlace({ lat: userLoc.lat, lon: userLoc.lon, display_name: t('My Location', 'मेरा स्थान') })
                                   setSourceSug([])
                                   setSourceOpen(false)
                                 }}
@@ -2486,8 +2529,8 @@ export default function App() {
                                   <line x1="16" y1="10" x2="19" y2="10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                                 </svg>
                                 <div>
-                                  <div className="dropdown__primary">My Location</div>
-                                  <div className="dropdown__secondary">Use your current location</div>
+                                  <div className="dropdown__primary">{t('My Location', 'मेरा स्थान')}</div>
+                                  <div className="dropdown__secondary">{t('Use your current location', 'अपना वर्तमान स्थान उपयोग करें')}</div>
                                 </div>
                               </button>
                             )}
@@ -2520,12 +2563,12 @@ export default function App() {
                       <div className="rf-dot rf-dot--dst" />
                     </div>
                     <div className="rf-body">
-                      <label className="rf-label">TO</label>
+                      <label className="rf-label">{t('TO', 'कहाँ तक')}</label>
                       <div className="typeahead-wrap">
                         <div className="rf-shell">
                           <input
                             className="rf-input"
-                            placeholder="Destination city"
+                            placeholder={t('Destination city', 'मंज़िल शहर')}
                             value={destination}
                             onChange={(e) => { setDestination(e.target.value); setDestPlace(null); setDestOpen(true) }}
                             onFocus={() => setDestOpen(true)}
@@ -2557,22 +2600,22 @@ export default function App() {
                 <div className="speed-field">
                   <div className="trip-mode-row">
                     <label className="rf-label">
-                      {tripInputMode === 'speed' ? 'AVG SPEED' : 'JOURNEY TIME'}
+                      {tripInputMode === 'speed' ? t('AVG SPEED', 'औसत गति') : t('JOURNEY TIME', 'सफ़र समय')}
                     </label>
-                    <div className="trip-mode-toggle" role="tablist" aria-label="Input mode">
+                    <div className="trip-mode-toggle" role="tablist" aria-label={t('Input mode', 'इनपुट मोड')}>
                       <button
                         type="button"
                         className={`trip-mode-btn${tripInputMode === 'speed' ? ' is-active' : ''}`}
                         onClick={() => setTripInputMode('speed')}
                       >
-                        Speed
+                        {t('Speed', 'गति')}
                       </button>
                       <button
                         type="button"
                         className={`trip-mode-btn${tripInputMode === 'time' ? ' is-active' : ''}`}
                         onClick={() => setTripInputMode('time')}
                       >
-                        Time
+                        {t('Time', 'समय')}
                       </button>
                     </div>
                   </div>
@@ -2596,19 +2639,19 @@ export default function App() {
                         />
                       )}
                     </div>
-                    <span className="speed-unit">{tripInputMode === 'speed' ? 'km/h' : 'min'}</span>
+                    <span className="speed-unit">{tripInputMode === 'speed' ? t('km/h', 'किमी/घं') : t('min', 'मिनट')}</span>
                   </div>
                   {plannerEstimate && (
                     <p className="speed-estimate">
                       {tripInputMode === 'speed' ? (
                         <>
-                          ≈ {fmtDuration(plannerEstimate.mins)} journey
-                          <span className="speed-estimate__dim"> · ~{Math.round(plannerEstimate.km)} km at {Math.round(plannerEstimate.kmh)} km/h</span>
+                          ≈ {fmtDuration(plannerEstimate.mins)} {t('journey', 'सफ़र')}
+                          <span className="speed-estimate__dim"> · ~{Math.round(plannerEstimate.km)} {t('km at', 'किमी @')} {Math.round(plannerEstimate.kmh)} {t('km/h', 'किमी/घं')}</span>
                         </>
                       ) : (
                         <>
-                          ≈ {Math.round(plannerEstimate.kmh)} km/h avg speed
-                          <span className="speed-estimate__dim"> · ~{Math.round(plannerEstimate.km)} km in {fmtDuration(plannerEstimate.mins)}</span>
+                          ≈ {Math.round(plannerEstimate.kmh)} {t('km/h avg speed', 'किमी/घं औसत गति')}
+                          <span className="speed-estimate__dim"> · ~{Math.round(plannerEstimate.km)} {t('km in', 'किमी में')} {fmtDuration(plannerEstimate.mins)}</span>
                         </>
                       )}
                     </p>
@@ -2625,7 +2668,7 @@ export default function App() {
                     !(tripInputMode === 'speed' ? String(avgSpeedKmh).trim() : String(journeyMins).trim())
                   }
                 >
-                  Scan My Route
+                  {t('Scan My Route', 'मेरा रास्ता स्कैन करें')}
                   <svg className="scan-btn__icon" viewBox="0 0 20 20" fill="none" aria-hidden>
                     <path
                       d="M4 10h12M11 5l5 5-5 5"
@@ -2642,7 +2685,7 @@ export default function App() {
                 <div className="error-toast" role="alert" aria-live="polite">
                   <span className="error-toast__icon" aria-hidden>!</span>
                   <div>
-                    <div className="error-toast__title">Scan failed</div>
+                    <div className="error-toast__title">{t('Scan failed', 'स्कैन विफल')}</div>
                     <div className="error-toast__body">{error}</div>
                   </div>
                 </div>
@@ -2659,8 +2702,8 @@ export default function App() {
                 <div className="radar-ring radar-ring--3" />
                 <div className="radar-center" />
               </div>
-              <p className="loading-label">SCANNING RADAR</p>
-              <p className="loading-sub">Reading IMD frames · Mapping your route</p>
+              <p className="loading-label">{t('SCANNING RADAR', 'रडार स्कैन हो रहा है')}</p>
+              <p className="loading-sub">{t('Reading IMD frames · Mapping your route', 'IMD फ्रेम पढ़े जा रहे हैं · आपका रास्ता मैप हो रहा है')}</p>
             </div>
           )}
 
@@ -2673,10 +2716,10 @@ export default function App() {
                   <svg viewBox="0 0 20 20" fill="none" width="15" height="15" aria-hidden>
                     <path d="M13 4l-6 6 6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  Back
+                  {t('Back', 'वापस')}
                 </button>
                 <span className={`status-pill status-pill--${result._pending ? 'pending' : liveActive ? 'live' : hasRain ? 'rain' : 'clear'}`}>
-                  {result._pending ? 'Scanning…' : liveActive ? '● LIVE' : hasRain ? 'Rain ahead' : 'Clear skies'}
+                  {result._pending ? t('Scanning…', 'स्कैन हो रहा है…') : liveActive ? t('● LIVE', '● लाइव') : hasRain ? t('Rain ahead', 'आगे बारिश') : t('Clear skies', 'साफ आसमान')}
                 </span>
               </nav>
 
@@ -2696,7 +2739,7 @@ export default function App() {
                 >
                   {rainTimeline.decayNote && (
                     <span className={`decay-badge decay-badge--${rainTimeline.decayNote}`}>
-                      {rainTimeline.decayNote === 'dying' ? 'Patch fading' : 'Weakening'}
+                      {rainTimeline.decayNote === 'dying' ? t('Patch fading', 'बादल कम हो रहा') : t('Weakening', 'कमज़ोर हो रहा')}
                     </span>
                   )}
                   <p className="banner__head">{rainTimeline.headline}</p>
@@ -2717,14 +2760,14 @@ export default function App() {
               {/* Stats strip */}
               <div className="stats-strip">
                 <div className="stat">
-                  <span className="stat__label">Distance</span>
+                  <span className="stat__label">{t('Distance', 'दूरी')}</span>
                   <span className="stat__value">
-                    {shownDistanceKm == null ? '—' : `${shownDistanceKm.toFixed(1)} km`}
+                    {shownDistanceKm == null ? '—' : `${shownDistanceKm.toFixed(1)} ${t('km', 'किमी')}`}
                   </span>
                 </div>
                 <div className="stat-div" aria-hidden />
                 <div className="stat">
-                  <span className="stat__label">Journey time</span>
+                  <span className="stat__label">{t('Journey time', 'सफ़र समय')}</span>
                   <span className="stat__value">
                     {result._pending ? '—' : fmtDuration(tripMinutes)}
                   </span>
@@ -2732,16 +2775,16 @@ export default function App() {
                 <div className="stat-div" aria-hidden />
                 <div className="stat">
                   {(() => {
-                    if (result._pending) return (<><span className="stat__label">Rain status</span><span className="stat__value">—</span></>)
+                    if (result._pending) return (<><span className="stat__label">{t('Rain status', 'बारिश स्थिति')}</span><span className="stat__value">—</span></>)
                     const tl = rainTimeline
-                    if (!tl || tl.tone === 'clear' || !tl.closest) return (<><span className="stat__label">Rain</span><span className="stat__value">None</span></>)
+                    if (!tl || tl.tone === 'clear' || !tl.closest) return (<><span className="stat__label">{t('Rain', 'बारिश')}</span><span className="stat__value">{t('None', 'कोई नहीं')}</span></>)
                     const firstEta = Number(tl.closest.startMin) || 0
                     const lastEta = Number(tl.lastEta) || 0
                     const isNow = firstEta <= 2
                     const continuesToEnd = tl.closest.endMin >= lastEta - 2.5
-                    if (isNow && continuesToEnd) return (<><span className="stat__label">Rain duration</span><span className="stat__value">{Math.round(lastEta)} min</span></>)
-                    if (isNow) return (<><span className="stat__label">Rain ends</span><span className="stat__value">{Math.round(tl.closest.endMin)} min</span></>)
-                    return (<><span className="stat__label">Rain starts</span><span className="stat__value">{Math.round(firstEta)} min</span></>)
+                    if (isNow && continuesToEnd) return (<><span className="stat__label">{t('Rain duration', 'बारिश अवधि')}</span><span className="stat__value">{Math.round(lastEta)} {t('min', 'मिनट')}</span></>)
+                    if (isNow) return (<><span className="stat__label">{t('Rain ends', 'बारिश खत्म')}</span><span className="stat__value">{Math.round(tl.closest.endMin)} {t('min', 'मिनट')}</span></>)
+                    return (<><span className="stat__label">{t('Rain starts', 'बारिश शुरू')}</span><span className="stat__value">{Math.round(firstEta)} {t('min', 'मिनट')}</span></>)
                   })()}
                 </div>
               </div>
@@ -2767,7 +2810,7 @@ export default function App() {
                     onClick={() => setLiveActive(true)}
                   >
                     <span className="live-start-btn__dot" aria-hidden />
-                    Start Live Journey
+                    {t('Start Live Journey', 'लाइव सफ़र शुरू करें')}
                   </button>
                 )
               )}
@@ -2778,7 +2821,7 @@ export default function App() {
                   fallback={
                     <div className="map-container">
                       <div style={{ height: 320, display: 'grid', placeItems: 'center', color: 'var(--text-secondary)' }}>
-                        Loading map…
+                        {t('Loading map…', 'नक्शा लोड हो रहा है…')}
                       </div>
                     </div>
                   }
@@ -2797,8 +2840,8 @@ export default function App() {
                 {scanning && (
                   <div className="scan-overlay" role="status" aria-live="polite">
                     <span className="spinner" aria-hidden />
-                    <span className="scan-overlay__label">SCANNING RADAR…</span>
-                    {scanStatus && scanStatus !== 'Scanning radar…' && (
+                    <span className="scan-overlay__label">{t('SCANNING RADAR…', 'रडार स्कैन हो रहा है…')}</span>
+                    {scanStatus && scanStatus !== tr('Scanning radar…', 'रडार स्कैन हो रहा है…') && (
                       <span className="scan-overlay__sub">{scanStatus}</span>
                     )}
                   </div>
@@ -2815,16 +2858,16 @@ export default function App() {
 
               {/* Legend */}
               <div className="legend">
-                <span className="legend__title">Route colors</span>
+                <span className="legend__title">{t('Route colors', 'रास्ते के रंग')}</span>
                 <div className="legend__chips">
                   {[
-                    { cls: 'veryheavy', label: 'Very Heavy' },
-                    { cls: 'heavy',     label: 'Heavy' },
-                    { cls: 'moderate',  label: 'Moderate' },
-                    { cls: 'light',     label: 'Light' },
-                    { cls: 'verylight', label: 'Very Light' },
-                    { cls: 'norain',    label: 'No Rain' },
-                    { cls: 'unknown',   label: 'Out of radar' },
+                    { cls: 'veryheavy', label: t('Very Heavy', 'बहुत तेज़') },
+                    { cls: 'heavy',     label: t('Heavy', 'तेज़') },
+                    { cls: 'moderate',  label: t('Moderate', 'मध्यम') },
+                    { cls: 'light',     label: t('Light', 'हल्की') },
+                    { cls: 'verylight', label: t('Very Light', 'बहुत हल्की') },
+                    { cls: 'norain',    label: t('No Rain', 'बारिश नहीं') },
+                    { cls: 'unknown',   label: t('Out of radar', 'रडार के बाहर') },
                   ].map(({ cls, label }) => (
                     <div key={cls} className="legend__chip">
                       <span className={`legend__swatch legend__swatch--${cls}`} aria-hidden />

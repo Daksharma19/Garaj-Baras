@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
+import { useT, tr } from './i18n'
 
 // ── Live Journey ──────────────────────────────────────────────────────────────
 // Two clocks:
@@ -28,6 +29,18 @@ function urlBase64ToUint8Array(base64String) {
   return arr
 }
 
+// Localize a backend rain-intensity label for display.
+function rainLabelTr(label) {
+  const map = {
+    'No Rain': 'बारिश नहीं', 'Rain': 'बारिश',
+    'Very Light Rain': 'बहुत हल्की बारिश', 'Light Rain': 'हल्की बारिश',
+    'Moderate Rain': 'मध्यम बारिश', 'Heavy Rain': 'तेज़ बारिश',
+    'Very Heavy Rain': 'बहुत तेज़ बारिश',
+  }
+  const hi = map[String(label || '').trim()]
+  return hi ? tr(label, hi) : label
+}
+
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371
   const dLat = ((lat2 - lat1) * Math.PI) / 180
@@ -44,10 +57,10 @@ function istClock(offsetMins = 0) {
 
 function fmtMins(mins) {
   const m = Math.max(1, Math.round(mins))
-  if (m < 60) return `~${m} min`
+  if (m < 60) return `~${m} ${tr('min', 'मिनट')}`
   const h = Math.floor(m / 60)
   const r = m % 60
-  return r === 0 ? `~${h} h` : `~${h} h ${r} min`
+  return r === 0 ? `~${h} ${tr('h', 'घं')}` : `~${h} ${tr('h', 'घं')} ${r} ${tr('min', 'मिनट')}`
 }
 
 /** cumKm[i] = distance along routeCoords ([lat,lon]) up to vertex i */
@@ -161,6 +174,7 @@ export default function LiveJourneyPanel({
   onWaypointsUpdated, // (rawResponseData) → App merges + recolors segments
   onEnd,
 }) {
+  const t = useT()
   const cumKm = useMemo(() => buildCumKm(routeCoords), [routeCoords])
   const totalKm = cumKm[cumKm.length - 1] || 0
 
@@ -202,7 +216,7 @@ export default function LiveJourneyPanel({
     aliveRef.current = true
     if (!('geolocation' in navigator)) {
       setPhase('geo_error')
-      setGeoMsg('Location is not supported in this browser.')
+      setGeoMsg(t('Location is not supported in this browser.', 'इस ब्राउज़र में लोकेशन समर्थित नहीं है।'))
       return
     }
     const watchId = navigator.geolocation.watchPosition(
@@ -244,8 +258,8 @@ export default function LiveJourneyPanel({
         if (!aliveRef.current || fixRef.current) return
         setPhase('geo_error')
         setGeoMsg(err?.code === 1
-          ? 'Location permission denied — allow it to track your journey.'
-          : 'Could not get a GPS fix. Move somewhere with better signal.')
+          ? t('Location permission denied — allow it to track your journey.', 'लोकेशन अनुमति अस्वीकृत — सफ़र ट्रैक करने के लिए इसे अनुमति दें।')
+          : t('Could not get a GPS fix. Move somewhere with better signal.', 'GPS सिग्नल नहीं मिल पाया। बेहतर सिग्नल वाली जगह जाएँ।'))
       },
       { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 },
     )
@@ -392,10 +406,10 @@ export default function LiveJourneyPanel({
         (beforeCd?.kind !== afterCd?.kind) ||
         (beforeMins != null && afterMins != null && Math.abs(beforeMins - afterMins) > SHIFT_NOTE_MIN)
       if (newFrame || shifted) {
-        setUpdateNote(`${newFrame ? 'New radar frame' : 'Radar re-check'} · updated ${istClock()} IST`)
+        setUpdateNote(`${newFrame ? t('New radar frame', 'नया रडार फ्रेम') : t('Radar re-check', 'रडार पुनः जाँच')} · ${t('updated', 'अपडेट')} ${istClock()} ${t('IST', 'IST')}`)
       }
     } catch {
-      if (aliveRef.current) setUpdateNote(`Radar sync failed — retrying in 5 min`)
+      if (aliveRef.current) setUpdateNote(t(`Radar sync failed — retrying in 5 min`, 'रडार सिंक विफल — 5 मिनट में फिर कोशिश'))
     } finally {
       repredictingRef.current = false
       nextSyncAtRef.current = Date.now() + REPREDICT_MS
@@ -449,9 +463,9 @@ export default function LiveJourneyPanel({
   const eta = speedForEta() > 0 ? (remainKm / speedForEta()) * 60 : null
   const decayChip =
     countdown?.kind === 'ahead' && countdown.decay && countdown.decay !== 'stable'
-      ? countdown.decay === 'dying' || countdown.decay === 'dead' ? 'Fading fast'
-        : countdown.decay === 'weakening' ? 'Weakening'
-        : countdown.decay === 'growing' ? 'Intensifying'
+      ? countdown.decay === 'dying' || countdown.decay === 'dead' ? t('Fading fast', 'तेज़ी से कम हो रही')
+        : countdown.decay === 'weakening' ? t('Weakening', 'कमज़ोर हो रही')
+        : countdown.decay === 'growing' ? t('Intensifying', 'तेज़ हो रही')
         : null
       : null
 
@@ -459,22 +473,22 @@ export default function LiveJourneyPanel({
   if (arrived) {
     hero = (
       <div className="live-hero live-hero--clear">
-        <span className="live-hero__big">You've arrived 🏁</span>
-        <span className="live-hero__sub">Journey complete.</span>
+        <span className="live-hero__big">{t("You've arrived 🏁", 'आप पहुँच गए 🏁')}</span>
+        <span className="live-hero__sub">{t('Journey complete.', 'सफ़र पूरा हुआ।')}</span>
       </div>
     )
   } else if (phase === 'geo_error') {
     hero = (
       <div className="live-hero live-hero--warn">
-        <span className="live-hero__big">No GPS</span>
+        <span className="live-hero__big">{t('No GPS', 'GPS नहीं')}</span>
         <span className="live-hero__sub">{geoMsg}</span>
       </div>
     )
   } else if (phase === 'starting' && !countdown) {
     hero = (
       <div className="live-hero">
-        <span className="live-hero__big live-hero__big--dim">Locating…</span>
-        <span className="live-hero__sub">Locking onto your GPS position.</span>
+        <span className="live-hero__big live-hero__big--dim">{t('Locating…', 'स्थान खोजा जा रहा है…')}</span>
+        <span className="live-hero__sub">{t('Locking onto your GPS position.', 'आपकी GPS स्थिति पकड़ी जा रही है।')}</span>
       </div>
     )
   } else if (countdown?.kind === 'ahead') {
@@ -482,34 +496,34 @@ export default function LiveJourneyPanel({
     hero = (
       <div className="live-hero live-hero--rain">
         <span className="live-hero__label">
-          {countdown.label} ahead
+          {t(`${rainLabelTr(countdown.label)} ahead`, `आगे ${rainLabelTr(countdown.label)}`)}
           {decayChip && <span className={`decay-chip decay-chip--${countdown.decay}`}>{decayChip}</span>}
         </span>
-        <span className="live-hero__big">{now ? 'Reaching you now' : fmtMins(countdown.mins)}</span>
+        <span className="live-hero__big">{now ? t('Reaching you now', 'अभी आप तक पहुँच रही') : fmtMins(countdown.mins)}</span>
         <span className="live-hero__sub">
-          {now ? 'You are entering the rain stretch.' : 'until you reach the rain, at your current pace.'}
+          {now ? t('You are entering the rain stretch.', 'आप बारिश वाले हिस्से में प्रवेश कर रहे हैं।') : t('until you reach the rain, at your current pace.', 'जब तक आप बारिश तक पहुँचेंगे, आपकी वर्तमान गति से।')}
         </span>
       </div>
     )
   } else if (countdown?.kind === 'in_rain') {
     hero = (
       <div className="live-hero live-hero--rain">
-        <span className="live-hero__label">{countdown.label} — you're in it</span>
+        <span className="live-hero__label">{t(`${rainLabelTr(countdown.label)} — you're in it`, `${rainLabelTr(countdown.label)} — आप इसमें हैं`)}</span>
         <span className="live-hero__big">
-          {countdown.endsMins != null ? `Ends ${fmtMins(countdown.endsMins)}` : 'Rain to destination'}
+          {countdown.endsMins != null ? t(`Ends ${fmtMins(countdown.endsMins)}`, `${fmtMins(countdown.endsMins)} में खत्म`) : t('Rain to destination', 'मंज़िल तक बारिश')}
         </span>
         <span className="live-hero__sub">
           {countdown.endsMins != null
-            ? 'until you drive out of this rain stretch.'
-            : 'Radar shows rain along the rest of your route.'}
+            ? t('until you drive out of this rain stretch.', 'जब तक आप इस बारिश वाले हिस्से से बाहर नहीं निकलते।')
+            : t('Radar shows rain along the rest of your route.', 'रडार आपके बाकी रास्ते में बारिश दिखा रहा है।')}
         </span>
       </div>
     )
   } else {
     hero = (
       <div className="live-hero live-hero--clear">
-        <span className="live-hero__big">Clear ahead</span>
-        <span className="live-hero__sub">No rain predicted on the rest of your route.</span>
+        <span className="live-hero__big">{t('Clear ahead', 'आगे साफ')}</span>
+        <span className="live-hero__sub">{t('No rain predicted on the rest of your route.', 'आपके बाकी रास्ते में बारिश का अनुमान नहीं है।')}</span>
       </div>
     )
   }
@@ -519,35 +533,34 @@ export default function LiveJourneyPanel({
       <div className="live-panel__head">
         <span className="live-badge">
           <span className="live-badge__dot" aria-hidden />
-          LIVE JOURNEY
+          {t('LIVE JOURNEY', 'लाइव सफ़र')}
         </span>
-        {offRoute && <span className="live-offroute">Off route</span>}
-        <button type="button" className="live-end-btn" onClick={() => { endServerJourney(); onEnd() }}>End</button>
+        {offRoute && <span className="live-offroute">{t('Off route', 'रास्ते से बाहर')}</span>}
+        <button type="button" className="live-end-btn" onClick={() => { endServerJourney(); onEnd() }}>{t('End', 'समाप्त')}</button>
       </div>
 
       {hero}
 
       {!arrived && !simOn && (offRoute || phase === 'starting') && countdown && (
         <p className="live-anchor-note">
-          📍 You're not on the route yet — predictions count from the route's
-          start point and will lock onto your GPS once you're on the way.
+          {t("📍 You're not on the route yet — predictions count from the route's start point and will lock onto your GPS once you're on the way.", '📍 आप अभी रास्ते पर नहीं हैं — अनुमान रास्ते के शुरुआती बिंदु से गिने जाते हैं और आपके चलने पर आपके GPS से जुड़ जाएँगे।')}
         </p>
       )}
 
       <div className="live-stats">
         <div className="live-stat">
-          <span className="live-stat__label">Speed</span>
+          <span className="live-stat__label">{t('Speed', 'गति')}</span>
           <span className="live-stat__value">
-            {speedKmh != null ? `${Math.round(speedKmh)} km/h` : '—'}
+            {speedKmh != null ? `${Math.round(speedKmh)} ${t('km/h', 'किमी/घं')}` : '—'}
           </span>
         </div>
         <div className="live-stat">
-          <span className="live-stat__label">Remaining</span>
-          <span className="live-stat__value">{remainKm.toFixed(1)} km</span>
+          <span className="live-stat__label">{t('Remaining', 'शेष')}</span>
+          <span className="live-stat__value">{remainKm.toFixed(1)} {t('km', 'किमी')}</span>
         </div>
         <div className="live-stat">
-          <span className="live-stat__label">Arrive</span>
-          <span className="live-stat__value">{eta != null && !arrived ? `${istClock(eta)} IST` : '—'}</span>
+          <span className="live-stat__label">{t('Arrive', 'पहुँच')}</span>
+          <span className="live-stat__value">{eta != null && !arrived ? `${istClock(eta)} ${t('IST', 'IST')}` : '—'}</span>
         </div>
       </div>
 
@@ -556,16 +569,16 @@ export default function LiveJourneyPanel({
       {!arrived && (guardian === 'on' || guardian === 'denied') && (
         <p className={`live-guardian${guardian === 'on' ? ' live-guardian--on' : ''}`}>
           {guardian === 'on'
-            ? '🛡 Screen-off watch on — you\'ll get a notification if rain nears your route, even with the phone locked.'
-            : '🔕 Notifications blocked — with the screen off you won\'t get rain warnings. Allow notifications to enable.'}
+            ? t("🛡 Screen-off watch on — you'll get a notification if rain nears your route, even with the phone locked.", '🛡 स्क्रीन-ऑफ निगरानी चालू — अगर बारिश आपके रास्ते के पास आए तो फ़ोन लॉक होने पर भी आपको सूचना मिलेगी।')
+            : t("🔕 Notifications blocked — with the screen off you won't get rain warnings. Allow notifications to enable.", '🔕 सूचनाएँ अवरुद्ध — स्क्रीन बंद होने पर आपको बारिश की चेतावनी नहीं मिलेगी। चालू करने के लिए सूचनाओं को अनुमति दें।')}
         </p>
       )}
 
       <div className="live-sync">
         {syncing ? (
-          <><span className="spinner spinner--sm" aria-hidden /> Syncing with radar…</>
+          <><span className="spinner spinner--sm" aria-hidden /> {t('Syncing with radar…', 'रडार से सिंक हो रहा है…')}</>
         ) : (
-          <>Next radar sync in {Math.floor(syncLeftSec / 60)}:{String(syncLeftSec % 60).padStart(2, '0')}</>
+          <>{t('Next radar sync in', 'अगला रडार सिंक')} {Math.floor(syncLeftSec / 60)}:{String(syncLeftSec % 60).padStart(2, '0')}</>
         )}
       </div>
 
@@ -582,7 +595,7 @@ export default function LiveJourneyPanel({
             }
           }}
         >
-          {simOn ? '⏸ Stop simulated drive' : '▶ Simulate drive (dev only)'}
+          {simOn ? t('⏸ Stop simulated drive', '⏸ नकली ड्राइव रोकें') : t('▶ Simulate drive (dev only)', '▶ नकली ड्राइव (केवल dev)')}
         </button>
       )}
     </div>

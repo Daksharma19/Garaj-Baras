@@ -2,6 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import L from 'leaflet'
 import { MapContainer, Marker, Popup, Polyline, TileLayer } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
+import { useT, tr } from './i18n'
+
+// Localize a backend rain-intensity label for display.
+function rainLabelTr(label) {
+  const map = {
+    'No Rain': 'बारिश नहीं', 'Rain': 'बारिश',
+    'Very Light Rain': 'बहुत हल्की बारिश', 'Light Rain': 'हल्की बारिश',
+    'Moderate Rain': 'मध्यम बारिश', 'Heavy Rain': 'तेज़ बारिश',
+    'Very Heavy Rain': 'बहुत तेज़ बारिश',
+  }
+  const hi = map[String(label || '').trim()]
+  return hi ? tr(label, hi) : label
+}
 
 // ── Journey animation timing ──────────────────────────────────────────────────
 const DRIVE_MS = 3200      // whole trip drives past in ~3.2s (excluding stops)
@@ -136,6 +149,7 @@ export default function RouteMap({
   onStopDetails,
   livePos,          // {lat, lon} while a live journey is running, else null
 }) {
+  const t = useT()
   const [mapRef, setMapRef] = useState(null)
   const isLive = !!livePos
 
@@ -361,17 +375,17 @@ export default function RouteMap({
           >
             <div style={{ minWidth: 220 }}>
               <div style={{ fontWeight: 900, marginBottom: 6 }}>
-                {activeSeg.locationName || 'Selected location'}
+                {activeSeg.locationName || t('Selected location', 'चयनित स्थान')}
               </div>
               <div style={{ fontSize: 12, opacity: 0.9, marginBottom: 8 }}>
                 {activeSeg.mid.lat.toFixed(4)}, {activeSeg.mid.lon.toFixed(4)}
               </div>
               <div style={{ fontWeight: 800 }}>
-                {activeSeg.inBounds ? activeSeg.label : 'Unknown (out of radar)'}
+                {activeSeg.inBounds ? rainLabelTr(activeSeg.label) : t('Unknown (out of radar)', 'अज्ञात (रडार के बाहर)')}
               </div>
               <div style={{ fontSize: 12, marginTop: 6 }}>
-                Rain: {activeSeg.rain_expected ? 'Yes' : 'No'}
-                {activeSeg.eta_mins != null ? ` • ETA ~${Math.round(Number(activeSeg.eta_mins))} min` : ''}
+                {t('Rain', 'बारिश')}: {activeSeg.rain_expected ? t('Yes', 'हाँ') : t('No', 'नहीं')}
+                {activeSeg.eta_mins != null ? ` • ${t('ETA', 'पहुँच')} ~${Math.round(Number(activeSeg.eta_mins))} ${t('min', 'मिनट')}` : ''}
                 {activeSeg.dbz != null ? ` • dBZ ${Math.round(Number(activeSeg.dbz))}` : ''}
               </div>
             </div>
@@ -385,10 +399,10 @@ export default function RouteMap({
           <span className="journey-chip__icon" aria-hidden>⛈</span>
           <div className="journey-chip__text">
             <span className="journey-chip__title">
-              {activeStop.label} · {toISTClock(activeStop.eta_mins)} IST
+              {rainLabelTr(activeStop.label)} · {toISTClock(activeStop.eta_mins)} {t('IST', 'IST')}
             </span>
             <span className="journey-chip__sub">
-              You reach this rain ~{Math.round(activeStop.eta_mins)} min into the trip
+              {t(`You reach this rain ~${Math.round(activeStop.eta_mins)} min into the trip`, `आप सफ़र में ~${Math.round(activeStop.eta_mins)} मिनट पर इस बारिश तक पहुँचेंगे`)}
             </span>
           </div>
           {typeof onStopDetails === 'function' && (
@@ -397,14 +411,14 @@ export default function RouteMap({
               className="journey-chip__view"
               onClick={() => onStopDetails(activeStop)}
             >
-              View radar
+              {t('View radar', 'रडार देखें')}
             </button>
           )}
           <button
             type="button"
             className="journey-chip__close"
             onClick={() => setActiveStop(null)}
-            aria-label="Dismiss"
+            aria-label={t('Dismiss', 'हटाएँ')}
           >
             ×
           </button>
@@ -422,14 +436,14 @@ export default function RouteMap({
             if (mapRef) mapRef.panTo([livePos.lat, livePos.lon], { animate: true, duration: 0.6 })
           }}
         >
-          ◎ Re-center
+          ◎ {t('Re-center', 'फिर केंद्र करें')}
         </button>
       )}
 
       {/* Journey control */}
       {journey && !isLive && (journeyMode === 'done' || journeyMode === 'idle') && (
         <button type="button" className="journeyBtn" onClick={startJourney}>
-          {journeyMode === 'done' ? '↻ Replay journey' : '▶ Preview journey'}
+          {journeyMode === 'done' ? t('↻ Replay journey', '↻ सफ़र दोबारा चलाएँ') : t('▶ Preview journey', '▶ सफ़र का पूर्वावलोकन')}
         </button>
       )}
 
@@ -442,7 +456,7 @@ export default function RouteMap({
           }
         }}
       >
-        Zoom to route
+        {t('Zoom to route', 'रास्ते पर ज़ूम करें')}
       </button>
     </div>
   )

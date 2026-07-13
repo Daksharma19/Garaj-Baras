@@ -14,6 +14,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState, useCallback } from 'react'
 import { supabase, authConfigured } from './supabase'
+import { useT } from './i18n'
 
 const AuthCtx = createContext(null)
 
@@ -68,6 +69,7 @@ export function AuthProvider({ children }) {
 
 // ── Nav button: "Sign in" or the signed-in avatar/menu ─────────────────────
 export function AccountButton() {
+  const t = useT()
   const { user, configured, openLogin, signOut } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
   if (!configured) return null
@@ -75,7 +77,7 @@ export function AccountButton() {
   if (!user) {
     return (
       <button type="button" className="acct-btn" onClick={openLogin}>
-        Sign in
+        {t('Sign in', 'साइन इन')}
       </button>
     )
   }
@@ -85,7 +87,7 @@ export function AccountButton() {
       <button
         type="button"
         className="acct-btn acct-btn--avatar"
-        title={user.email || 'Account'}
+        title={user.email || t('Account', 'खाता')}
         onClick={() => setMenuOpen((v) => !v)}
         onBlur={() => setTimeout(() => setMenuOpen(false), 140)}
       >
@@ -96,7 +98,7 @@ export function AccountButton() {
           <div className="acct-menu__email">{user.email}</div>
           <button type="button" className="acct-menu__item" onMouseDown={(e) => e.preventDefault()}
             onClick={() => { setMenuOpen(false); signOut() }}>
-            Sign out
+            {t('Sign out', 'साइन आउट')}
           </button>
         </div>
       )}
@@ -105,24 +107,24 @@ export function AccountButton() {
 }
 
 // ── Gate: children only when signed in ──────────────────────────────────────
-export function SignInGate({ children, title = 'Sign in to continue', sub }) {
+export function SignInGate({ children, title, sub }) {
+  const t = useT()
   const { user, ready, configured, openLogin } = useAuth()
   if (user) return children
   return (
     <div className="gate-card">
       <div className="gate-card__icon" aria-hidden>🔒</div>
-      <div className="gate-card__title">{title}</div>
+      <div className="gate-card__title">{title || t('Sign in to continue', 'जारी रखने के लिए साइन इन करें')}</div>
       <div className="gate-card__sub">
-        {sub || 'This feature is tied to your account. Route check and nowcast stay free — no login needed there.'}
+        {sub || t('This feature is tied to your account. Route check and nowcast stay free — no login needed there.', 'यह सुविधा आपके खाते से जुड़ी है। रास्ता जाँच और तात्कालिक पूर्वानुमान मुफ़्त हैं — वहाँ लॉगिन की ज़रूरत नहीं।')}
       </div>
       {configured ? (
         <button type="button" className="gate-card__btn" disabled={!ready} onClick={openLogin}>
-          Sign in / Sign up
+          {t('Sign in / Sign up', 'साइन इन / साइन अप')}
         </button>
       ) : (
         <div className="gate-card__sub" style={{ opacity: 0.7 }}>
-          Sign-in isn’t configured on this deployment yet
-          (set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY).
+          {t('Sign-in isn’t configured on this deployment yet (set VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY).', 'इस डिप्लॉयमेंट पर साइन-इन अभी कॉन्फ़िगर नहीं है (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY सेट करें)।')}
         </div>
       )}
     </div>
@@ -131,6 +133,7 @@ export function SignInGate({ children, title = 'Sign in to continue', sub }) {
 
 // ── Login modal: Google + email OTP (6-digit code) ──────────────────────────
 export function LoginModal({ onClose }) {
+  const t = useT()
   const [email, setEmail] = useState('')
   const [code, setCode] = useState('')
   const [stage, setStage] = useState('start')   // start | code | working
@@ -152,7 +155,7 @@ export function LoginModal({ onClose }) {
 
   async function sendOtp() {
     const em = email.trim()
-    if (!/^\S+@\S+\.\S+$/.test(em)) { setError('Enter a valid email address.'); return }
+    if (!/^\S+@\S+\.\S+$/.test(em)) { setError(t('Enter a valid email address.', 'एक वैध ईमेल पता दर्ज करें।')); return }
     setError(null); setStage('working')
     const { error: err } = await supabase.auth.signInWithOtp({
       email: em,
@@ -164,7 +167,7 @@ export function LoginModal({ onClose }) {
 
   async function verifyOtp() {
     const token = code.trim()
-    if (token.length < 6) { setError('Enter the 6-digit code from your email.'); return }
+    if (token.length < 6) { setError(t('Enter the 6-digit code from your email.', 'अपने ईमेल से 6-अंकों का कोड दर्ज करें।')); return }
     setError(null); setStage('working')
     const { error: err } = await supabase.auth.verifyOtp({
       email: email.trim(), token, type: 'email',
@@ -176,11 +179,10 @@ export function LoginModal({ onClose }) {
   return (
     <div className="login-overlay" role="dialog" aria-modal="true" onClick={onClose}>
       <div className="login-modal" onClick={(e) => e.stopPropagation()}>
-        <button type="button" className="login-modal__close" aria-label="Close" onClick={onClose}>×</button>
-        <div className="login-modal__title">Sign in to Garaj Baras</div>
+        <button type="button" className="login-modal__close" aria-label={t('Close', 'बंद करें')} onClick={onClose}>×</button>
+        <div className="login-modal__title">{t('Sign in to Garaj Baras', 'गरज बरस में साइन इन करें')}</div>
         <div className="login-modal__sub">
-          Saved places, rain alerts and the AI assistant live on your account.
-          Route check &amp; nowcast are always free.
+          {t('Saved places, rain alerts and the AI assistant live on your account. Route check & nowcast are always free.', 'सहेजे गए स्थान, बारिश अलर्ट और AI सहायक आपके खाते पर रहते हैं। रास्ता जाँच और तात्कालिक पूर्वानुमान हमेशा मुफ़्त हैं।')}
         </div>
 
         {stage !== 'code' && (
@@ -192,9 +194,9 @@ export function LoginModal({ onClose }) {
                 <path fill="#4CAF50" d="M24 44c5.2 0 9.9-1.7 13.4-4.7l-6.2-5.2C29.2 35.4 26.7 36 24 36c-5.3 0-9.7-2.6-11.3-7l-6.5 5C9.5 39.6 16.2 44 24 44z"/>
                 <path fill="#1976D2" d="M43.6 20H24v8h11.3c-.8 2.3-2.3 4.3-4.1 5.7l6.2 5.2C41.4 35.4 44 30.1 44 24c0-1.3-.1-2.7-.4-4z"/>
               </svg>
-              Continue with Google
+              {t('Continue with Google', 'Google से जारी रखें')}
             </button>
-            <div className="login-modal__or">or</div>
+            <div className="login-modal__or">{t('or', 'या')}</div>
             <input
               className="login-modal__input"
               type="email"
@@ -204,29 +206,29 @@ export function LoginModal({ onClose }) {
               onKeyDown={(e) => e.key === 'Enter' && sendOtp()}
             />
             <button type="button" className="login-modal__primary" onClick={sendOtp} disabled={stage === 'working'}>
-              {stage === 'working' ? 'Sending…' : 'Email me a code'}
+              {stage === 'working' ? t('Sending…', 'भेजा जा रहा है…') : t('Email me a code', 'मुझे ईमेल पर कोड भेजें')}
             </button>
           </>
         )}
 
         {stage === 'code' && (
           <>
-            <div className="login-modal__sent">Code sent to <b>{email.trim()}</b></div>
+            <div className="login-modal__sent">{t('Code sent to', 'कोड भेजा गया')} <b>{email.trim()}</b></div>
             <input
               className="login-modal__input login-modal__input--code"
               inputMode="numeric"
               maxLength={8}
-              placeholder="6-digit code"
+              placeholder={t('6-digit code', '6-अंकों का कोड')}
               value={code}
               onChange={(e) => setCode(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && verifyOtp()}
               autoFocus
             />
             <button type="button" className="login-modal__primary" onClick={verifyOtp}>
-              Verify &amp; sign in
+              {t('Verify & sign in', 'सत्यापित करें और साइन इन करें')}
             </button>
             <button type="button" className="login-modal__link" onClick={() => { setStage('start'); setCode('') }}>
-              Use a different email
+              {t('Use a different email', 'दूसरा ईमेल उपयोग करें')}
             </button>
           </>
         )}

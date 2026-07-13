@@ -15,6 +15,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import axios from 'axios'
 import { useAuth } from './auth'
+import { useT, tr } from './i18n'
 
 const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search'
 
@@ -23,6 +24,7 @@ function shortName(name) {
 }
 
 export default function SavedMenu({ apiBase, currentLoc, onPick }) {
+  const t = useT()
   const { user, authHeaders } = useAuth()
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState('places')     // places | routes
@@ -44,8 +46,8 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
       setError(null)
     } catch (e) {
       setError(e?.response?.status === 404
-        ? 'Server is updating — try again in a minute.'
-        : (e?.response?.data?.detail || 'Could not load saved places.'))
+        ? t('Server is updating — try again in a minute.', 'सर्वर अपडेट हो रहा है — एक मिनट में फिर कोशिश करें।')
+        : (e?.response?.data?.detail || t('Could not load saved places.', 'सहेजे गए स्थान लोड नहीं हो सके।')))
       setLocations([])
     }
   }, [apiBase, authHeaders])
@@ -107,7 +109,7 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
         { label: lbl, lat, lon }, { headers: authHeaders() })
       await load()
     } catch (e) {
-      setError(e?.response?.data?.detail || 'Could not save this place.')
+      setError(e?.response?.data?.detail || t('Could not save this place.', 'यह स्थान सहेजा नहीं जा सका।'))
     } finally {
       setBusy(false)
     }
@@ -119,7 +121,7 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
       await axios.delete(`${apiBase}/locations/${id}`, { headers: authHeaders() })
       setLocations((prev) => (prev || []).filter((l) => l.id !== id))
     } catch {
-      setError('Could not delete — try again.')
+      setError(t('Could not delete — try again.', 'हटाया नहीं जा सका — फिर कोशिश करें।'))
     } finally {
       setBusy(false)
     }
@@ -137,7 +139,7 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
 
   return (
     <>
-      <button type="button" className="kebab-btn" aria-label="Saved places & routes"
+      <button type="button" className="kebab-btn" aria-label={t('Saved places & routes', 'सहेजे गए स्थान और रास्ते')}
         onClick={() => setOpen(true)}>
         <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden>
           <circle cx="10" cy="4" r="1.6" fill="currentColor" />
@@ -150,18 +152,18 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
         <div className="sm-overlay" onClick={() => setOpen(false)}>
           <aside className="sm-panel" onClick={(e) => e.stopPropagation()}>
             <div className="sm-panel__head">
-              <span className="sm-panel__title">Your library</span>
-              <button type="button" className="sm-panel__close" aria-label="Close"
+              <span className="sm-panel__title">{t('Your library', 'आपकी लाइब्रेरी')}</span>
+              <button type="button" className="sm-panel__close" aria-label={t('Close', 'बंद करें')}
                 onClick={() => setOpen(false)}>×</button>
             </div>
 
             <div className="sm-tabs">
               <button type="button"
                 className={`sm-tab${tab === 'places' ? ' sm-tab--active' : ''}`}
-                onClick={() => setTab('places')}>📍 Places</button>
+                onClick={() => setTab('places')}>{t('📍 Places', '📍 स्थान')}</button>
               <button type="button"
                 className={`sm-tab${tab === 'routes' ? ' sm-tab--active' : ''}`}
-                onClick={() => setTab('routes')}>🛣 Routes</button>
+                onClick={() => setTab('routes')}>{t('🛣 Routes', '🛣 रास्ते')}</button>
             </div>
 
             {tab === 'places' && (
@@ -169,17 +171,17 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
                 {currentLoc && !alreadySaved && (
                   <button type="button" className="sm-save-current" disabled={busy}
                     onClick={() => savePlace(currentLoc.label, currentLoc.lat, currentLoc.lon)}>
-                    + Save “{(currentLoc.label || 'current location').slice(0, 28)}”
+                    {t('+ Save', '+ सहेजें')} “{(currentLoc.label || tr('current location', 'वर्तमान स्थान')).slice(0, 28)}”
                   </button>
                 )}
 
-                <input className="sm-search" placeholder="Search a place to save, or filter saved…"
+                <input className="sm-search" placeholder={t('Search a place to save, or filter saved…', 'सहेजने के लिए स्थान खोजें, या सहेजे गए फ़िल्टर करें…')}
                   value={query} onChange={(e) => setQuery(e.target.value)} />
 
                 {/* Add new (geocoded) results not yet saved */}
                 {addable.length > 0 && (
                   <>
-                    <div className="sm-grouphdr">Add a new place</div>
+                    <div className="sm-grouphdr">{t('Add a new place', 'नया स्थान जोड़ें')}</div>
                     {addable.map((g) => (
                       <div key={g.id} className="sm-row">
                         <div className="sm-row__pick sm-row__pick--static">
@@ -187,24 +189,23 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
                           <span className="sm-row__coords">{g.display_name}</span>
                         </div>
                         <button type="button" className="sm-row__add"
-                          aria-label={`Save ${shortName(g.display_name)}`} disabled={busy}
+                          aria-label={t(`Save ${shortName(g.display_name)}`, `${shortName(g.display_name)} सहेजें`)} disabled={busy}
                           onClick={() => savePlace(shortName(g.display_name), g.lat, g.lon)}>+</button>
                       </div>
                     ))}
                   </>
                 )}
-                {geoLoading && q.length >= 3 && <div className="sm-empty">Searching…</div>}
+                {geoLoading && q.length >= 3 && <div className="sm-empty">{t('Searching…', 'खोजा जा रहा है…')}</div>}
 
                 {/* Saved places */}
                 {(savedMatches.length > 0 || addable.length > 0) && (
-                  <div className="sm-grouphdr">Saved places</div>
+                  <div className="sm-grouphdr">{t('Saved places', 'सहेजे गए स्थान')}</div>
                 )}
-                {locations === null && <div className="sm-empty">Loading…</div>}
+                {locations === null && <div className="sm-empty">{t('Loading…', 'लोड हो रहा है…')}</div>}
                 {error && <div className="sm-error">{error}</div>}
                 {locations !== null && locations.length === 0 && !error && addable.length === 0 && (
                   <div className="sm-empty">
-                    No saved places yet. Search above and tap “+”, or scan a location
-                    in Nowcast and tap “Save”.
+                    {t('No saved places yet. Search above and tap “+”, or scan a location in Nowcast and tap “Save”.', 'अभी कोई सहेजा गया स्थान नहीं। ऊपर खोजें और “+” दबाएँ, या तात्कालिक पूर्वानुमान में कोई स्थान स्कैन करके “सहेजें” दबाएँ।')}
                   </div>
                 )}
                 {savedMatches.map((l) => (
@@ -216,7 +217,7 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
                         {Number(l.lat).toFixed(3)}°N, {Number(l.lon).toFixed(3)}°E
                       </span>
                     </button>
-                    <button type="button" className="sm-row__del" aria-label={`Delete ${l.label}`}
+                    <button type="button" className="sm-row__del" aria-label={t(`Delete ${l.label}`, `${l.label} हटाएँ`)}
                       disabled={busy} onClick={() => remove(l.id)}>✕</button>
                   </div>
                 ))}
@@ -227,10 +228,9 @@ export default function SavedMenu({ apiBase, currentLoc, onPick }) {
               <div className="sm-body">
                 <div className="sm-soon">
                   <div className="sm-soon__icon">🛣</div>
-                  <div className="sm-soon__title">Saved routes are coming soon</div>
+                  <div className="sm-soon__title">{t('Saved routes are coming soon', 'सहेजे गए रास्ते जल्द आ रहे हैं')}</div>
                   <div className="sm-soon__sub">
-                    You’ll be able to save your daily commute and get a one-tap
-                    rain re-check — plus “alert me if rain’s expected on my 6pm drive”.
+                    {t('You’ll be able to save your daily commute and get a one-tap rain re-check — plus “alert me if rain’s expected on my 6pm drive”.', 'आप अपना रोज़ का रास्ता सहेज सकेंगे और एक टैप में बारिश की पुनः जाँच पा सकेंगे — साथ ही “अगर मेरी शाम 6 बजे की ड्राइव पर बारिश की उम्मीद हो तो मुझे अलर्ट करें”।')}
                   </div>
                 </div>
               </div>
