@@ -1953,6 +1953,19 @@
   color: rgba(255, 255, 255, 0.70);
 }
 
+/* India-wide mosaic is isolated from the route/nowcast radar players. */
+.pg-india-radar { min-height: 100vh; padding-bottom: 42px; animation: fadeIn 250ms ease both; }
+.india-radar-hero { margin: 26px 20px 16px; max-width: 760px; }
+.india-radar-hero h1 { margin: 5px 0 8px; font-size: clamp(28px, 5vw, 42px); }
+.india-radar-hero p:last-child { margin: 0; color: var(--text-secondary); line-height: 1.55; }
+.india-radar-map { margin: 0 16px; border: 1px solid rgba(79,195,247,.28); border-radius: 16px; overflow: hidden; background: #0f172a; box-shadow: 0 14px 36px rgba(0,0,0,.22); }
+.india-radar-map__canvas { height: min(68vh, 680px); min-height: 420px; width: 100%; }
+.india-radar-map__status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 10px 13px; font-size: 12px; color: var(--text-secondary); background: rgba(10,16,32,.94); }
+.india-radar-map__echo, .india-radar-map__nodata { width: 12px; height: 12px; display: inline-block; border-radius: 3px; margin-right: -10px; }
+.india-radar-map__echo { background: #22c55e; }
+.india-radar-map__nodata { background: repeating-linear-gradient(135deg,#64748b 0 2px,#334155 2px 4px); border: 1px solid #94a3b8; }
+.india-radar-loading { margin: 16px; padding: 44px; text-align: center; color: var(--text-secondary); }
+
 /* ── NOWCAST PAGE ────────────────────────────────────────────── */
 
 .pg-nowcast {

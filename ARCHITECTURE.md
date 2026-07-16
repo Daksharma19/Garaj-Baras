@@ -323,12 +323,11 @@ Web-push (VAPID) subscriptions stored in `alerts.db` with a per-subscription
 state machine `clear → approaching → raining`. After each radar refresh, each
 covered saved location gets the full 8-slot nowcast (0-105 min, same horizon
 as the Nowcast tab):
-- `clear→approaching`: "Rain approaching (~N min)" heads-up — can fire for
-  rain anywhere in the 0-105 min horizon, not just the near slots. Slots
-  beyond 45 min (`FAR_SLOT_MINS`) only count when probability > 70%
-  (`FAR_SLOT_MIN_PROB`), so distant low-confidence forecasts don't spam
-  false heads-ups (`_slot_is_rain`, applied to both the trigger and the
-  ease/resume scan).
+  - `clear→approaching`: "Rain approaching (~N min)" heads-up — can fire for
+    rain anywhere in the 0-105 min horizon, not just the near slots. Near slots
+    (now, +15, +30 min) only count when probability > 70%; all other remaining
+    slots only count when probability > 80% (strict user-defined caps implemented in
+    `_slot_is_rain`, applied to both the trigger and the ease/resume scan).
 - **Peak-intensity naming:** when a heavier category is due within the next
   ~45 min (`PEAK_LOOKAHEAD_SLOTS` = 3 slots past the first rainy one), the
   alert names THAT intensity, not the light rain at the leading edge — a
@@ -445,6 +444,8 @@ reusing any GCP numbers.
 | `/movement` | GET | Global rain movement over Delhi NCR |
 | `/radar/gif?radar=` | GET | Latest downloaded radar GIF (delhi/lucknow/patna/bhopal/jaipur/paradip/patiala/nagpur) |
 | `/frames/latest?n=&force=` | GET | Latest frame URLs + timestamps + lag info |
+| `/india-radar/metadata` | GET | Station locations, operational ranges, and India mosaic bounds for the separate national map UI. |
+| `/india-radar/mosaic.png` | GET | Transparent India-wide reflectivity composite. It sequentially uses existing station states and caches only the rendered PNG for 5 minutes, preserving the two-radar heavy-state LRU. |
 | `/radar/refresh` | POST | User-triggered "check for a new frame". Body `{lat,lon}` → detects radar, forces a **blocking** re-download + reprocess (bypasses TTL), returns `new_frame` (did IMD publish a newer frame than cached), plus latest/previous timestamps + lag. Bounded by a bg-lock (no double-refresh) and a frontend 60 s cooldown. |
 | `/radar/frames*` | static | Extracted PNGs per radar (`frames_lucknow` etc.) |
 | `/predict_waypoints` | POST | **Main route endpoint.** Body: `{waypoints:[{lat,lon,eta_mins}]}`; auto-selects radar from route midpoint; returns enriched waypoints + patch_analysis + summary |
@@ -529,6 +530,10 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   subscribes to push via `/alerts/subscribe` with the auth header) and
   `SavedPlaces.jsx` (CRUD on `/locations`; tapping a place loads it into the
   nowcast picker).
+- **India Radar tab:** separate lazy-loaded `IndiaRadarMap.jsx` Leaflet view
+  using OpenStreetMap tiles, transparent `/india-radar/mosaic.png` echoes,
+  station range rings, and an even-odd no-data mask outside coverage circles.
+  It does not reuse or alter the route/nowcast radar players.
 - **Chat tab (`ChatPage`):** streams `/chat` SSE, shows tool-call status.
   Gated behind sign-in (`SignInGate`).
 - **Auth (`auth.jsx` + `supabase.js`):** `AuthProvider` context (session,

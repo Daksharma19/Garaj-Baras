@@ -262,23 +262,27 @@ def _mins_since(iso: str) -> float:
         return 1e9
 
 
-# Far-out slots (beyond this many minutes) are only trusted for a notification
-# when the model is confident: radar lag + long projection makes distant
-# forecasts noisy, so a low-probability far slot would spam false heads-ups.
-FAR_SLOT_MINS = 45
-FAR_SLOT_MIN_PROB = 70.0
+# Strict caps on notification probability (user-defined):
+# - now, +15, +30 slots (mins 0, 15, 30): probability must be > 70%
+# - remaining slots (+45, +60, etc.): probability must be > 80%
+NEAR_SLOT_MINS = (0, 15, 30)
+NEAR_SLOT_MIN_PROB = 70.0
+FAR_SLOT_MIN_PROB = 80.0
 
 
 def _slot_is_rain(slot: dict) -> bool:
-    """Whether a slot counts as rain for alerting purposes. Near slots
-    (<= FAR_SLOT_MINS) use has_rain as-is; far slots additionally require
-    probability > FAR_SLOT_MIN_PROB so distant, low-confidence forecasts don't
-    trigger notifications."""
+    """Whether a slot counts as rain for alerting purposes.
+    Strict cap on notifications:
+    - If slot_mins is 0, 15, or 30 (now, +15, +30): probability must be > 70%
+    - Otherwise (remaining slots): probability must be > 80%
+    """
     if not slot.get("has_rain"):
         return False
-    if slot.get("slot_mins", 0) > FAR_SLOT_MINS:
-        return float(slot.get("probability") or 0) > FAR_SLOT_MIN_PROB
-    return True
+    mins = int(slot.get("slot_mins", 0))
+    prob = float(slot.get("probability") or 0)
+    if mins in NEAR_SLOT_MINS:
+        return prob > NEAR_SLOT_MIN_PROB
+    return prob > FAR_SLOT_MIN_PROB
 
 
 # Intensity categories, ordered — used to decide when an upcoming slot is a

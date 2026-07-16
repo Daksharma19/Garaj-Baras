@@ -19,6 +19,7 @@ const ORS_KEY = import.meta.env.VITE_ORS_API_KEY
 
 const RouteMap = lazy(() => import('./RouteMap.jsx'))
 const LiveJourneyPanel = lazy(() => import('./LiveJourney.jsx'))
+const IndiaRadarMap = lazy(() => import('./IndiaRadarMap.jsx'))
 
 function warmBackend() {
   try {
@@ -497,12 +498,24 @@ function TabBar({ activeTab, onChangeTab }) {
       >
         {t('Ask AI', 'AI से पूछें')}
       </button>
+      <button role="tab" aria-selected={activeTab === 'india-radar'} className={`tab-bar__btn${activeTab === 'india-radar' ? ' tab-bar__btn--active' : ''}`} onClick={() => onChangeTab('india-radar')}>India Radar</button>
     </div>
   )
 }
 
 // ── Ask AI (rain chatbot) ──────────────────────────────────────────────────────
 const CHAT_URL = `${API_BASE}/chat`
+
+function IndiaRadarPage({ activeTab, onChangeTab, onPickSaved }) {
+  return (
+    <div className="pg-india-radar">
+      <nav className="nav"><span className="nav__brand">GARAJ BARAS</span><span className="nav__right"><LangToggle /><AccountButton /><SavedMenu apiBase={API_BASE} onPick={onPickSaved} /></span></nav>
+      <TabBar activeTab={activeTab} onChangeTab={onChangeTab} />
+      <section className="india-radar-hero"><p className="eyebrow">NATIONAL RADAR NETWORK</p><h1>India Radar Mosaic</h1><p>One live view, blended from every available IMD radar. Coverage outlines show where observations are available.</p></section>
+      <Suspense fallback={<div className="india-radar-loading">Loading India radar…</div>}><IndiaRadarMap /></Suspense>
+    </div>
+  )
+}
 
 const toolLabel = (key) => ({
   geocode_place: tr('Finding location…', 'स्थान खोजा जा रहा है…'),
@@ -2068,7 +2081,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('route')
   // Tabs mount on first visit and then stay mounted (hidden with CSS) so
   // their state survives tab switches. Route mounts immediately (default tab).
-  const [visitedTabs, setVisitedTabs] = useState({ route: true, nowcast: false, chat: false })
+  const [visitedTabs, setVisitedTabs] = useState({ route: true, nowcast: false, chat: false, 'india-radar': false })
   const [pendingNcLoc, setPendingNcLoc] = useState(null)  // saved place → Nowcast
 
   // First-run onboarding: shown until dismissed once; re-openable from the
@@ -2425,6 +2438,12 @@ export default function App() {
             pendingLoc={pendingNcLoc}
             onPendingConsumed={() => setPendingNcLoc(null)}
           />
+        </div>
+      )}
+
+      {visitedTabs['india-radar'] && (
+        <div style={{ display: activeTab === 'india-radar' ? '' : 'none' }}>
+          <IndiaRadarPage activeTab={activeTab} onChangeTab={handleTabChange} onPickSaved={onPickSaved} />
         </div>
       )}
 
