@@ -1,21 +1,32 @@
-name: Rain alert sweep
+name: Rain alert wake and sweep
 
-# Fires the scheduled alert sweep every 10 minutes: the backend refreshes each
-# radar that has saved subscriptions and pushes any due rain notifications. This
-# also keeps Render's free tier awake (it sleeps after ~15 idle minutes), so it
-# replaces the old bare /health ping — alerts no longer depend on a user
-# happening to browse that radar's city.
+# Two staggered schedules:
+# 1) /health every 5 minutes to wake/keep Render warm.
+# 2) /tasks/sweep_alerts every 10 minutes, offset by +2 minutes, so the sweep
+#    is less likely to be the cold-start request that times out at the cron
+#    provider.
 #
 # If you set a SWEEP_TOKEN env var on the backend, add a matching repo secret
-# named SWEEP_TOKEN (Settings → Secrets → Actions) and it is sent automatically.
+# named SWEEP_TOKEN (Settings -> Secrets -> Actions) and it is sent automatically.
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
+    - cron: "2,12,22,32,42,52 * * * *"
   workflow_dispatch:
 
 jobs:
+  keep-warm:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/5 * * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake backend
+        run: |
+          curl -s -m 120 -w "health: %{http_code}\n" \
+            "https://garaj-baras-api.onrender.com/health" || true
+
   sweep:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '2,12,22,32,42,52 * * * *'
     runs-on: ubuntu-latest
     steps:
       - name: Trigger alert sweep

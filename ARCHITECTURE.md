@@ -31,8 +31,9 @@ verification** (every prediction is graded against later radar frames).
 There is **no ML model** — the whole engine is classical CV (OpenCV optical
 flow, connected components, color matching) + geometry, driven by IMD's public
 radar imagery. There is also **no scheduler/cron in the backend** — all
-refreshes are lazily triggered by user requests against a TTL cache (GitHub
-Actions keep-alive pings substitute for a scheduler).
+refreshes are lazily triggered by user requests against a TTL cache, with
+GitHub Actions providing an external wake-and-sweep cadence for alerts on the
+free-tier deployment.
 
 ## 2. Tech stack
 
@@ -360,9 +361,11 @@ as the Nowcast tab):
   internally on completion; if the cache was already fresh (someone browsed that city
   recently), the refresh no-ops so `_sweep_alerts` calls `process_alerts` explicitly
   itself — every sweep tick checks alerts regardless of recent browsing traffic. The
-  `keepalive.yml` GitHub Action hits this every 10 min, so alerts fire on
-  schedule instead of only when someone browses that city; `keep_alive.yml`
-  still pings `/health` every 5 min as a cheap awake-keeper. Optional
+  `keepalive.yml` GitHub Action uses a **staggered** cadence: `/health` every
+  5 min to keep Render warm, then `/tasks/sweep_alerts` every 10 min at
+  minute `2,12,22,32,42,52` so the sweep is less likely to absorb the cold
+  start itself. This keeps alerts firing on schedule instead of only when
+  someone browses that city. Optional
   `SWEEP_TOKEN` env gates the endpoint (matching repo secret sent by the
   workflow). Both paths use the `_RADAR_REGISTRY` table (name → refresh fn /
   cache / ready event / georef).
