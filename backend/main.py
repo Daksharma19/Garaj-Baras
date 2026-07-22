@@ -1310,6 +1310,24 @@ def _instant_alert_check(endpoint: str, lat: float, lon: float) -> None:
         print(f"instant alert check failed: {e}")
 
 
+_sweep_bg_lock = threading.Lock()
+
+
+def _sweep_alerts_bg() -> None:
+    """Run the alert sweep in a background thread and prevent parallel execution."""
+    if not _sweep_bg_lock.acquire(blocking=False):
+        print("Alert sweep: already running, skipping this tick.")
+        return
+    try:
+        print("Alert sweep: starting background execution")
+        res = _sweep_alerts()
+        print(f"Alert sweep: finished background execution: {res}")
+    except Exception as e:
+        print(f"Alert sweep: background execution failed: {e}")
+    finally:
+        _sweep_bg_lock.release()
+
+
 def _sweep_alerts() -> dict:
     """Refresh every radar that has at least one saved subscription and run its
     alert checks. Driven by the scheduled keep-alive so alerts fire on time even
@@ -2298,7 +2316,8 @@ def tasks_sweep_alerts(token: str = ""):
     expected = (os.environ.get("SWEEP_TOKEN") or "").strip()
     if expected and token != expected:
         raise HTTPException(status_code=403, detail="Bad sweep token.")
-    return _sweep_alerts()
+    threading.Thread(target=_sweep_alerts_bg, daemon=True).start()
+    return {"ok": True, "status": "sweep_queued"}
 
 
 @app.get("/alerts/debug")

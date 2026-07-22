@@ -352,11 +352,14 @@ as the Nowcast tab):
   already raining, the user is notified within seconds.
 - **Scheduled sweep:** `GET /tasks/sweep_alerts?token=` (`_sweep_alerts` in
   main.py) reads every subscription's coords (`alerts.all_subscription_coords`),
-  maps them to distinct radars via `_detect_radar`, and blocking-refreshes each.
-  A stale-cache refresh runs `process_alerts` internally on completion; if the
-  cache was already fresh (someone browsed that city recently), the refresh
-  no-ops so `_sweep_alerts` calls `process_alerts` explicitly itself — every
-  sweep tick checks alerts regardless of recent browsing traffic. The
+  maps them to distinct radars via `_detect_radar`, and asynchronously refreshes each.
+  To prevent HTTP timeouts by external cron providers, the endpoint returns immediately
+  (`{"ok": true, "status": "sweep_queued"}`) and runs the sweep in a background thread.
+  A global non-blocking lock (`_sweep_bg_lock`) ensures that at most one sweep runs at
+  a time, protecting the 512 MB memory limit. A stale-cache refresh runs `process_alerts`
+  internally on completion; if the cache was already fresh (someone browsed that city
+  recently), the refresh no-ops so `_sweep_alerts` calls `process_alerts` explicitly
+  itself — every sweep tick checks alerts regardless of recent browsing traffic. The
   `keepalive.yml` GitHub Action hits this every 10 min, so alerts fire on
   schedule instead of only when someone browses that city; `keep_alive.yml`
   still pings `/health` every 5 min as a cheap awake-keeper. Optional
