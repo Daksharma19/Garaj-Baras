@@ -4,6 +4,8 @@ import { MapContainer, Marker, Popup, Polyline, TileLayer } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useT, tr } from './i18n'
 
+const CARTO_KEY = import.meta.env.VITE_CARTO_API_KEY
+
 // Localize a backend rain-intensity label for display.
 function rainLabelTr(label) {
   const map = {
@@ -307,8 +309,8 @@ export default function RouteMap({
         }}
       >
         <TileLayer
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-          attribution="CartoDB"
+          url={`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`}
+          attribution="&copy; OpenStreetMap contributors &copy; CARTO"
         />
 
         {Array.isArray(routeCoords) && routeCoords.length > 0 && (
