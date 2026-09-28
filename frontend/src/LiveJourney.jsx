@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { useT, tr } from './i18n'
 import { fmtVisibility, fogZones } from './fog'
+import { ManeuverIcon, fmtDist, maneuverText, streetName } from './maneuvers'
 
 // ── Live Journey ──────────────────────────────────────────────────────────────
 // Two clocks:
@@ -131,64 +132,6 @@ function bearingDeg(a, b) {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
 }
 
-// ORS step types → [english, hindi, arrow rotation (deg) | special glyph]
-const MANEUVERS = {
-  0: ['Turn left', 'बाएँ मुड़ें', -90],
-  1: ['Turn right', 'दाएँ मुड़ें', 90],
-  2: ['Turn sharp left', 'तेज़ बाएँ मुड़ें', -135],
-  3: ['Turn sharp right', 'तेज़ दाएँ मुड़ें', 135],
-  4: ['Bear left', 'हल्का बाएँ मुड़ें', -45],
-  5: ['Bear right', 'हल्का दाएँ मुड़ें', 45],
-  6: ['Continue straight', 'सीधे चलें', 0],
-  7: ['Enter the roundabout', 'गोलचक्कर में जाएँ', 'round'],
-  8: ['Exit the roundabout', 'गोलचक्कर से निकलें', 'round'],
-  9: ['Make a U-turn', 'यू-टर्न लें', 'uturn'],
-  10: ['Arrive at destination', 'मंज़िल पर पहुँचें', 'goal'],
-  11: ['Head out', 'चलना शुरू करें', 0],
-  12: ['Keep left', 'बाएँ रहें', -30],
-  13: ['Keep right', 'दाएँ रहें', 30],
-}
-
-function maneuverText(step) {
-  const m = MANEUVERS[step?.type] || MANEUVERS[6]
-  if (step?.type === 7 && Number(step.exit) > 0) {
-    return tr(`Take exit ${step.exit} at the roundabout`, `गोलचक्कर से ${step.exit}वाँ निकास लें`)
-  }
-  return tr(m[0], m[1])
-}
-
-function streetName(step) {
-  const n = String(step?.name || '').trim()
-  return n && n !== '-' ? n : ''
-}
-
-function ManeuverIcon({ type, size = 44 }) {
-  const glyph = (MANEUVERS[type] || MANEUVERS[6])[2]
-  if (glyph === 'goal') return <span className="nav-mico nav-mico--glyph" style={{ fontSize: size * 0.7 }}>🏁</span>
-  if (glyph === 'round') return <span className="nav-mico nav-mico--glyph" style={{ fontSize: size * 0.8 }}>⟳</span>
-  if (glyph === 'uturn') {
-    return (
-      <svg className="nav-mico" width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
-        <path d="M30 42 V18 a8 8 0 0 0 -16 0 V30" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
-        <path d="M6 26 L14 36 L22 26" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    )
-  }
-  return (
-    <svg className="nav-mico" width={size} height={size} viewBox="0 0 48 48" aria-hidden="true"
-      style={{ transform: `rotate(${glyph}deg)` }}>
-      <path d="M24 42 V10" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
-      <path d="M13 20 L24 8 L35 20" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
-}
-
-function fmtDist(km) {
-  if (km < 0.1) return `${Math.max(10, Math.round((km * 1000) / 10) * 10)} ${tr('m', 'मी')}`
-  if (km < 1) return `${Math.round((km * 1000) / 50) * 50} ${tr('m', 'मी')}`
-  return `${km < 10 ? km.toFixed(1) : Math.round(km)} ${tr('km', 'किमी')}`
-}
-
 function fmtDuration(mins) {
   const m = Math.max(1, Math.round(mins))
   if (m < 60) return `${m} ${tr('min', 'मिनट')}`
@@ -252,6 +195,8 @@ export default function LiveJourneyPanel({
   onLivePos,          // ({lat, lon, heading}) → App → RouteMap marker
   onWaypointsUpdated, // (rawResponseData) → App merges + recolors segments
   onEnd,
+  approach = null,   // {name}: guiding the user to the route's start (no radar/guardian)
+  onArrive,           // approach leg finished → App switches to the main route
 }) {
   const t = useT()
   const cumKm = useMemo(() => buildCumKm(routeCoords), [routeCoords])
@@ -294,6 +239,7 @@ export default function LiveJourneyPanel({
   const aliveRef = useRef(true)
   const journeyIdRef = useRef(null)    // server-side journey (screen-off guardian)
   const endedRef = useRef(false)
+  const arrivedRef = useRef(false)     // approach leg: fire onArrive once
   const [guardian, setGuardian] = useState('starting') // starting | on | off | denied
 
   const speedForEta = () =>
@@ -393,6 +339,7 @@ export default function LiveJourneyPanel({
   // estimate with the real GPS progress.
   useEffect(() => {
     let cancelled = false
+    if (approach) { setGuardian('off'); return }
     ;(async () => {
       try {
         if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -538,7 +485,10 @@ export default function LiveJourneyPanel({
       setSpeedKmh(speedRef.current)
       setCountdown(computeCountdown(waypointsRef.current, progress, speedForEta()))
       if (fixRef.current || simRef.current) {
-        if (progress >= totalKm - 0.05) { setArrived(true); endServerJourney() }
+        if (progress >= totalKm - 0.05) {
+          if (approach) { if (!arrivedRef.current) { arrivedRef.current = true; onArrive?.() } }
+          else { setArrived(true); endServerJourney() }
+        }
         const here = pointAtKm(routeCoords, cumKm, progress)
         // heading from the route itself — steadier than GPS course at low speed
         const heading = progress < totalKm - 0.04
@@ -549,7 +499,7 @@ export default function LiveJourneyPanel({
 
       const left = Math.max(0, Math.round((nextSyncAtRef.current - now) / 1000))
       setSyncLeftSec(left)
-      if (left === 0) repredict()
+      if (left === 0 && !approach) repredict()
     }, TICK_MS)
     return () => clearInterval(id)
   }, [routeCoords, cumKm, totalKm, plannedSpeedKmh]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -660,12 +610,20 @@ export default function LiveJourneyPanel({
       : t(`Fog in ${fmtMins(((zoneAhead.startKm - progressKm) / speedForEta()) * 60)} · visibility ${vis}`, `${fmtMins(((zoneAhead.startKm - progressKm) / speedForEta()) * 60)} में कोहरा · दृश्यता ${vis}`)
   }
 
+  const approachBadge = approach && !arrived ? (
+    <div className="nav-approach">
+      <span>{t(`Heading to start · ${approach.name}`, `शुरुआती बिंदु की ओर · ${approach.name}`)}</span>
+      <button type="button" onClick={() => onArrive?.()}>{t('Skip', 'छोड़ें')}</button>
+    </div>
+  ) : null
+
   const endJourney = () => { endServerJourney(); onEnd() }
 
   return (
     <div className="nav-ui">
       {/* ── Top: next maneuver card ── */}
       <div className="nav-top">
+        {approachBadge}
         {arrived ? (
           <div className="nav-turn nav-turn--done">
             <ManeuverIcon type={10} />

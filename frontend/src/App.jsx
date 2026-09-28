@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import axios from 'axios'
 import { fetchRouteFog, fogZones, fmtVisibility } from './fog'
+import { ManeuverIcon, fmtDist, maneuverText, streetName } from './maneuvers'
 import './App.css'
 import { useAuth, AccountButton, SignInGate } from './auth'
 import SavedMenu from './SavedMenu'
@@ -260,6 +261,26 @@ function toShortCityName(name) {
   const s = (name ?? '').trim()
   if (!s) return ''
   return s.split(',')[0].trim()
+}
+
+/**
+ * ORS driving route between two {lat, lon} points →
+ * { lonLat: [[lon,lat],...], steps: [{type, name, exit, distance(m), wp}] }.
+ * Each step starts at geometry index wp. Throws on failure.
+ */
+async function fetchOrsRoute(from, to) {
+  const res = await axios.post(
+    'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
+    { coordinates: [[from.lon, from.lat], [to.lon, to.lat]], radiuses: [5000, 5000] },
+    { timeout: 90000, headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' } }
+  )
+  const feature = res.data?.features?.[0]
+  const lonLat = feature?.geometry?.coordinates || null
+  const steps = (feature?.properties?.segments || [])
+    .flatMap((seg) => seg?.steps || [])
+    .filter((s) => Array.isArray(s?.way_points))
+    .map((s) => ({ type: s.type, name: s.name, exit: s.exit_number ?? null, distance: Number(s.distance) || 0, wp: s.way_points[0] }))
+  return { lonLat, steps }
 }
 
 function toCityRouteName(a, b) {
@@ -2133,6 +2154,10 @@ export default function App() {
   const liveSpeedRef = useRef(null)      // planned avg speed (km/h)
   const [routeSteps, setRouteSteps] = useState([]) // ORS turn-by-turn maneuvers
   const [routeFog, setRouteFog] = useState(null)   // Open-Meteo visibility along the route
+  const [approachLeg, setApproachLeg] = useState(null) // {coords, steps, name}: drive to the route start first
+  const [navStarting, setNavStarting] = useState(false)
+  const [showSteps, setShowSteps] = useState(false)
+  const [shareNote, setShareNote] = useState(null)
 
   const reverseAbortRef = useRef(null)
   const reverseCacheRef = useRef(new Map())
@@ -2238,18 +2263,9 @@ export default function App() {
       let routeLonLat = null
       let steps = []
       try {
-        const orsRes = await axios.post(
-          'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
-          { coordinates: [[start.lon, start.lat], [end.lon, end.lat]], radiuses: [5000, 5000] },
-          { timeout: 90000, headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' } }
-        )
-        const feature = orsRes.data?.features?.[0]
-        routeLonLat = feature?.geometry?.coordinates || null
-        // turn-by-turn: each step starts at geometry index way_points[0]
-        steps = (feature?.properties?.segments || [])
-          .flatMap((seg) => seg?.steps || [])
-          .filter((s) => Array.isArray(s?.way_points))
-          .map((s) => ({ type: s.type, name: s.name, exit: s.exit_number ?? null, wp: s.way_points[0] }))
+        const ors = await fetchOrsRoute(start, end)
+        routeLonLat = ors.lonLat
+        steps = ors.steps
       } catch {
         routeLonLat = [[start.lon, start.lat], [end.lon, end.lat]]
       }
@@ -2367,6 +2383,51 @@ export default function App() {
   function endLiveJourney() {
     setLiveActive(false)
     setLivePos(null)
+    setApproachLeg(null)
+  }
+
+  // Start: like Google Maps, if the user isn't at the route's start yet, first
+  // guide them there (approach leg), then hand over to the planned route.
+  async function startNavigation() {
+    if (navStarting || routeCoords.length < 2) return
+    setNavStarting(true)
+    let leg = null
+    try {
+      const pos = await new Promise((resolve, reject) => {
+        if (!('geolocation' in navigator)) { reject(new Error('no geolocation')); return }
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 })
+      })
+      const here = { lat: pos.coords.latitude, lon: pos.coords.longitude }
+      const start = { lat: routeCoords[0][0], lon: routeCoords[0][1] }
+      if (haversine(here.lat, here.lon, start.lat, start.lon) > 0.3) {
+        const ors = await fetchOrsRoute(here, start)
+        if (Array.isArray(ors.lonLat) && ors.lonLat.length >= 2) {
+          leg = {
+            coords: ors.lonLat.map(([lon, lat]) => [lat, lon]),
+            steps: ors.steps,
+            name: String(source || '').split(',')[0].trim() || tr('start', 'शुरुआत'),
+          }
+        }
+      }
+    } catch {
+      // no GPS / no route to start → just start on the planned route
+    }
+    setApproachLeg(leg)
+    setLivePos(null)
+    setLiveActive(true)
+    setNavStarting(false)
+  }
+
+  async function shareRoute() {
+    const text = `${routeName}: ${fmtDuration(tripMinutes)}, ${shownDistanceKm != null ? shownDistanceKm.toFixed(1) : '—'} km. ${rainSummary?.text || ''}`.trim()
+    try {
+      if (navigator.share) await navigator.share({ title: 'Garaj Baras', text })
+      else {
+        await navigator.clipboard.writeText(text)
+        setShareNote(tr('Copied to clipboard', 'क्लिपबोर्ड पर कॉपी किया'))
+        setTimeout(() => setShareNote(null), 2000)
+      }
+    } catch { /* user cancelled */ }
   }
 
   // While navigating, refresh the fog picture every 20 min (visibility
@@ -2440,6 +2501,36 @@ export default function App() {
     }
     return null
   }, [result, avgSpeedKmh, journeyMins, tripInputMode, shownDistanceKm])
+
+  // One-line rain status for the route card
+  const rainSummary = useMemo(() => {
+    if (!result || result._pending) return null
+    const tl = rainTimeline
+    if (!tl || tl.tone === 'clear' || !tl.closest) return { tone: 'clear', text: tr('No rain on route', 'रास्ते में बारिश नहीं') }
+    const firstEta = Number(tl.closest.startMin) || 0
+    const lastEta = Number(tl.lastEta) || 0
+    const label = `${tRainLabel(tl.closest.intensity || 'Light')} ${tr('rain', 'बारिश')}`
+    if (firstEta <= 2 && tl.closest.endMin >= lastEta - 2.5) return { tone: 'rain', text: tr(`${label} for the whole trip`, `पूरे सफ़र ${label}`) }
+    if (firstEta <= 2) return { tone: 'rain', text: tr(`${label} now · clears in ${Math.round(tl.closest.endMin)} min`, `अभी ${label} · ${Math.round(tl.closest.endMin)} मिनट में साफ`) }
+    return { tone: 'rain', text: tr(`${label} in ${Math.round(firstEta)} min`, `${Math.round(firstEta)} मिनट में ${label}`) }
+  }, [result, rainTimeline])
+
+  // Google-style "via <road>": the named road with the most distance on it
+  const viaName = useMemo(() => {
+    const byName = new Map()
+    for (const s of routeSteps) {
+      const n = String(s?.name || '').trim()
+      if (!n || n === '-') continue
+      byName.set(n, (byName.get(n) || 0) + (Number(s.distance) || 0))
+    }
+    let best = null, bestD = 0
+    for (const [n, d] of byName) if (d > bestD) { best = n; bestD = d }
+    return best
+  }, [routeSteps])
+
+  const arrivalClock = tripMinutes != null
+    ? new Date(Date.now() + tripMinutes * 60000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null
 
   function handleBackToPlanner() {
     endLiveJourney()
@@ -2785,8 +2876,110 @@ export default function App() {
                 </span>
               </nav>
 
-              {/* Route title */}
-              <h2 className="route-title">{routeName}</h2>
+              {/* Map */}
+              <div className="map-wrap">
+                <Suspense
+                  fallback={
+                    <div className="map-container">
+                      <div style={{ height: '46vh', display: 'grid', placeItems: 'center', color: 'var(--text-secondary)' }}>
+                        {t('Loading map…', 'नक्शा लोड हो रहा है…')}
+                      </div>
+                    </div>
+                  }
+                >
+                  <RouteMap
+                    routeCoords={routeCoords}
+                    routeSegments={routeSegments}
+                    waypoints={result?._pending ? [] : (result?.waypoints || [])}
+                    activeSeg={activeSeg}
+                    setActiveSeg={setActiveSeg}
+                    openSegmentPopup={openSegmentPopup}
+                    onStopDetails={(stop) => setJourneyStop({ ...stop, requestId: Date.now() })}
+                    livePos={null}
+                    fog={routeFog}
+                    height="46vh"
+                  />
+                </Suspense>
+                {scanning && (
+                  <div className="scan-overlay" role="status" aria-live="polite">
+                    <span className="spinner" aria-hidden />
+                    <span className="scan-overlay__label">{t('SCANNING RADAR…', 'रडार स्कैन हो रहा है…')}</span>
+                    {scanStatus && scanStatus !== tr('Scanning radar…', 'रडार स्कैन हो रहा है…') && (
+                      <span className="scan-overlay__sub">{scanStatus}</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Route card — Google Maps style summary + actions */}
+              <section className="route-card" aria-label={t('Route summary', 'रास्ता सारांश')}>
+                <div className="rc-places">
+                  <div className="rc-place"><span className="rc-dot rc-dot--a" aria-hidden />{String(source || '').split(',')[0] || '—'}</div>
+                  <div className="rc-place"><span className="rc-dot rc-dot--b" aria-hidden />{String(destination || '').split(',')[0] || '—'}</div>
+                </div>
+
+                <div className="rc-main">
+                  <span className="rc-time">{result._pending ? t('Scanning…', 'स्कैन हो रहा है…') : fmtDuration(tripMinutes)}</span>
+                  {shownDistanceKm != null && <span className="rc-dist">({shownDistanceKm.toFixed(1)} {t('km', 'किमी')})</span>}
+                </div>
+                <div className="rc-sub">
+                  {arrivalClock && !result._pending && <span>{t('Arrive', 'पहुँच')} {arrivalClock}</span>}
+                  {viaName && <span>{t('via', 'होकर')} {viaName}</span>}
+                </div>
+
+                {!result._pending && (
+                  <div className="rc-chips">
+                    {rainSummary && (
+                      <span className={`rc-chip rc-chip--${rainSummary.tone}`}>
+                        <span aria-hidden>{rainSummary.tone === 'clear' ? '☀' : '🌧'}</span> {rainSummary.text}
+                      </span>
+                    )}
+                    <span className={`rc-chip rc-chip--${fogSummary ? 'fog' : 'muted'}`}>
+                      <span aria-hidden>🌫</span>{' '}
+                      {fogSummary
+                        ? t(`Fog on ~${Math.round(fogSummary.km)} km · ${fmtVisibility(fogSummary.minVis)}`, `~${Math.round(fogSummary.km)} किमी पर कोहरा · ${fmtVisibility(fogSummary.minVis)}`)
+                        : routeFog ? t('No fog', 'कोहरा नहीं') : t('Checking fog…', 'कोहरा जाँच रहे हैं…')}
+                    </span>
+                    {result.radar_message && <span className="rc-chip rc-chip--muted"><span aria-hidden>📡</span> {result.radar_message}</span>}
+                  </div>
+                )}
+
+                <div className="rc-actions">
+                  <button
+                    type="button"
+                    className="rc-btn rc-btn--primary"
+                    onClick={startNavigation}
+                    disabled={result._pending || routeCoords.length < 2 || navStarting}
+                  >
+                    {navStarting ? <span className="spinner spinner--sm" aria-hidden /> : <span aria-hidden>▲</span>}
+                    {navStarting ? t('Locating…', 'स्थान खोज रहे हैं…') : t('Start', 'शुरू करें')}
+                  </button>
+                  <button type="button" className={`rc-btn${showSteps ? ' is-on' : ''}`} onClick={() => setShowSteps((v) => !v)} disabled={!routeSteps.length}>
+                    <span aria-hidden>☰</span> {t('Steps', 'दिशाएँ')}
+                  </button>
+                  <button type="button" className="rc-btn" onClick={handlePredict} disabled={loading || scanning}>
+                    <span aria-hidden>↻</span> {t('Refresh', 'ताज़ा करें')}
+                  </button>
+                  <button type="button" className="rc-btn" onClick={shareRoute} disabled={result._pending}>
+                    <span aria-hidden>⤴</span> {shareNote || t('Share', 'साझा करें')}
+                  </button>
+                </div>
+
+                {showSteps && routeSteps.length > 0 && (
+                  <ol className="rc-steps">
+                    {routeSteps.map((s, i) => (
+                      <li key={`${s.wp}-${i}`}>
+                        <span className="rc-steps__icon"><ManeuverIcon type={s.type} size={22} /></span>
+                        <span className="rc-steps__text">
+                          <span className="rc-steps__instr">{maneuverText(s)}</span>
+                          {streetName(s) && <span className="rc-steps__street">{streetName(s)}</span>}
+                        </span>
+                        {s.distance > 0 && s.type !== 10 && <span className="rc-steps__dist">{fmtDist(s.distance / 1000)}</span>}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
 
               {/* Rain narrative banner */}
               {rainTimeline && !result._pending && (
@@ -2819,126 +3012,70 @@ export default function App() {
                 />
               )}
 
-              {/* Stats strip */}
-              <div className="stats-strip">
-                <div className="stat">
-                  <span className="stat__label">{t('Distance', 'दूरी')}</span>
-                  <span className="stat__value">
-                    {shownDistanceKm == null ? '—' : `${shownDistanceKm.toFixed(1)} ${t('km', 'किमी')}`}
-                  </span>
-                </div>
-                <div className="stat-div" aria-hidden />
-                <div className="stat">
-                  <span className="stat__label">{t('Journey time', 'सफ़र समय')}</span>
-                  <span className="stat__value">
-                    {result._pending ? '—' : fmtDuration(tripMinutes)}
-                  </span>
-                </div>
-                <div className="stat-div" aria-hidden />
-                <div className="stat">
-                  {(() => {
-                    if (result._pending) return (<><span className="stat__label">{t('Rain status', 'बारिश स्थिति')}</span><span className="stat__value">—</span></>)
-                    const tl = rainTimeline
-                    if (!tl || tl.tone === 'clear' || !tl.closest) return (<><span className="stat__label">{t('Rain', 'बारिश')}</span><span className="stat__value">{t('None', 'कोई नहीं')}</span></>)
-                    const firstEta = Number(tl.closest.startMin) || 0
-                    const lastEta = Number(tl.lastEta) || 0
-                    const isNow = firstEta <= 2
-                    const continuesToEnd = tl.closest.endMin >= lastEta - 2.5
-                    if (isNow && continuesToEnd) return (<><span className="stat__label">{t('Rain duration', 'बारिश अवधि')}</span><span className="stat__value">{Math.round(lastEta)} {t('min', 'मिनट')}</span></>)
-                    if (isNow) return (<><span className="stat__label">{t('Rain ends', 'बारिश खत्म')}</span><span className="stat__value">{Math.round(tl.closest.endMin)} {t('min', 'मिनट')}</span></>)
-                    return (<><span className="stat__label">{t('Rain starts', 'बारिश शुरू')}</span><span className="stat__value">{Math.round(firstEta)} {t('min', 'मिनट')}</span></>)
-                  })()}
-                </div>
-              </div>
-
-              {/* Fog along the route (Open-Meteo visibility) */}
-              {!result._pending && fogSummary && (
-                <div className="fog-banner" role="note">
-                  <span className="fog-banner__icon" aria-hidden>🌫</span>
-                  <span>
-                    {t(
-                      `Fog likely on ~${Math.round(fogSummary.km)} km of your route — visibility down to ${fmtVisibility(fogSummary.minVis)}.`,
-                      `आपके रास्ते के ~${Math.round(fogSummary.km)} किमी पर कोहरे की संभावना — दृश्यता ${fmtVisibility(fogSummary.minVis)} तक।`,
-                    )}
-                  </span>
-                </div>
-              )}
-
-              {/* Navigation: full-screen turn-by-turn + live rain/fog countdown */}
-              {!result._pending && routeCoords.length >= 2 && (
-                <button
-                  type="button"
-                  className="live-start-btn"
-                  onClick={() => setLiveActive(true)}
-                >
-                  <span className="live-start-btn__dot" aria-hidden />
-                  {t('Start navigation', 'नेविगेशन शुरू करें')}
-                </button>
-              )}
-
               {liveActive && !result._pending && routeCoords.length >= 2 && createPortal(
                 <div className="nav-screen" role="dialog" aria-label={t('Navigation', 'नेविगेशन')}>
                   <Suspense fallback={<div className="nav-loading">{t('Loading map…', 'नक्शा लोड हो रहा है…')}</div>}>
-                    <RouteMap
-                      navMode
-                      routeCoords={routeCoords}
-                      routeSegments={routeSegments}
-                      waypoints={result.waypoints || []}
-                      activeSeg={activeSeg}
-                      setActiveSeg={setActiveSeg}
-                      openSegmentPopup={openSegmentPopup}
-                      livePos={livePos}
-                      fog={routeFog}
-                    />
-                    <LiveJourneyPanel
-                      apiBase={API_BASE}
-                      routeCoords={routeCoords}
-                      waypoints={result.waypoints || []}
-                      plannedSpeedKmh={liveSpeedRef.current}
-                      steps={routeSteps}
-                      fog={routeFog}
-                      onLivePos={setLivePos}
-                      onWaypointsUpdated={applyLivePrediction}
-                      onEnd={endLiveJourney}
-                    />
+                    {approachLeg ? (
+                      <>
+                        <RouteMap
+                          key="nav-approach"
+                          navMode
+                          hideStartMarker
+                          routeCoords={approachLeg.coords}
+                          routeSegments={[]}
+                          waypoints={[]}
+                          activeSeg={null}
+                          setActiveSeg={() => {}}
+                          openSegmentPopup={() => {}}
+                          livePos={livePos}
+                          fog={null}
+                        />
+                        <LiveJourneyPanel
+                          key="approach"
+                          apiBase={API_BASE}
+                          routeCoords={approachLeg.coords}
+                          waypoints={[]}
+                          plannedSpeedKmh={30}
+                          steps={approachLeg.steps}
+                          approach={{ name: approachLeg.name }}
+                          onArrive={() => { setLivePos(null); setApproachLeg(null) }}
+                          onLivePos={setLivePos}
+                          onWaypointsUpdated={() => {}}
+                          onEnd={endLiveJourney}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <RouteMap
+                          key="nav-main"
+                          navMode
+                          routeCoords={routeCoords}
+                          routeSegments={routeSegments}
+                          waypoints={result.waypoints || []}
+                          activeSeg={activeSeg}
+                          setActiveSeg={setActiveSeg}
+                          openSegmentPopup={openSegmentPopup}
+                          livePos={livePos}
+                          fog={routeFog}
+                        />
+                        <LiveJourneyPanel
+                          key="main"
+                          apiBase={API_BASE}
+                          routeCoords={routeCoords}
+                          waypoints={result.waypoints || []}
+                          plannedSpeedKmh={liveSpeedRef.current}
+                          steps={routeSteps}
+                          fog={routeFog}
+                          onLivePos={setLivePos}
+                          onWaypointsUpdated={applyLivePrediction}
+                          onEnd={endLiveJourney}
+                        />
+                      </>
+                    )}
                   </Suspense>
                 </div>,
                 document.body,
               )}
-
-              {/* Map */}
-              <div className="map-wrap">
-                <Suspense
-                  fallback={
-                    <div className="map-container">
-                      <div style={{ height: 320, display: 'grid', placeItems: 'center', color: 'var(--text-secondary)' }}>
-                        {t('Loading map…', 'नक्शा लोड हो रहा है…')}
-                      </div>
-                    </div>
-                  }
-                >
-                  <RouteMap
-                    routeCoords={routeCoords}
-                    routeSegments={routeSegments}
-                    waypoints={result?._pending ? [] : (result?.waypoints || [])}
-                    activeSeg={activeSeg}
-                    setActiveSeg={setActiveSeg}
-                    openSegmentPopup={openSegmentPopup}
-                    onStopDetails={(stop) => setJourneyStop({ ...stop, requestId: Date.now() })}
-                    livePos={null}
-                    fog={routeFog}
-                  />
-                </Suspense>
-                {scanning && (
-                  <div className="scan-overlay" role="status" aria-live="polite">
-                    <span className="spinner" aria-hidden />
-                    <span className="scan-overlay__label">{t('SCANNING RADAR…', 'रडार स्कैन हो रहा है…')}</span>
-                    {scanStatus && scanStatus !== tr('Scanning radar…', 'रडार स्कैन हो रहा है…') && (
-                      <span className="scan-overlay__sub">{scanStatus}</span>
-                    )}
-                  </div>
-                )}
-              </div>
 
               {/* Rain-stop detail: nowcast + forecast radar at the tapped stop */}
               {journeyStop && !result._pending && (

@@ -193,6 +193,8 @@ export default function RouteMap({
   livePos,          // {lat, lon, heading} while a live journey is running, else null
   fog,              // [{cumKm, visM, level}] from fog.js, or null
   navMode = false,  // full-screen turn-by-turn map (heading-up, follow-me)
+  height = '320px', // non-nav map height
+  hideStartMarker = false, // approach leg: the start is the user's own position
 }) {
   const t = useT()
   const [mapRef, setMapRef] = useState(null)
@@ -406,7 +408,7 @@ export default function RouteMap({
         ref={setMapRef}
         center={midpoint}
         zoom={9}
-        style={{ height: navMode ? '100%' : '320px', width: '100%' }}
+        style={{ height: navMode ? '100%' : height, width: '100%' }}
         zoomControl={!navMode}
         scrollWheelZoom
         rotate={navMode}
@@ -433,7 +435,7 @@ export default function RouteMap({
               positions={seg.positions}
               color={seg.color}
               weight={navMode ? 9 : 6}
-              opacity={0.92}
+              opacity={seg.color === '#FFFFFF' ? 0 : 0.92} // clear stretches show the blue route underneath (still tappable)
               eventHandlers={{ click: () => openSegmentPopup(seg) }}
             />
           ))}
@@ -455,9 +457,11 @@ export default function RouteMap({
         {/* Start / destination markers */}
         {Array.isArray(routeCoords) && routeCoords.length >= 2 && (
           <>
-            <Marker position={routeCoords[0]} icon={endpointIcon('start')} zIndexOffset={400}>
-              <Popup>Start</Popup>
-            </Marker>
+            {!hideStartMarker && (
+              <Marker position={routeCoords[0]} icon={endpointIcon('start')} zIndexOffset={400}>
+                <Popup>Start</Popup>
+              </Marker>
+            )}
             <Marker position={routeCoords[routeCoords.length - 1]} icon={endpointIcon('end')} zIndexOffset={400}>
               <Popup>Destination</Popup>
             </Marker>

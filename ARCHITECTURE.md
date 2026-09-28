@@ -91,6 +91,7 @@ Garaj Baras/
 │   ├── src/LiveJourney.jsx      ← navigation UI: GPS tracking, ORS turn-by-turn card, speed/ETA bar, rain + fog chips, 5-min radar re-sync, journey-guardian registration
 │   ├── src/fog.js               ← Open-Meteo hourly visibility along route waypoints (browser-side, keyless) → fog zones
 │   ├── src/mapTiles.js          ← base-map tiles: Mapbox (dark-v11 for route + nav, light-v11 for India radar; route maps dim/desaturate tiles via CSS so only the cased route line stands out) when MAPBOX_ACCESS_TOKEN is set (root .env, injected by vite.config.js), else CARTO/OSM fallback
+│   ├── src/maneuvers.jsx        ← ORS maneuver icons/text/distance helpers shared by the route card + navigation
 │   ├── src/leafletSetup.js      ← exposes window.L before `leaflet-rotate` loads (the plugin patches the global)
 │   ├── src/NetworkLayers.jsx    ← UNRELATED OSI-layers demo component; not imported anywhere
 │   ├── public/sw.js             ← service worker: push notifications + offline fallback
@@ -526,8 +527,22 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   rain forecast coloring), summarized in a `fog-banner` on the results page,
   and shown as a "Fog in ~N min · visibility X" chip while navigating.
   Refreshed every 20 min during navigation. Failures are silent (fog optional).
-- **Navigation mode (`LiveJourney.jsx` + `RouteMap navMode`):** "Start
-  navigation" on the results screen opens a full-screen view (portal to
+- **Results screen / route card:** map on top (46vh), then a Google-Maps
+  style `route-card`: From/To, trip time + distance, arrival clock, "via
+  <road>" (named ORS step with the most distance), rain/fog/radar chips, and
+  actions Start · Steps (ORS step list, shared helpers in `maneuvers.jsx`) ·
+  Refresh (re-scan) · Share (Web Share / clipboard). The narrative rain
+  banner + timeline follow. "No Rain" segments are drawn transparent so clear
+  road shows as the blue route; only rain stretches are colored.
+- **Start → go to the starting point:** `startNavigation()` takes one GPS
+  fix; if the user is >300 m from the route start it fetches an ORS route
+  (`fetchOrsRoute`) from there to the start and navigates that **approach
+  leg** first (`LiveJourneyPanel approach`: no radar sync, no guardian, badge
+  "Heading to start · <name>" with Skip). Arrival/Skip → `onArrive` swaps in
+  the main route (keyed remount). No GPS / ORS failure → straight to the main
+  route.
+- **Navigation mode (`LiveJourney.jsx` + `RouteMap navMode`):** "Start" on
+  the route card opens a full-screen view (portal to
   `document.body`, `.nav-screen`): a second RouteMap instance with
   `rotate: true` (leaflet-rotate) that follows the puck heading-up (bearing =
   360 − route heading, puck framed in the lower third; compass button toggles
