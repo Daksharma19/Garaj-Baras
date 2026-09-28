@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ImageOverlay, MapContainer, TileLayer } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
+import { baseTiles } from './mapTiles'
 
 const API_BASE = import.meta.env.DEV
   ? 'http://127.0.0.1:8000'
@@ -74,10 +75,7 @@ export default function IndiaRadarMap() {
   return (
     <div className="india-radar-map">
       <MapContainer center={[22.5, 80.5]} zoom={5} minZoom={4} maxZoom={9} scrollWheelZoom className="india-radar-map__canvas">
-        <TileLayer
-          attribution="&copy; OpenStreetMap contributors"
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
+        <TileLayer {...baseTiles('light')} />
         {noDataMaskUrl && <ImageOverlay url={noDataMaskUrl} bounds={meta.bounds || FALLBACK_BOUNDS} opacity={1} zIndex={390} />}
         <ImageOverlay url={mosaicUrl} bounds={meta.bounds || FALLBACK_BOUNDS} opacity={0.9} zIndex={420} eventHandlers={{ load: () => setLoaded(true), error: () => setFailed(true) }} />
       </MapContainer>

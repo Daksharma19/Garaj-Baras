@@ -90,6 +90,7 @@ Garaj Baras/
 │   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car + rain/fog layer toggles; `navMode` = full-screen heading-up nav map (leaflet-rotate)
 │   ├── src/LiveJourney.jsx      ← navigation UI: GPS tracking, ORS turn-by-turn card, speed/ETA bar, rain + fog chips, 5-min radar re-sync, journey-guardian registration
 │   ├── src/fog.js               ← Open-Meteo hourly visibility along route waypoints (browser-side, keyless) → fog zones
+│   ├── src/mapTiles.js          ← base-map tiles: Mapbox (dark-v11 / navigation-night-v1 / light-v11) when MAPBOX_ACCESS_TOKEN is set (root .env, injected by vite.config.js), else CARTO/OSM fallback
 │   ├── src/leafletSetup.js      ← exposes window.L before `leaflet-rotate` loads (the plugin patches the global)
 │   ├── src/NetworkLayers.jsx    ← UNRELATED OSI-layers demo component; not imported anywhere
 │   ├── public/sw.js             ← service worker: push notifications + offline fallback
@@ -617,7 +618,7 @@ anywhere**; ignore it. `dist/` is a committed production build.
 - Env vars: `DATABASE_URL` (Supabase Postgres; unset = SQLite dev mode),
   `SUPABASE_URL` + / or `SUPABASE_JWT_SECRET` (auth; neither set = dev no-verify mode),
   `VAPID_PRIVATE_KEY_PEM`, `VAPID_PUBLIC_KEY`, `GEMINI_API_KEY*`,
-  `GEMINI_API_KEYS`, `GROQ_API_KEY`; frontend: `VITE_API_BASE`,
+  `GEMINI_API_KEYS`, `GROQ_API_KEY`; frontend: `VITE_API_BASE`, `MAPBOX_ACCESS_TOKEN` (root .env or host env; public pk token),
   `VITE_ORS_API_KEY`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
 - A Flutter client (`garaj_baras_flutter/`) existed but is **deleted** (staged
   deletions in git); the React app is the only client.

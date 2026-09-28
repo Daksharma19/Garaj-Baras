@@ -5,8 +5,7 @@ import { MapContainer, Marker, Popup, Polyline, TileLayer } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useT, tr } from './i18n'
 import { FOG_COLORS, fogZones } from './fog'
-
-const CARTO_KEY = import.meta.env.VITE_CARTO_API_KEY
+import { baseTiles } from './mapTiles'
 
 // Localize a backend rain-intensity label for display.
 function rainLabelTr(label) {
@@ -416,10 +415,7 @@ export default function RouteMap({
         rotateControl={false}
         shiftKeyRotate={false}
       >
-        <TileLayer
-          url={`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`}
-          attribution="&copy; OpenStreetMap contributors &copy; CARTO"
-        />
+        <TileLayer {...baseTiles(navMode ? 'nav' : 'route')} />
 
         {Array.isArray(routeCoords) && routeCoords.length > 0 && (
           <Polyline
