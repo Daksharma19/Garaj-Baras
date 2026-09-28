@@ -2154,8 +2154,6 @@ export default function App() {
   const liveSpeedRef = useRef(null)      // planned avg speed (km/h)
   const [routeSteps, setRouteSteps] = useState([]) // ORS turn-by-turn maneuvers
   const [routeFog, setRouteFog] = useState(null)   // Open-Meteo visibility along the route
-  const [approachLeg, setApproachLeg] = useState(null) // {coords, steps, name}: drive to the route start first
-  const [navStarting, setNavStarting] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const [shareNote, setShareNote] = useState(null)
 
@@ -2383,39 +2381,14 @@ export default function App() {
   function endLiveJourney() {
     setLiveActive(false)
     setLivePos(null)
-    setApproachLeg(null)
   }
 
-  // Start: like Google Maps, if the user isn't at the route's start yet, first
-  // guide them there (approach leg), then hand over to the planned route.
-  async function startNavigation() {
-    if (navStarting || routeCoords.length < 2) return
-    setNavStarting(true)
-    let leg = null
-    try {
-      const pos = await new Promise((resolve, reject) => {
-        if (!('geolocation' in navigator)) { reject(new Error('no geolocation')); return }
-        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 })
-      })
-      const here = { lat: pos.coords.latitude, lon: pos.coords.longitude }
-      const start = { lat: routeCoords[0][0], lon: routeCoords[0][1] }
-      if (haversine(here.lat, here.lon, start.lat, start.lon) > 0.3) {
-        const ors = await fetchOrsRoute(here, start)
-        if (Array.isArray(ors.lonLat) && ors.lonLat.length >= 2) {
-          leg = {
-            coords: ors.lonLat.map(([lon, lat]) => [lat, lon]),
-            steps: ors.steps,
-            name: String(source || '').split(',')[0].trim() || tr('start', 'शुरुआत'),
-          }
-        }
-      }
-    } catch {
-      // no GPS / no route to start → just start on the planned route
-    }
-    setApproachLeg(leg)
+  // Start: navigate the planned route from the entered source. GPS only moves
+  // the puck once it snaps onto the route; until then nav sits at the source.
+  function startNavigation() {
+    if (routeCoords.length < 2) return
     setLivePos(null)
     setLiveActive(true)
-    setNavStarting(false)
   }
 
   async function shareRoute() {
@@ -2949,10 +2922,10 @@ export default function App() {
                     type="button"
                     className="rc-btn rc-btn--primary"
                     onClick={startNavigation}
-                    disabled={result._pending || routeCoords.length < 2 || navStarting}
+                    disabled={result._pending || routeCoords.length < 2}
                   >
-                    {navStarting ? <span className="spinner spinner--sm" aria-hidden /> : <span aria-hidden>▲</span>}
-                    {navStarting ? t('Locating…', 'स्थान खोज रहे हैं…') : t('Start', 'शुरू करें')}
+                    <span aria-hidden>▲</span>
+                    {t('Start', 'शुरू करें')}
                   </button>
                   <button type="button" className={`rc-btn${showSteps ? ' is-on' : ''}`} onClick={() => setShowSteps((v) => !v)} disabled={!routeSteps.length}>
                     <span aria-hidden>☰</span> {t('Steps', 'दिशाएँ')}
@@ -3015,63 +2988,29 @@ export default function App() {
               {liveActive && !result._pending && routeCoords.length >= 2 && createPortal(
                 <div className="nav-screen" role="dialog" aria-label={t('Navigation', 'नेविगेशन')}>
                   <Suspense fallback={<div className="nav-loading">{t('Loading map…', 'नक्शा लोड हो रहा है…')}</div>}>
-                    {approachLeg ? (
-                      <>
-                        <RouteMap
-                          key="nav-approach"
-                          navMode
-                          hideStartMarker
-                          routeCoords={approachLeg.coords}
-                          routeSegments={[]}
-                          waypoints={[]}
-                          activeSeg={null}
-                          setActiveSeg={() => {}}
-                          openSegmentPopup={() => {}}
-                          livePos={livePos}
-                          fog={null}
-                        />
-                        <LiveJourneyPanel
-                          key="approach"
-                          apiBase={API_BASE}
-                          routeCoords={approachLeg.coords}
-                          waypoints={[]}
-                          plannedSpeedKmh={30}
-                          steps={approachLeg.steps}
-                          approach={{ name: approachLeg.name }}
-                          onArrive={() => { setLivePos(null); setApproachLeg(null) }}
-                          onLivePos={setLivePos}
-                          onWaypointsUpdated={() => {}}
-                          onEnd={endLiveJourney}
-                        />
-                      </>
-                    ) : (
-                      <>
-                        <RouteMap
-                          key="nav-main"
-                          navMode
-                          routeCoords={routeCoords}
-                          routeSegments={routeSegments}
-                          waypoints={result.waypoints || []}
-                          activeSeg={activeSeg}
-                          setActiveSeg={setActiveSeg}
-                          openSegmentPopup={openSegmentPopup}
-                          livePos={livePos}
-                          fog={routeFog}
-                        />
-                        <LiveJourneyPanel
-                          key="main"
-                          apiBase={API_BASE}
-                          routeCoords={routeCoords}
-                          waypoints={result.waypoints || []}
-                          plannedSpeedKmh={liveSpeedRef.current}
-                          steps={routeSteps}
-                          fog={routeFog}
-                          onLivePos={setLivePos}
-                          onWaypointsUpdated={applyLivePrediction}
-                          onEnd={endLiveJourney}
-                        />
-                      </>
-                    )}
+                    <RouteMap
+                      navMode
+                      routeCoords={routeCoords}
+                      routeSegments={routeSegments}
+                      waypoints={result.waypoints || []}
+                      activeSeg={activeSeg}
+                      setActiveSeg={setActiveSeg}
+                      openSegmentPopup={openSegmentPopup}
+                      livePos={livePos}
+                      fog={routeFog}
+                    />
+                    <LiveJourneyPanel
+                      apiBase={API_BASE}
+                      routeCoords={routeCoords}
+                      waypoints={result.waypoints || []}
+                      plannedSpeedKmh={liveSpeedRef.current}
+                      steps={routeSteps}
+                      fog={routeFog}
+                      onLivePos={setLivePos}
+                      onWaypointsUpdated={applyLivePrediction}
+                      sourceName={String(source || '').split(',')[0].trim()}
+                      onEnd={endLiveJourney}
+                    />
                   </Suspense>
                 </div>,
                 document.body,

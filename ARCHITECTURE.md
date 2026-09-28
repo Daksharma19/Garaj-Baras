@@ -533,13 +533,26 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   actions Start · Steps (ORS step list, shared helpers in `maneuvers.jsx`) ·
   Refresh (re-scan) · Share (Web Share / clipboard). The narrative rain
   banner + timeline follow.
-- **Start → go to the starting point:** `startNavigation()` takes one GPS
-  fix; if the user is >300 m from the route start it fetches an ORS route
-  (`fetchOrsRoute`) from there to the start and navigates that **approach
-  leg** first (`LiveJourneyPanel approach`: no radar sync, no guardian, badge
-  "Heading to start · <name>" with Skip). Arrival/Skip → `onArrive` swaps in
-  the main route (keyed remount). No GPS / ORS failure → straight to the main
-  route.
+- **Map styling / controls (RouteMap):** the route is a white line with a
+  dark outline; only rain segments carry color (original palette — the rain-
+  coded route is the product's USP, so nothing else on the route is blue).
+  Separate Rain and Fog toggle buttons show/hide the rain coloring and the
+  fog haze. After the preview animation ends the
+  results map flies to the source (zoom 14). Navigation opens on the route
+  start (city view → flyTo zoom 17), facing along the first ~150 m of road,
+  with the arrow puck shown there until GPS locks; while following heading-up
+  the map gets a Google-style 3D tilt (`.is-tilted`: CSS rotateX on the
+  enlarged leaflet container + horizon haze) that flattens on drag/Overview.
+  Nav side controls are round icon buttons. In navigation an **Overview**
+  button fits the whole route (north-up, stops following); Re-center resumes.
+- **Start navigates from the entered source:** Start opens navigation on the
+  planned route straight away (no routing from the user's current location).
+  GPS only advances progress once a fix snaps onto the route (within 1 km).
+  Until then the camera, arrow, turn card, ETA and rain countdown stay
+  anchored at the source, with a "Navigating from <source>" badge. The red
+  "Off route" badge only appears after the user has been on the route once.
+  There is no backend rule tying the start to the user's location:
+  `/journey/start` only validates at least 2 waypoints, India bounds and speed.
 - **Navigation mode (`LiveJourney.jsx` + `RouteMap navMode`):** "Start" on
   the route card opens a full-screen view (portal to
   `document.body`, `.nav-screen`): a second RouteMap instance with

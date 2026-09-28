@@ -194,7 +194,6 @@ export default function RouteMap({
   fog,              // [{cumKm, visM, level}] from fog.js, or null
   navMode = false,  // full-screen turn-by-turn map (heading-up, follow-me)
   height = '320px', // non-nav map height
-  hideStartMarker = false, // approach leg: the start is the user's own position
 }) {
   const t = useT()
   const [mapRef, setMapRef] = useState(null)
@@ -299,11 +298,26 @@ export default function RouteMap({
 
   const firstFixRef = useRef(true)
 
+  // Before the first GPS fix, navigation anchors on the route start, facing
+  // along the first stretch of road (so it opens zoomed-in, Google-style).
+  const startAnchor = useMemo(() => {
+    if (!Array.isArray(routeCoords) || routeCoords.length < 2) return null
+    const [lat0, lon0] = routeCoords[0]
+    let j = 1
+    // face along the first ~150 m of road (not a tiny driveway stub)
+    while (j < routeCoords.length - 1 && haversineKm(lat0, lon0, routeCoords[j][0], routeCoords[j][1]) < 0.15) j++
+    const [lat1, lon1] = routeCoords[j]
+    const φ1 = (lat0 * Math.PI) / 180, φ2 = (lat1 * Math.PI) / 180, Δλ = ((lon1 - lon0) * Math.PI) / 180
+    const heading = ((Math.atan2(Math.sin(Δλ) * Math.cos(φ2), Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ)) * 180) / Math.PI + 360) % 360
+    return { lat: lat0, lon: lon0, heading }
+  }, [routeCoords])
+
   function followLive(animate = true) {
-    if (!mapRef || !livePos) return
-    const h = Number(livePos.heading)
+    const pos = livePos || (navMode ? startAnchor : null)
+    if (!mapRef || !pos) return
+    const h = Number(pos.heading)
     if (!navMode) {
-      mapRef.panTo([livePos.lat, livePos.lon], { animate, duration: 0.6 })
+      mapRef.panTo([pos.lat, pos.lon], { animate, duration: 0.6 })
       return
     }
     // heading-up: rotate so the travel direction points up the screen
@@ -314,21 +328,43 @@ export default function RouteMap({
       if (diff > 2) mapRef.setBearing(target)
       setBearingDeg(mapRef.getBearing())
     }
-    const z = firstFixRef.current ? 17 : mapRef.getZoom()
+    const first = firstFixRef.current
+    const z = first ? 17 : mapRef.getZoom()
     firstFixRef.current = false
     // Google-style framing: the puck sits in the lower third so more road
     // ahead is visible — shift the map centre forward along the heading.
-    let center = [livePos.lat, livePos.lon]
+    let center = [pos.lat, pos.lon]
     if (headingUp && Number.isFinite(h)) {
-      const mPerPx = (156543.03 * Math.cos((livePos.lat * Math.PI) / 180)) / 2 ** z
-      const aheadKm = (mPerPx * mapRef.getSize().y * 0.22) / 1000
-      center = offsetPoint(livePos.lat, livePos.lon, h, aheadKm)
+      const mPerPx = (156543.03 * Math.cos((pos.lat * Math.PI) / 180)) / 2 ** z
+      const aheadKm = (mPerPx * mapRef.getSize().y * 0.12) / 1000
+      center = offsetPoint(pos.lat, pos.lon, h, aheadKm)
     }
-    mapRef.setView(center, z, { animate, duration: 0.8 })
+    // first framing = a cinematic fly-in from the city view down to street level
+    if (first && animate) mapRef.flyTo(center, z, { duration: 1.6 })
+    else mapRef.setView(center, z, { animate, duration: 0.8 })
   }
 
+  // Overview: zoom out to the whole route + its rain; Re-center resumes following
+  function showOverview() {
+    if (!mapRef || !routeBounds?.isValid()) return
+    followRef.current = false
+    setFollow(false)
+    if (typeof mapRef.setBearing === 'function') { mapRef.setBearing(0); setBearingDeg(0) }
+    mapRef.fitBounds(routeBounds, { paddingTopLeft: [40, 150], paddingBottomRight: [90, 190], maxZoom: 16, animate: true })
+  }
+
+  // Navigation opens on the start: city view → fly in to street level
   useEffect(() => {
-    if (!isLive) { followRef.current = true; setFollow(true); firstFixRef.current = true; return }
+    if (!navMode || !mapRef || !startAnchor) return
+    mapRef.setView([startAnchor.lat, startAnchor.lon], 13, { animate: false })
+    firstFixRef.current = true
+    const id = setTimeout(() => { if (followRef.current) followLive(true) }, 350)
+    return () => clearTimeout(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navMode, mapRef, startAnchor])
+
+  useEffect(() => {
+    if (!isLive) { followRef.current = true; setFollow(true); if (!navMode) firstFixRef.current = true; return }
     if (!mapRef || !followRef.current) return
     followLive(!firstFixRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -373,6 +409,15 @@ export default function RouteMap({
     ? routeCoords[Math.floor(routeCoords.length / 2)]
     : [26.7606, 80.8893]
 
+  // After the rain overview animation finishes, zoom into the source (Google-style)
+  useEffect(() => {
+    if (journeyMode !== 'done' || navMode || isLive || !mapRef || !routeCoords?.length) return
+    const id = setTimeout(() => {
+      mapRef.flyTo(routeCoords[0], 14, { duration: 1.6 })
+    }, 700)
+    return () => clearTimeout(id)
+  }, [journeyMode, navMode, isLive, mapRef, routeCoords])
+
   const routeBounds = useMemo(() => {
     if (!Array.isArray(routeCoords) || routeCoords.length < 2) return null
     return L.latLngBounds(routeCoords)
@@ -393,6 +438,7 @@ export default function RouteMap({
 
   useEffect(() => {
     if (!mapRef || !routeBounds || !routeBounds.isValid()) return
+    if (navMode) return // navigation frames itself (start → follow)
     const doFit = () => {
       mapRef.invalidateSize()
       mapRef.fitBounds(routeBounds, { padding: [10, 10], maxZoom: 17, animate: true })
@@ -400,10 +446,10 @@ export default function RouteMap({
     doFit()
     const t = setTimeout(doFit, 120)
     return () => clearTimeout(t)
-  }, [mapRef, routeBounds])
+  }, [mapRef, routeBounds, navMode])
 
   return (
-    <div className={`map-container${navMode ? ' map-container--nav' : ''}`}>
+    <div className={`map-container${navMode ? ' map-container--nav' : ''}${navMode && follow && headingUp ? ' is-tilted' : ''}`}>
       <MapContainer
         ref={setMapRef}
         center={midpoint}
@@ -421,10 +467,10 @@ export default function RouteMap({
 
         {Array.isArray(routeCoords) && routeCoords.length > 0 && (
           <>
-            {/* Focus: soft glow + bright casing so the route pops off the muted base map */}
-            <Polyline positions={routeCoords} color="#60A5FA" weight={navMode ? 26 : 18} opacity={0.16} interactive={false} />
-            <Polyline positions={routeCoords} color="#F8FAFC" weight={navMode ? 14 : 10} opacity={0.95} interactive={false} />
-            <Polyline positions={routeCoords} color="#2563EB" weight={navMode ? 9 : 6} opacity={1} interactive={false} />
+            {/* Route = white line with a dark outline; the rain-coded segments on top are the star */}
+            <Polyline positions={routeCoords} color="#FFFFFF" weight={navMode ? 24 : 16} opacity={0.10} interactive={false} />
+            <Polyline positions={routeCoords} color="#0B1220" weight={navMode ? 13 : 9} opacity={0.9} interactive={false} />
+            <Polyline positions={routeCoords} color="#FFFFFF" weight={navMode ? 9 : 6} opacity={1} interactive={false} />
           </>
         )}
 
@@ -457,11 +503,9 @@ export default function RouteMap({
         {/* Start / destination markers */}
         {Array.isArray(routeCoords) && routeCoords.length >= 2 && (
           <>
-            {!hideStartMarker && (
-              <Marker position={routeCoords[0]} icon={endpointIcon('start')} zIndexOffset={400}>
-                <Popup>Start</Popup>
-              </Marker>
-            )}
+            <Marker position={routeCoords[0]} icon={endpointIcon('start')} zIndexOffset={400}>
+              <Popup>Start</Popup>
+            </Marker>
             <Marker position={routeCoords[routeCoords.length - 1]} icon={endpointIcon('end')} zIndexOffset={400}>
               <Popup>Destination</Popup>
             </Marker>
@@ -490,6 +534,16 @@ export default function RouteMap({
         )}
 
         {/* Live GPS marker */}
+        {/* Nav before the first GPS fix: puck at the start, facing the road */}
+        {navMode && !isLive && startAnchor && (
+          <Marker
+            position={[startAnchor.lat, startAnchor.lon]}
+            icon={navArrowIcon(Math.round((startAnchor.heading + bearingDeg) % 360))}
+            zIndexOffset={1200}
+            interactive={false}
+          />
+        )}
+
         {isLive && (
           <Marker
             position={[livePos.lat, livePos.lon]}
@@ -559,7 +613,7 @@ export default function RouteMap({
         </div>
       )}
 
-      {/* Layer toggles: forecast rain coloring + fog (+ compass in nav) */}
+      {/* Layer toggles: forecast rain coloring + fog (+ nav controls) */}
       <div className={`map-layers${navMode ? ' map-layers--nav' : ''}`}>
         <button
           type="button"
@@ -581,6 +635,11 @@ export default function RouteMap({
           {fogLines.length > 0 && <i className="map-layer-btn__dot" aria-hidden />}
         </button>
         {navMode && (
+          <button type="button" className="map-layer-btn" onClick={showOverview} title={t('See the whole route', 'पूरा रास्ता देखें')}>
+            <span aria-hidden>⤢</span> <span>{t('Overview', 'पूरा रास्ता')}</span>
+          </button>
+        )}
+        {navMode && (
           <button
             type="button"
             className="map-layer-btn"
@@ -594,7 +653,7 @@ export default function RouteMap({
       </div>
 
       {/* Re-center on the live marker after the user pans away */}
-      {isLive && !follow && (
+      {(isLive || navMode) && !follow && (
         <button
           type="button"
           className={`journeyBtn recenterBtn${navMode ? ' recenterBtn--nav' : ''}`}

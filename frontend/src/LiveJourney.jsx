@@ -195,8 +195,7 @@ export default function LiveJourneyPanel({
   onLivePos,          // ({lat, lon, heading}) → App → RouteMap marker
   onWaypointsUpdated, // (rawResponseData) → App merges + recolors segments
   onEnd,
-  approach = null,   // {name}: guiding the user to the route's start (no radar/guardian)
-  onArrive,           // approach leg finished → App switches to the main route
+  sourceName = '',    // entered source (e.g. "Lucknow") — nav starts there
 }) {
   const t = useT()
   const cumKm = useMemo(() => buildCumKm(routeCoords), [routeCoords])
@@ -239,7 +238,8 @@ export default function LiveJourneyPanel({
   const aliveRef = useRef(true)
   const journeyIdRef = useRef(null)    // server-side journey (screen-off guardian)
   const endedRef = useRef(false)
-  const arrivedRef = useRef(false)     // approach leg: fire onArrive once
+  const everOnRouteRef = useRef(false) // has GPS ever snapped onto the route?
+  const [awaitingRoute, setAwaitingRoute] = useState(true) // user not on the route yet
   const [guardian, setGuardian] = useState('starting') // starting | on | off | denied
 
   const speedForEta = () =>
@@ -281,7 +281,10 @@ export default function LiveJourneyPanel({
 
         const snap = snapToRoute(routeCoords, cumKm, lat, lon)
         const off = snap.offKm > OFF_ROUTE_KM
-        setOffRoute(off)
+        // Far from the route before ever reaching it = simply not there yet
+        // (navigating from the entered source), not "off route".
+        if (!off && !everOnRouteRef.current) { everOnRouteRef.current = true; setAwaitingRoute(false) }
+        setOffRoute(off && everOnRouteRef.current)
         if (!off) {
           // never snap backwards more than 300 m (GPS jitter at a standstill)
           const km = Math.max(snap.km, progressRef.current - 0.3)
@@ -339,7 +342,6 @@ export default function LiveJourneyPanel({
   // estimate with the real GPS progress.
   useEffect(() => {
     let cancelled = false
-    if (approach) { setGuardian('off'); return }
     ;(async () => {
       try {
         if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -485,10 +487,7 @@ export default function LiveJourneyPanel({
       setSpeedKmh(speedRef.current)
       setCountdown(computeCountdown(waypointsRef.current, progress, speedForEta()))
       if (fixRef.current || simRef.current) {
-        if (progress >= totalKm - 0.05) {
-          if (approach) { if (!arrivedRef.current) { arrivedRef.current = true; onArrive?.() } }
-          else { setArrived(true); endServerJourney() }
-        }
+        if (progress >= totalKm - 0.05) { setArrived(true); endServerJourney() }
         const here = pointAtKm(routeCoords, cumKm, progress)
         // heading from the route itself — steadier than GPS course at low speed
         const heading = progress < totalKm - 0.04
@@ -499,7 +498,7 @@ export default function LiveJourneyPanel({
 
       const left = Math.max(0, Math.round((nextSyncAtRef.current - now) / 1000))
       setSyncLeftSec(left)
-      if (left === 0 && !approach) repredict()
+      if (left === 0) repredict()
     }, TICK_MS)
     return () => clearInterval(id)
   }, [routeCoords, cumKm, totalKm, plannedSpeedKmh]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -520,13 +519,6 @@ export default function LiveJourneyPanel({
       <div className="live-hero live-hero--clear">
         <span className="live-hero__big">{t("You've arrived 🏁", 'आप पहुँच गए 🏁')}</span>
         <span className="live-hero__sub">{t('Journey complete.', 'सफ़र पूरा हुआ।')}</span>
-      </div>
-    )
-  } else if (phase === 'geo_error') {
-    hero = (
-      <div className="live-hero live-hero--warn">
-        <span className="live-hero__big">{t('No GPS', 'GPS नहीं')}</span>
-        <span className="live-hero__sub">{geoMsg}</span>
       </div>
     )
   } else if (phase === 'starting' && !countdown) {
@@ -610,10 +602,11 @@ export default function LiveJourneyPanel({
       : t(`Fog in ${fmtMins(((zoneAhead.startKm - progressKm) / speedForEta()) * 60)} · visibility ${vis}`, `${fmtMins(((zoneAhead.startKm - progressKm) / speedForEta()) * 60)} में कोहरा · दृश्यता ${vis}`)
   }
 
-  const approachBadge = approach && !arrived ? (
+  // Navigating from the entered source while the user isn't on the route yet
+  const fromSource = sourceName || t('the start', 'शुरुआती बिंदु')
+  const sourceBadge = !arrived && !simOn && awaitingRoute ? (
     <div className="nav-approach">
-      <span>{t(`Heading to start · ${approach.name}`, `शुरुआती बिंदु की ओर · ${approach.name}`)}</span>
-      <button type="button" onClick={() => onArrive?.()}>{t('Skip', 'छोड़ें')}</button>
+      <span>{t(`Navigating from ${fromSource}`, `${fromSource} से नेविगेशन`)}</span>
     </div>
   ) : null
 
@@ -623,21 +616,16 @@ export default function LiveJourneyPanel({
     <div className="nav-ui">
       {/* ── Top: next maneuver card ── */}
       <div className="nav-top">
-        {approachBadge}
+        {sourceBadge}
+        {phase === 'geo_error' && !arrived && !simOn && (
+          <div className="nav-approach nav-approach--warn"><span>📍 {geoMsg}</span></div>
+        )}
         {arrived ? (
           <div className="nav-turn nav-turn--done">
             <ManeuverIcon type={10} />
             <div className="nav-turn__text">
               <span className="nav-turn__dist">{t("You've arrived", 'आप पहुँच गए')}</span>
               <span className="nav-turn__street">{t('Journey complete.', 'सफ़र पूरा हुआ।')}</span>
-            </div>
-          </div>
-        ) : phase === 'geo_error' ? (
-          <div className="nav-turn nav-turn--warn">
-            <span className="nav-mico nav-mico--glyph">📍</span>
-            <div className="nav-turn__text">
-              <span className="nav-turn__dist">{t('No GPS', 'GPS नहीं')}</span>
-              <span className="nav-turn__street">{geoMsg}</span>
             </div>
           </div>
         ) : nextStep ? (
@@ -716,9 +704,9 @@ export default function LiveJourneyPanel({
           <div className="nav-details">
             {hero}
 
-            {!arrived && !simOn && (offRoute || phase === 'starting') && countdown && (
+            {!arrived && !simOn && awaitingRoute && (
               <p className="live-anchor-note">
-                {t("📍 You're not on the route yet — predictions count from the route's start point and will lock onto your GPS once you're on the way.", '📍 आप अभी रास्ते पर नहीं हैं — अनुमान रास्ते के शुरुआती बिंदु से गिने जाते हैं और आपके चलने पर आपके GPS से जुड़ जाएँगे।')}
+                {t(`📍 Navigating from ${fromSource} — directions, ETA and rain count from there. Live tracking starts when you reach the route.`, `📍 ${fromSource} से नेविगेशन — दिशा, समय और बारिश वहीं से गिने जाते हैं। रास्ते पर पहुँचने पर लाइव ट्रैकिंग शुरू होगी।`)}
               </p>
             )}
 
