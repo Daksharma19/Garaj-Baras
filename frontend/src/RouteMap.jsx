@@ -435,7 +435,7 @@ export default function RouteMap({
               positions={seg.positions}
               color={seg.color}
               weight={navMode ? 9 : 6}
-              opacity={seg.color === '#FFFFFF' ? 0 : 0.92} // clear stretches show the blue route underneath (still tappable)
+              opacity={0.92}
               eventHandlers={{ click: () => openSegmentPopup(seg) }}
             />
           ))}

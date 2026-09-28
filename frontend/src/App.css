@@ -1913,7 +1913,7 @@
 .legend__swatch--moderate  { background: #0EA5E9; }
 .legend__swatch--light     { background: #38BDF8; }
 .legend__swatch--verylight { background: #7DD3FC; }
-.legend__swatch--norain    { background: #2563EB; border-color: #F8FAFC; }
+.legend__swatch--norain    { background: rgba(255,255,255,0.55); border-color: rgba(255,255,255,0.25); }
 .legend__swatch--unknown   { background: #64748B; opacity: 0.9; }
 
 /* ── Tab Bar ─────────────────────────────────────────────────── */

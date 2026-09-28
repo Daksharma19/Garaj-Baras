@@ -532,8 +532,7 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   <road>" (named ORS step with the most distance), rain/fog/radar chips, and
   actions Start · Steps (ORS step list, shared helpers in `maneuvers.jsx`) ·
   Refresh (re-scan) · Share (Web Share / clipboard). The narrative rain
-  banner + timeline follow. "No Rain" segments are drawn transparent so clear
-  road shows as the blue route; only rain stretches are colored.
+  banner + timeline follow.
 - **Start → go to the starting point:** `startNavigation()` takes one GPS
   fix; if the user is >300 m from the route start it fetches an ORS route
   (`fetchOrsRoute`) from there to the start and navigates that **approach
