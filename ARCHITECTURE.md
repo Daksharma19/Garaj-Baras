@@ -90,7 +90,7 @@ Garaj Baras/
 │   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car + rain/fog layer toggles; `navMode` = full-screen heading-up nav map (leaflet-rotate)
 │   ├── src/LiveJourney.jsx      ← navigation UI: GPS tracking, ORS turn-by-turn card, speed/ETA bar, rain + fog chips, 5-min radar re-sync, journey-guardian registration
 │   ├── src/fog.js               ← Open-Meteo hourly visibility along route waypoints (browser-side, keyless) → fog zones
-│   ├── src/mapTiles.js          ← base-map tiles: Mapbox (dark-v11 / navigation-night-v1 / light-v11) when MAPBOX_ACCESS_TOKEN is set (root .env, injected by vite.config.js), else CARTO/OSM fallback
+│   ├── src/mapTiles.js          ← base-map tiles: Mapbox (dark-v11 for route + nav, light-v11 for India radar; route maps dim/desaturate tiles via CSS so only the cased route line stands out) when MAPBOX_ACCESS_TOKEN is set (root .env, injected by vite.config.js), else CARTO/OSM fallback
 │   ├── src/leafletSetup.js      ← exposes window.L before `leaflet-rotate` loads (the plugin patches the global)
 │   ├── src/NetworkLayers.jsx    ← UNRELATED OSI-layers demo component; not imported anywhere
 │   ├── public/sw.js             ← service worker: push notifications + offline fallback
