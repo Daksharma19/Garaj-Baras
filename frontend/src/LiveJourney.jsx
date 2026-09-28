@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { useT, tr } from './i18n'
+import { fmtVisibility, fogZones } from './fog'
 
 // ── Live Journey ──────────────────────────────────────────────────────────────
 // Two clocks:
@@ -120,6 +121,82 @@ function pointAtKm(routeCoords, cumKm, km) {
   ]
 }
 
+/** Compass bearing (deg, 0 = north, clockwise) from point a to b ([lat,lon]). */
+function bearingDeg(a, b) {
+  const φ1 = (a[0] * Math.PI) / 180
+  const φ2 = (b[0] * Math.PI) / 180
+  const Δλ = ((b[1] - a[1]) * Math.PI) / 180
+  const y = Math.sin(Δλ) * Math.cos(φ2)
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ)
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
+}
+
+// ORS step types → [english, hindi, arrow rotation (deg) | special glyph]
+const MANEUVERS = {
+  0: ['Turn left', 'बाएँ मुड़ें', -90],
+  1: ['Turn right', 'दाएँ मुड़ें', 90],
+  2: ['Turn sharp left', 'तेज़ बाएँ मुड़ें', -135],
+  3: ['Turn sharp right', 'तेज़ दाएँ मुड़ें', 135],
+  4: ['Bear left', 'हल्का बाएँ मुड़ें', -45],
+  5: ['Bear right', 'हल्का दाएँ मुड़ें', 45],
+  6: ['Continue straight', 'सीधे चलें', 0],
+  7: ['Enter the roundabout', 'गोलचक्कर में जाएँ', 'round'],
+  8: ['Exit the roundabout', 'गोलचक्कर से निकलें', 'round'],
+  9: ['Make a U-turn', 'यू-टर्न लें', 'uturn'],
+  10: ['Arrive at destination', 'मंज़िल पर पहुँचें', 'goal'],
+  11: ['Head out', 'चलना शुरू करें', 0],
+  12: ['Keep left', 'बाएँ रहें', -30],
+  13: ['Keep right', 'दाएँ रहें', 30],
+}
+
+function maneuverText(step) {
+  const m = MANEUVERS[step?.type] || MANEUVERS[6]
+  if (step?.type === 7 && Number(step.exit) > 0) {
+    return tr(`Take exit ${step.exit} at the roundabout`, `गोलचक्कर से ${step.exit}वाँ निकास लें`)
+  }
+  return tr(m[0], m[1])
+}
+
+function streetName(step) {
+  const n = String(step?.name || '').trim()
+  return n && n !== '-' ? n : ''
+}
+
+function ManeuverIcon({ type, size = 44 }) {
+  const glyph = (MANEUVERS[type] || MANEUVERS[6])[2]
+  if (glyph === 'goal') return <span className="nav-mico nav-mico--glyph" style={{ fontSize: size * 0.7 }}>🏁</span>
+  if (glyph === 'round') return <span className="nav-mico nav-mico--glyph" style={{ fontSize: size * 0.8 }}>⟳</span>
+  if (glyph === 'uturn') {
+    return (
+      <svg className="nav-mico" width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M30 42 V18 a8 8 0 0 0 -16 0 V30" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
+        <path d="M6 26 L14 36 L22 26" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return (
+    <svg className="nav-mico" width={size} height={size} viewBox="0 0 48 48" aria-hidden="true"
+      style={{ transform: `rotate(${glyph}deg)` }}>
+      <path d="M24 42 V10" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
+      <path d="M13 20 L24 8 L35 20" fill="none" stroke="currentColor" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function fmtDist(km) {
+  if (km < 0.1) return `${Math.max(10, Math.round((km * 1000) / 10) * 10)} ${tr('m', 'मी')}`
+  if (km < 1) return `${Math.round((km * 1000) / 50) * 50} ${tr('m', 'मी')}`
+  return `${km < 10 ? km.toFixed(1) : Math.round(km)} ${tr('km', 'किमी')}`
+}
+
+function fmtDuration(mins) {
+  const m = Math.max(1, Math.round(mins))
+  if (m < 60) return `${m} ${tr('min', 'मिनट')}`
+  const h = Math.floor(m / 60)
+  const r = m % 60
+  return r === 0 ? `${h} ${tr('h', 'घं')}` : `${h} ${tr('h', 'घं')} ${r} ${tr('min', 'मिनट')}`
+}
+
 /**
  * The live countdown, from current progress + speed + predicted waypoints.
  * Returns one of:
@@ -170,7 +247,9 @@ export default function LiveJourneyPanel({
   routeCoords,        // [[lat,lon], ...]
   waypoints,          // merged predictions incl. _cumKm (updated by App on re-predict)
   plannedSpeedKmh,
-  onLivePos,          // ({lat, lon}) → App → RouteMap marker
+  steps = [],         // ORS turn-by-turn: [{type, name, exit, wp (routeCoords index)}]
+  fog = null,         // fog.js points along the route, or null
+  onLivePos,          // ({lat, lon, heading}) → App → RouteMap marker
   onWaypointsUpdated, // (rawResponseData) → App merges + recolors segments
   onEnd,
 }) {
@@ -189,6 +268,17 @@ export default function LiveJourneyPanel({
   const [syncLeftSec, setSyncLeftSec] = useState(Math.round(REPREDICT_MS / 1000))
   const [updateNote, setUpdateNote] = useState(null)
   const [simOn, setSimOn] = useState(false)
+  const [progressKm, setProgressKm] = useState(0)
+  const [sheetOpen, setSheetOpen] = useState(false)
+
+  // maneuvers located along the route (km at which each step starts)
+  const stepsKm = useMemo(
+    () => (steps || [])
+      .filter((s) => Number.isInteger(s?.wp))
+      .map((s) => ({ ...s, km: cumKm[Math.min(s.wp, cumKm.length - 1)] ?? 0 })),
+    [steps, cumKm],
+  )
+  const fogZ = useMemo(() => fogZones(fog), [fog])
 
   // refs = the live model (mutated by tick/fix handlers without re-renders)
   const fixRef = useRef(null)          // { snapKm, at(ms), lat, lon }
@@ -444,12 +534,17 @@ export default function LiveJourneyPanel({
       // of silently claiming "clear ahead".
       const progress = progressRef.current
       setRemainKm(Math.max(0, totalKm - progress))
+      setProgressKm(progress)
       setSpeedKmh(speedRef.current)
       setCountdown(computeCountdown(waypointsRef.current, progress, speedForEta()))
       if (fixRef.current || simRef.current) {
         if (progress >= totalKm - 0.05) { setArrived(true); endServerJourney() }
-        const [lat, lon] = pointAtKm(routeCoords, cumKm, progress)
-        onLivePos({ lat, lon })
+        const here = pointAtKm(routeCoords, cumKm, progress)
+        // heading from the route itself — steadier than GPS course at low speed
+        const heading = progress < totalKm - 0.04
+          ? bearingDeg(here, pointAtKm(routeCoords, cumKm, progress + 0.04))
+          : bearingDeg(pointAtKm(routeCoords, cumKm, progress - 0.04), here)
+        onLivePos({ lat: here[0], lon: here[1], heading })
       }
 
       const left = Math.max(0, Math.round((nextSyncAtRef.current - now) / 1000))
@@ -528,76 +623,199 @@ export default function LiveJourneyPanel({
     )
   }
 
+  // ── turn-by-turn: next maneuver ahead of the current progress ──────────
+  const upcoming = stepsKm.filter((s) => s.km > progressKm + 0.015 && s.type !== 11)
+  const nextStep = upcoming[0] || null
+  const thenStep = upcoming[1] && upcoming[1].km - (nextStep?.km ?? 0) < 0.5 ? upcoming[1] : null
+  const distToNext = nextStep ? nextStep.km - progressKm : null
+
+  // ── compact rain chip for the bottom bar ────────────────────────────────
+  let rainChip = null
+  if (!arrived && countdown?.kind === 'ahead') {
+    rainChip = {
+      tone: 'rain',
+      text: countdown.mins < 1.5
+        ? t(`${rainLabelTr(countdown.label)} starting now`, `${rainLabelTr(countdown.label)} अभी शुरू`)
+        : t(`${rainLabelTr(countdown.label)} in ${fmtMins(countdown.mins)}`, `${fmtMins(countdown.mins)} में ${rainLabelTr(countdown.label)}`),
+      sub: decayChip,
+    }
+  } else if (!arrived && countdown?.kind === 'in_rain') {
+    rainChip = {
+      tone: 'rain',
+      text: countdown.endsMins != null
+        ? t(`In ${rainLabelTr(countdown.label).toLowerCase()} · ends ${fmtMins(countdown.endsMins)}`, `${rainLabelTr(countdown.label)} में · ${fmtMins(countdown.endsMins)} में खत्म`)
+        : t('Rain to destination', 'मंज़िल तक बारिश'),
+    }
+  } else if (!arrived && countdown?.kind === 'clear') {
+    rainChip = { tone: 'clear', text: t('No rain ahead', 'आगे बारिश नहीं') }
+  }
+
+  // ── fog chip: the next low-visibility stretch ───────────────────────────
+  let fogChip = null
+  const zoneAhead = !arrived ? fogZ.find((z) => z.endKm > progressKm) : null
+  if (zoneAhead) {
+    const vis = fmtVisibility(zoneAhead.minVis)
+    fogChip = zoneAhead.startKm <= progressKm
+      ? t(`In fog · visibility ${vis} — slow down`, `कोहरे में · दृश्यता ${vis} — धीमे चलें`)
+      : t(`Fog in ${fmtMins(((zoneAhead.startKm - progressKm) / speedForEta()) * 60)} · visibility ${vis}`, `${fmtMins(((zoneAhead.startKm - progressKm) / speedForEta()) * 60)} में कोहरा · दृश्यता ${vis}`)
+  }
+
+  const endJourney = () => { endServerJourney(); onEnd() }
+
   return (
-    <div className="live-panel">
-      <div className="live-panel__head">
-        <span className="live-badge">
-          <span className="live-badge__dot" aria-hidden />
-          {t('LIVE JOURNEY', 'लाइव सफ़र')}
-        </span>
-        {offRoute && <span className="live-offroute">{t('Off route', 'रास्ते से बाहर')}</span>}
-        <button type="button" className="live-end-btn" onClick={() => { endServerJourney(); onEnd() }}>{t('End', 'समाप्त')}</button>
-      </div>
-
-      {hero}
-
-      {!arrived && !simOn && (offRoute || phase === 'starting') && countdown && (
-        <p className="live-anchor-note">
-          {t("📍 You're not on the route yet — predictions count from the route's start point and will lock onto your GPS once you're on the way.", '📍 आप अभी रास्ते पर नहीं हैं — अनुमान रास्ते के शुरुआती बिंदु से गिने जाते हैं और आपके चलने पर आपके GPS से जुड़ जाएँगे।')}
-        </p>
-      )}
-
-      <div className="live-stats">
-        <div className="live-stat">
-          <span className="live-stat__label">{t('Speed', 'गति')}</span>
-          <span className="live-stat__value">
-            {speedKmh != null ? `${Math.round(speedKmh)} ${t('km/h', 'किमी/घं')}` : '—'}
-          </span>
-        </div>
-        <div className="live-stat">
-          <span className="live-stat__label">{t('Remaining', 'शेष')}</span>
-          <span className="live-stat__value">{remainKm.toFixed(1)} {t('km', 'किमी')}</span>
-        </div>
-        <div className="live-stat">
-          <span className="live-stat__label">{t('Arrive', 'पहुँच')}</span>
-          <span className="live-stat__value">{eta != null && !arrived ? `${istClock(eta)} ${t('IST', 'IST')}` : '—'}</span>
-        </div>
-      </div>
-
-      {updateNote && <p className="live-note">{updateNote}</p>}
-
-      {!arrived && (guardian === 'on' || guardian === 'denied') && (
-        <p className={`live-guardian${guardian === 'on' ? ' live-guardian--on' : ''}`}>
-          {guardian === 'on'
-            ? t("🛡 Screen-off watch on — you'll get a notification if rain nears your route, even with the phone locked.", '🛡 स्क्रीन-ऑफ निगरानी चालू — अगर बारिश आपके रास्ते के पास आए तो फ़ोन लॉक होने पर भी आपको सूचना मिलेगी।')
-            : t("🔕 Notifications blocked — with the screen off you won't get rain warnings. Allow notifications to enable.", '🔕 सूचनाएँ अवरुद्ध — स्क्रीन बंद होने पर आपको बारिश की चेतावनी नहीं मिलेगी। चालू करने के लिए सूचनाओं को अनुमति दें।')}
-        </p>
-      )}
-
-      <div className="live-sync">
-        {syncing ? (
-          <><span className="spinner spinner--sm" aria-hidden /> {t('Syncing with radar…', 'रडार से सिंक हो रहा है…')}</>
+    <div className="nav-ui">
+      {/* ── Top: next maneuver card ── */}
+      <div className="nav-top">
+        {arrived ? (
+          <div className="nav-turn nav-turn--done">
+            <ManeuverIcon type={10} />
+            <div className="nav-turn__text">
+              <span className="nav-turn__dist">{t("You've arrived", 'आप पहुँच गए')}</span>
+              <span className="nav-turn__street">{t('Journey complete.', 'सफ़र पूरा हुआ।')}</span>
+            </div>
+          </div>
+        ) : phase === 'geo_error' ? (
+          <div className="nav-turn nav-turn--warn">
+            <span className="nav-mico nav-mico--glyph">📍</span>
+            <div className="nav-turn__text">
+              <span className="nav-turn__dist">{t('No GPS', 'GPS नहीं')}</span>
+              <span className="nav-turn__street">{geoMsg}</span>
+            </div>
+          </div>
+        ) : nextStep ? (
+          <div className="nav-turn">
+            <ManeuverIcon type={nextStep.type} />
+            <div className="nav-turn__text">
+              <span className="nav-turn__dist">{fmtDist(distToNext)}</span>
+              <span className="nav-turn__instr">{maneuverText(nextStep)}</span>
+              {streetName(nextStep) && <span className="nav-turn__street">{streetName(nextStep)}</span>}
+            </div>
+          </div>
         ) : (
-          <>{t('Next radar sync in', 'अगला रडार सिंक')} {Math.floor(syncLeftSec / 60)}:{String(syncLeftSec % 60).padStart(2, '0')}</>
+          <div className="nav-turn">
+            <ManeuverIcon type={6} />
+            <div className="nav-turn__text">
+              <span className="nav-turn__dist">{phase === 'starting' ? t('Locating…', 'स्थान खोजा जा रहा है…') : fmtDist(remainKm)}</span>
+              <span className="nav-turn__instr">{t('Follow the route', 'रास्ते पर चलते रहें')}</span>
+            </div>
+          </div>
+        )}
+        {thenStep && !arrived && (
+          <div className="nav-then">
+            {t('Then', 'फिर')} <ManeuverIcon type={thenStep.type} size={18} />
+          </div>
+        )}
+        {offRoute && !arrived && <div className="nav-offroute">{t('Off route', 'रास्ते से बाहर')}</div>}
+      </div>
+
+      {/* ── Speed bubble ── */}
+      {!arrived && (
+        <div className="nav-speed" aria-label={t('Current speed', 'वर्तमान गति')}>
+          <span className="nav-speed__val">{speedKmh != null ? Math.round(speedKmh) : '—'}</span>
+          <span className="nav-speed__unit">{t('km/h', 'किमी/घं')}</span>
+        </div>
+      )}
+
+      {/* ── Bottom sheet: weather chips + ETA bar + details ── */}
+      <div className={`nav-sheet${sheetOpen ? ' is-open' : ''}`}>
+        {(rainChip || fogChip || updateNote) && (
+          <div className="nav-chips">
+            {rainChip && (
+              <button type="button" className={`nav-chip nav-chip--${rainChip.tone}`} onClick={() => setSheetOpen(true)}>
+                <span aria-hidden>{rainChip.tone === 'clear' ? '☀' : '🌧'}</span> {rainChip.text}
+                {rainChip.sub && <span className="nav-chip__sub">· {rainChip.sub}</span>}
+              </button>
+            )}
+            {fogChip && (
+              <span className="nav-chip nav-chip--fog"><span aria-hidden>🌫</span> {fogChip}</span>
+            )}
+            {updateNote && <span className="nav-chip nav-chip--note">{updateNote}</span>}
+          </div>
+        )}
+
+        <div className="nav-bar">
+          <button type="button" className="nav-exit" onClick={endJourney} aria-label={t('End navigation', 'नेविगेशन समाप्त करें')}>
+            ✕
+          </button>
+          <button type="button" className="nav-eta" onClick={() => setSheetOpen((v) => !v)} aria-expanded={sheetOpen}>
+            {arrived ? (
+              <span className="nav-eta__big">{t('Arrived', 'पहुँच गए')}</span>
+            ) : (
+              <>
+                <span className="nav-eta__big">{eta != null ? fmtDuration(eta) : '—'}</span>
+                <span className="nav-eta__sub">
+                  {fmtDist(remainKm)} · {eta != null ? `${istClock(eta)} ${t('arrival', 'पहुँच')}` : '—'}
+                </span>
+              </>
+            )}
+          </button>
+          <button type="button" className="nav-expand" onClick={() => setSheetOpen((v) => !v)} aria-label={t('More', 'और')}>
+            {sheetOpen ? '⌄' : '⌃'}
+          </button>
+        </div>
+
+        {sheetOpen && (
+          <div className="nav-details">
+            {hero}
+
+            {!arrived && !simOn && (offRoute || phase === 'starting') && countdown && (
+              <p className="live-anchor-note">
+                {t("📍 You're not on the route yet — predictions count from the route's start point and will lock onto your GPS once you're on the way.", '📍 आप अभी रास्ते पर नहीं हैं — अनुमान रास्ते के शुरुआती बिंदु से गिने जाते हैं और आपके चलने पर आपके GPS से जुड़ जाएँगे।')}
+              </p>
+            )}
+
+            {!arrived && (guardian === 'on' || guardian === 'denied') && (
+              <p className={`live-guardian${guardian === 'on' ? ' live-guardian--on' : ''}`}>
+                {guardian === 'on'
+                  ? t("🛡 Screen-off watch on — you'll get a notification if rain nears your route, even with the phone locked.", '🛡 स्क्रीन-ऑफ निगरानी चालू — अगर बारिश आपके रास्ते के पास आए तो फ़ोन लॉक होने पर भी आपको सूचना मिलेगी।')
+                  : t("🔕 Notifications blocked — with the screen off you won't get rain warnings. Allow notifications to enable.", '🔕 सूचनाएँ अवरुद्ध — स्क्रीन बंद होने पर आपको बारिश की चेतावनी नहीं मिलेगी। चालू करने के लिए सूचनाओं को अनुमति दें।')}
+              </p>
+            )}
+
+            <div className="live-sync">
+              {syncing ? (
+                <><span className="spinner spinner--sm" aria-hidden /> {t('Syncing with radar…', 'रडार से सिंक हो रहा है…')}</>
+              ) : (
+                <>{t('Next radar sync in', 'अगला रडार सिंक')} {Math.floor(syncLeftSec / 60)}:{String(syncLeftSec % 60).padStart(2, '0')}</>
+              )}
+            </div>
+
+            {upcoming.length > 0 && !arrived && (
+              <div className="nav-steps">
+                <span className="nav-steps__title">{t('Directions', 'दिशा-निर्देश')}</span>
+                <ol>
+                  {upcoming.slice(0, 12).map((s, i) => (
+                    <li key={`${s.wp}-${i}`}>
+                      <ManeuverIcon type={s.type} size={22} />
+                      <span className="nav-steps__instr">
+                        {maneuverText(s)}{streetName(s) ? ` · ${streetName(s)}` : ''}
+                      </span>
+                      <span className="nav-steps__dist">{fmtDist(s.km - progressKm)}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {import.meta.env.DEV && !arrived && (
+              <button
+                type="button"
+                className="live-sim-btn"
+                onClick={() => {
+                  simRef.current = !simRef.current
+                  setSimOn(simRef.current)
+                  if (simRef.current && !fixRef.current) {
+                    progressRef.current = 0
+                    fixRef.current = { snapKm: 0, at: Date.now(), lat: routeCoords[0][0], lon: routeCoords[0][1] }
+                  }
+                }}
+              >
+                {simOn ? t('⏸ Stop simulated drive', '⏸ नकली ड्राइव रोकें') : t('▶ Simulate drive (dev only)', '▶ नकली ड्राइव (केवल dev)')}
+              </button>
+            )}
+          </div>
         )}
       </div>
-
-      {import.meta.env.DEV && !arrived && (
-        <button
-          type="button"
-          className="live-sim-btn"
-          onClick={() => {
-            simRef.current = !simRef.current
-            setSimOn(simRef.current)
-            if (simRef.current && !fixRef.current) {
-              progressRef.current = 0
-              fixRef.current = { snapKm: 0, at: Date.now(), lat: routeCoords[0][0], lon: routeCoords[0][1] }
-            }
-          }}
-        >
-          {simOn ? t('⏸ Stop simulated drive', '⏸ नकली ड्राइव रोकें') : t('▶ Simulate drive (dev only)', '▶ नकली ड्राइव (केवल dev)')}
-        </button>
-      )}
     </div>
   )
 }

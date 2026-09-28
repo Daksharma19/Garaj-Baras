@@ -6,7 +6,7 @@
 > deployment, and operational constraints. Only open source files when you need
 > the exact implementation of something specific.
 >
-> Last updated: 2026-07-12.
+> Last updated: 2026-09-29.
 
 ---
 
@@ -87,8 +87,10 @@ Garaj Baras/
 │   └── debug_*.png, *_verify*.png ← throwaway debug images (ignore)
 ├── frontend/
 │   ├── src/App.jsx              ← ~1900 lines; entire app UI: tabs, route page, nowcast page, chat page
-│   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car + live GPS marker (follow mode)
-│   ├── src/LiveJourney.jsx      ← live journey mode: GPS tracking, per-second rain countdown, 5-min radar re-sync, journey-guardian registration
+│   ├── src/RouteMap.jsx         ← lazy-loaded Leaflet map: colored route segments + animated journey car + rain/fog layer toggles; `navMode` = full-screen heading-up nav map (leaflet-rotate)
+│   ├── src/LiveJourney.jsx      ← navigation UI: GPS tracking, ORS turn-by-turn card, speed/ETA bar, rain + fog chips, 5-min radar re-sync, journey-guardian registration
+│   ├── src/fog.js               ← Open-Meteo hourly visibility along route waypoints (browser-side, keyless) → fog zones
+│   ├── src/leafletSetup.js      ← exposes window.L before `leaflet-rotate` loads (the plugin patches the global)
 │   ├── src/NetworkLayers.jsx    ← UNRELATED OSI-layers demo component; not imported anywhere
 │   ├── public/sw.js             ← service worker: push notifications + offline fallback
 │   ├── public/manifest.webmanifest, icon-*.png, apple-touch-icon.png, offline.html ← PWA assets
@@ -514,8 +516,31 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   on-demand `/nowcast` for that point. Merged waypoints carry `_cumKm` (their
   real distance along the route) so segment coloring survives live-journey
   re-predictions where passed waypoints clamp to eta 0.
-- **Live journey mode (`LiveJourney.jsx`):** "Start Live Journey" on the
-  results screen. Two clocks: a 1 s client tick (GPS `watchPosition` snapped
+- **Fog layer (`fog.js`):** IMD radar can't see fog, so after each route
+  prediction the frontend fetches Open-Meteo `hourly=visibility` for all
+  waypoints in one multi-location GET (no backend involvement — keeps the
+  512 MB server untouched), picking each waypoint's forecast hour at its ETA.
+  <1 km = fog, <500 m = thick, <200 m = dense. Contiguous foggy waypoints
+  become fog zones, drawn as a dashed haze on the route (toggleable, like the
+  rain forecast coloring), summarized in a `fog-banner` on the results page,
+  and shown as a "Fog in ~N min · visibility X" chip while navigating.
+  Refreshed every 20 min during navigation. Failures are silent (fog optional).
+- **Navigation mode (`LiveJourney.jsx` + `RouteMap navMode`):** "Start
+  navigation" on the results screen opens a full-screen view (portal to
+  `document.body`, `.nav-screen`): a second RouteMap instance with
+  `rotate: true` (leaflet-rotate) that follows the puck heading-up (bearing =
+  360 − route heading, puck framed in the lower third; compass button toggles
+  north-up), a green top card with the next maneuver + distance + street and a
+  "Then" hint, a speed bubble, and a bottom bar (Exit · time left · km left ·
+  arrival clock · expand). Rain/fog chips sit above the bar; the expanded
+  sheet holds the full rain hero, guardian/sync status and the upcoming
+  directions list. Turn-by-turn comes from the ORS response's
+  `segments[].steps` (type/name/exit_number/way_points[0] kept in
+  `routeSteps`); each step is located by the cumulative km of its geometry
+  index and the next one is the first step ahead of current progress. Heading
+  is derived from the route geometry at the current progress (steadier than
+  GPS course). The inline results map is not rendered with a live position
+  (only the nav map is). Two clocks: a 1 s client tick (GPS `watchPosition` snapped
   to the route + dead-reckoned between fixes at an EMA rolling speed) drives
   a live "rain in ~N min" countdown, remaining km, and arrival time; every
   5 min a radar sync POSTs `/radar/refresh` then re-sends all waypoints to
@@ -527,8 +552,9 @@ Single-page React app, all UI in **App.jsx** (~1900 lines), three tabs
   the server-side **journey guardian** (push subscription + route + speed →
   `/journey/start`; each sync re-anchors via `/journey/update`; End/arrival →
   `/journey/end`) so rain warnings arrive as push notifications while the
-  screen is off. RouteMap shows a pulsing live GPS marker with follow mode
-  (pan pauses on drag; Re-center button).
+  screen is off. The nav map shows a direction arrow with follow mode (pan
+  pauses on drag; Re-center button). Note: RouteMap gets its Leaflet map via
+  `ref={setMapRef}` — react-leaflet v5 has no `whenCreated`.
 - **Nowcast tab:** location search or geolocation → `NowcastSlots` (8 slot
   cards with probability bars), `RadarScenePlayer` (canvas player over
   `/nowcast/radar_scene`; `ForecastRadarPlayer` remains as unused fallback),

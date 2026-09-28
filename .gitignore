@@ -43,3 +43,6 @@ backend/verification.db*
 # Rain alert runtime data + dev push keys
 backend/alerts.db*
 backend/vapid_keys.json
+
+# local secrets
+.env

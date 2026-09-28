@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import L from 'leaflet'
+import L from './leafletSetup'
+import 'leaflet-rotate'
 import { MapContainer, Marker, Popup, Polyline, TileLayer } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { useT, tr } from './i18n'
+import { FOG_COLORS, fogZones } from './fog'
 
 const CARTO_KEY = import.meta.env.VITE_CARTO_API_KEY
 
@@ -129,6 +131,46 @@ const liveIcon = L.divIcon({
   iconAnchor: [18, 18],
 })
 
+// Navigation puck: an arrow pointing along the direction of travel. Markers
+// stay upright on screen under leaflet-rotate, so `rot` = heading + map bearing.
+function navArrowIcon(rot) {
+  return L.divIcon({
+    className: 'nav-arrow-wrap',
+    html: `<div class="nav-arrow" style="transform:rotate(${rot}deg)"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 3 L34 35 L20 27 L6 35 Z"/></svg></div>`,
+    iconSize: [44, 44],
+    iconAnchor: [22, 22],
+  })
+}
+
+/** Slice of the route polyline between two along-route distances (km). */
+function sliceRoute(routeCoords, cumKm, fromKm, toKm) {
+  const out = []
+  const lerp = (i, km) => {
+    const span = cumKm[i] - cumKm[i - 1] || 1e-9
+    const u = Math.max(0, Math.min(1, (km - cumKm[i - 1]) / span))
+    return [
+      routeCoords[i - 1][0] + u * (routeCoords[i][0] - routeCoords[i - 1][0]),
+      routeCoords[i - 1][1] + u * (routeCoords[i][1] - routeCoords[i - 1][1]),
+    ]
+  }
+  for (let i = 1; i < routeCoords.length; i++) {
+    if (cumKm[i] < fromKm) continue
+    if (!out.length) out.push(lerp(i, fromKm))
+    if (cumKm[i] >= toKm) { out.push(lerp(i, toKm)); break }
+    out.push(routeCoords[i])
+  }
+  return out
+}
+
+/** Point `km` ahead of (lat, lon) along compass heading `deg`. */
+function offsetPoint(lat, lon, deg, km) {
+  const r = (deg * Math.PI) / 180
+  return [
+    lat + (km * Math.cos(r)) / 111.32,
+    lon + (km * Math.sin(r)) / (111.32 * Math.cos((lat * Math.PI) / 180)),
+  ]
+}
+
 function endpointIcon(kind) {
   // kind: 'start' | 'end'
   const label = kind === 'start' ? 'A' : 'B'
@@ -149,11 +191,17 @@ export default function RouteMap({
   setActiveSeg,
   openSegmentPopup,
   onStopDetails,
-  livePos,          // {lat, lon} while a live journey is running, else null
+  livePos,          // {lat, lon, heading} while a live journey is running, else null
+  fog,              // [{cumKm, visM, level}] from fog.js, or null
+  navMode = false,  // full-screen turn-by-turn map (heading-up, follow-me)
 }) {
   const t = useT()
   const [mapRef, setMapRef] = useState(null)
   const isLive = !!livePos
+  const [showRain, setShowRain] = useState(true)
+  const [showFog, setShowFog] = useState(true)
+  const [headingUp, setHeadingUp] = useState(true)
+  const [bearingDeg, setBearingDeg] = useState(0)
 
   // ── Journey state ────────────────────────────────────────────────────────
   const journey = useMemo(
@@ -248,16 +296,76 @@ export default function RouteMap({
     return () => { mapRef.off('dragstart', onDrag) }
   }, [mapRef])
 
+  const firstFixRef = useRef(true)
+
+  function followLive(animate = true) {
+    if (!mapRef || !livePos) return
+    const h = Number(livePos.heading)
+    if (!navMode) {
+      mapRef.panTo([livePos.lat, livePos.lon], { animate, duration: 0.6 })
+      return
+    }
+    // heading-up: rotate so the travel direction points up the screen
+    const target = headingUp && Number.isFinite(h) ? (360 - h) % 360 : 0
+    if (typeof mapRef.setBearing === 'function') {
+      const cur = mapRef.getBearing()
+      const diff = Math.abs(((target - cur + 540) % 360) - 180)
+      if (diff > 2) mapRef.setBearing(target)
+      setBearingDeg(mapRef.getBearing())
+    }
+    const z = firstFixRef.current ? 17 : mapRef.getZoom()
+    firstFixRef.current = false
+    // Google-style framing: the puck sits in the lower third so more road
+    // ahead is visible — shift the map centre forward along the heading.
+    let center = [livePos.lat, livePos.lon]
+    if (headingUp && Number.isFinite(h)) {
+      const mPerPx = (156543.03 * Math.cos((livePos.lat * Math.PI) / 180)) / 2 ** z
+      const aheadKm = (mPerPx * mapRef.getSize().y * 0.22) / 1000
+      center = offsetPoint(livePos.lat, livePos.lon, h, aheadKm)
+    }
+    mapRef.setView(center, z, { animate, duration: 0.8 })
+  }
+
   useEffect(() => {
-    if (!isLive) { followRef.current = true; setFollow(true); return }
+    if (!isLive) { followRef.current = true; setFollow(true); firstFixRef.current = true; return }
     if (!mapRef || !followRef.current) return
-    mapRef.panTo([livePos.lat, livePos.lon], { animate: true, duration: 0.6 })
-  }, [isLive, livePos, mapRef])
+    followLive(!firstFixRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive, livePos, mapRef, navMode, headingUp])
 
   const carPos = useMemo(() => {
     if (!journey || !routeCoords?.length) return null
     return carPositionAt(journey, routeCoords, carT)
   }, [journey, routeCoords, carT])
+
+  // ── Fog overlay: contiguous low-visibility stretches along the route ─────
+  const routeCumKm = useMemo(() => {
+    if (!Array.isArray(routeCoords) || routeCoords.length < 2) return null
+    const cum = [0]
+    for (let i = 1; i < routeCoords.length; i++) {
+      cum.push(cum[i - 1] + haversineKm(routeCoords[i - 1][0], routeCoords[i - 1][1], routeCoords[i][0], routeCoords[i][1]))
+    }
+    return cum
+  }, [routeCoords])
+
+  const fogLines = useMemo(() => {
+    if (!routeCumKm || !Array.isArray(fog) || !fog.length) return []
+    return fogZones(fog)
+      .map((z) => {
+        // a single-point zone still deserves a visible stretch (±0.5 km)
+        const short = z.endKm - z.startKm < 0.2
+        const a = short ? z.startKm - 0.5 : z.startKm
+        const b = short ? z.endKm + 0.5 : z.endKm
+        return { ...z, positions: sliceRoute(routeCoords, routeCumKm, Math.max(0, a), b) }
+      })
+      .filter((z) => z.positions.length >= 2)
+  }, [fog, routeCoords, routeCumKm])
+
+  const heading = Number(livePos?.heading)
+  const arrowIcon = useMemo(
+    () => navArrowIcon(Number.isFinite(heading) ? Math.round((heading + bearingDeg) % 360) : 0),
+    [heading, bearingDeg],
+  )
 
   // ── Map fit ──────────────────────────────────────────────────────────────
   const midpoint = routeCoords?.length
@@ -294,19 +402,19 @@ export default function RouteMap({
   }, [mapRef, routeBounds])
 
   return (
-    <div className="map-container">
+    <div className={`map-container${navMode ? ' map-container--nav' : ''}`}>
       <MapContainer
+        ref={setMapRef}
         center={midpoint}
         zoom={9}
-        style={{ height: '320px', width: '100%' }}
-        zoomControl
+        style={{ height: navMode ? '100%' : '320px', width: '100%' }}
+        zoomControl={!navMode}
         scrollWheelZoom
-        whenCreated={(map) => {
-          setMapRef(map)
-          if (routeBounds && routeBounds.isValid()) {
-            map.fitBounds(routeBounds, { padding: [10, 10], maxZoom: 17, animate: true })
-          }
-        }}
+        rotate={navMode}
+        bearing={0}
+        touchRotate={false}
+        rotateControl={false}
+        shiftKeyRotate={false}
       >
         <TileLayer
           url={`https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?key=${CARTO_KEY}`}
@@ -314,10 +422,15 @@ export default function RouteMap({
         />
 
         {Array.isArray(routeCoords) && routeCoords.length > 0 && (
-          <Polyline positions={routeCoords} color="#0EA5E9" weight={5} opacity={0.35} />
+          <Polyline
+            positions={routeCoords}
+            color={navMode ? '#3B82F6' : '#0EA5E9'}
+            weight={navMode ? 9 : 5}
+            opacity={navMode ? 0.9 : 0.35}
+          />
         )}
 
-        {Array.isArray(routeSegments) &&
+        {showRain && Array.isArray(routeSegments) &&
           routeSegments.map((seg, idx) => (
             <Polyline
               key={`seg-${idx}`}
@@ -328,6 +441,20 @@ export default function RouteMap({
               eventHandlers={{ click: () => openSegmentPopup(seg) }}
             />
           ))}
+
+        {/* Fog layer: dashed haze over low-visibility stretches */}
+        {showFog && fogLines.map((z, i) => (
+          <Polyline
+            key={`fog-${i}`}
+            positions={z.positions}
+            color={FOG_COLORS[z.level] || '#CBD5E1'}
+            weight={navMode ? 18 : 14}
+            opacity={0.45}
+            dashArray="2 10"
+            lineCap="round"
+            interactive={false}
+          />
+        ))}
 
         {/* Start / destination markers */}
         {Array.isArray(routeCoords) && routeCoords.length >= 2 && (
@@ -364,7 +491,12 @@ export default function RouteMap({
 
         {/* Live GPS marker */}
         {isLive && (
-          <Marker position={[livePos.lat, livePos.lon]} icon={liveIcon} zIndexOffset={1200} interactive={false} />
+          <Marker
+            position={[livePos.lat, livePos.lon]}
+            icon={navMode ? arrowIcon : liveIcon}
+            zIndexOffset={1200}
+            interactive={false}
+          />
         )}
 
         {activeSeg?.mid && (
@@ -427,15 +559,49 @@ export default function RouteMap({
         </div>
       )}
 
+      {/* Layer toggles: forecast rain coloring + fog (+ compass in nav) */}
+      <div className={`map-layers${navMode ? ' map-layers--nav' : ''}`}>
+        <button
+          type="button"
+          className={`map-layer-btn${showRain ? ' is-on' : ''}`}
+          onClick={() => setShowRain((v) => !v)}
+          aria-pressed={showRain}
+          title={t('Rain forecast coloring', 'बारिश पूर्वानुमान रंग')}
+        >
+          🌧 <span>{t('Rain', 'बारिश')}</span>
+        </button>
+        <button
+          type="button"
+          className={`map-layer-btn${showFog ? ' is-on' : ''}`}
+          onClick={() => setShowFog((v) => !v)}
+          aria-pressed={showFog}
+          title={t('Fog / low visibility', 'कोहरा / कम दृश्यता')}
+        >
+          🌫 <span>{t('Fog', 'कोहरा')}</span>
+          {fogLines.length > 0 && <i className="map-layer-btn__dot" aria-hidden />}
+        </button>
+        {navMode && (
+          <button
+            type="button"
+            className="map-layer-btn"
+            onClick={() => setHeadingUp((v) => !v)}
+            title={headingUp ? t('Switch to north-up', 'उत्तर-ऊपर करें') : t('Switch to heading-up', 'दिशा-ऊपर करें')}
+          >
+            <span className="compass-needle" style={{ transform: `rotate(${bearingDeg}deg)` }} aria-hidden>▲</span>
+            <span>{headingUp ? t('Heading', 'दिशा') : t('North', 'उत्तर')}</span>
+          </button>
+        )}
+      </div>
+
       {/* Re-center on the live marker after the user pans away */}
       {isLive && !follow && (
         <button
           type="button"
-          className="journeyBtn recenterBtn"
+          className={`journeyBtn recenterBtn${navMode ? ' recenterBtn--nav' : ''}`}
           onClick={() => {
             followRef.current = true
             setFollow(true)
-            if (mapRef) mapRef.panTo([livePos.lat, livePos.lon], { animate: true, duration: 0.6 })
+            followLive(true)
           }}
         >
           ◎ {t('Re-center', 'फिर केंद्र करें')}
@@ -443,23 +609,25 @@ export default function RouteMap({
       )}
 
       {/* Journey control */}
-      {journey && !isLive && (journeyMode === 'done' || journeyMode === 'idle') && (
+      {journey && !isLive && !navMode && (journeyMode === 'done' || journeyMode === 'idle') && (
         <button type="button" className="journeyBtn" onClick={startJourney}>
           {journeyMode === 'done' ? t('↻ Replay journey', '↻ सफ़र दोबारा चलाएँ') : t('▶ Preview journey', '▶ सफ़र का पूर्वावलोकन')}
         </button>
       )}
 
-      <button
-        type="button"
-        className="zoomRouteBtn"
-        onClick={() => {
-          if (mapRef && routeBounds && routeBounds.isValid()) {
-            mapRef.fitBounds(routeBounds, { padding: [10, 10], maxZoom: 17, animate: true })
-          }
-        }}
-      >
-        {t('Zoom to route', 'रास्ते पर ज़ूम करें')}
-      </button>
+      {!navMode && (
+        <button
+          type="button"
+          className="zoomRouteBtn"
+          onClick={() => {
+            if (mapRef && routeBounds && routeBounds.isValid()) {
+              mapRef.fitBounds(routeBounds, { padding: [10, 10], maxZoom: 17, animate: true })
+            }
+          }}
+        >
+          {t('Zoom to route', 'रास्ते पर ज़ूम करें')}
+        </button>
+      )}
     </div>
   )
 }

@@ -1,5 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import axios from 'axios'
+import { fetchRouteFog, fogZones, fmtVisibility } from './fog'
 import './App.css'
 import { useAuth, AccountButton, SignInGate } from './auth'
 import SavedMenu from './SavedMenu'
@@ -2129,6 +2131,8 @@ export default function App() {
   const sampledRef = useRef([])          // original sampled waypoints (with cumKm)
   const routeLonLatRef = useRef(null)    // ORS geometry ([lon,lat]) for recoloring
   const liveSpeedRef = useRef(null)      // planned avg speed (km/h)
+  const [routeSteps, setRouteSteps] = useState([]) // ORS turn-by-turn maneuvers
+  const [routeFog, setRouteFog] = useState(null)   // Open-Meteo visibility along the route
 
   const reverseAbortRef = useRef(null)
   const reverseCacheRef = useRef(new Map())
@@ -2232,13 +2236,20 @@ export default function App() {
       ])
 
       let routeLonLat = null
+      let steps = []
       try {
         const orsRes = await axios.post(
           'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
           { coordinates: [[start.lon, start.lat], [end.lon, end.lat]], radiuses: [5000, 5000] },
           { timeout: 90000, headers: { Authorization: ORS_KEY, 'Content-Type': 'application/json' } }
         )
-        routeLonLat = orsRes.data?.features?.[0]?.geometry?.coordinates || null
+        const feature = orsRes.data?.features?.[0]
+        routeLonLat = feature?.geometry?.coordinates || null
+        // turn-by-turn: each step starts at geometry index way_points[0]
+        steps = (feature?.properties?.segments || [])
+          .flatMap((seg) => seg?.steps || [])
+          .filter((s) => Array.isArray(s?.way_points))
+          .map((s) => ({ type: s.type, name: s.name, exit: s.exit_number ?? null, wp: s.way_points[0] }))
       } catch {
         routeLonLat = [[start.lon, start.lat], [end.lon, end.lat]]
       }
@@ -2280,6 +2291,8 @@ export default function App() {
       setLiveActive(false)
       setLivePos(null)
       setJourneyStop(null)
+      setRouteSteps(steps)
+      setRouteFog(null)
       setRouteCoords(routeLonLat.map(([lon, lat]) => [lat, lon]))
       setResult({
         total_waypoints: sampled.length, rain_waypoints: 0, clear_waypoints: sampled.length,
@@ -2307,6 +2320,10 @@ export default function App() {
 
       setRouteSegments(buildColoredSegments(routeLonLat, mergedWaypoints))
       setResult({ ...predictRes.data, route_distance_km: totalKm, waypoints: mergedWaypoints })
+      // fog is optional — never block or fail the route on it
+      fetchRouteFog(mergedWaypoints)
+        .then((fog) => { if (routeLonLatRef.current === routeLonLat) setRouteFog(fog) })
+        .catch(() => {})
       if ((predictRes.data?.radar_lag_mins ?? 0) > 75) {
         setRadarDown(true)
       }
@@ -2351,6 +2368,32 @@ export default function App() {
     setLiveActive(false)
     setLivePos(null)
   }
+
+  // While navigating, refresh the fog picture every 20 min (visibility
+  // forecasts are hourly, so this is plenty).
+  useEffect(() => {
+    if (!liveActive) return
+    const id = setInterval(() => {
+      fetchRouteFog(result?.waypoints || []).then(setRouteFog).catch(() => {})
+    }, 20 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [liveActive]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Lock page scroll behind the full-screen navigation view
+  useEffect(() => {
+    if (!liveActive) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [liveActive])
+
+  const fogSummary = useMemo(() => {
+    const zones = fogZones(routeFog)
+    if (!zones.length) return null
+    const km = zones.reduce((a, z) => a + Math.max(0.5, z.endKm - z.startKm), 0)
+    const minVis = Math.min(...zones.map((z) => z.minVis))
+    return { km, minVis }
+  }, [routeFog])
 
   async function openSegmentPopup(seg) {
     if (!seg?.mid) return
@@ -2402,7 +2445,7 @@ export default function App() {
     endLiveJourney()
     setResult(null); setError(null); setActiveSeg(null); setJourneyStop(null)
     setRouteCoords([]); setRouteSegments([]); setRouteDistanceKm(null); setShowBreakdown(false)
-    setRadarDown(false)
+    setRadarDown(false); setRouteSteps([]); setRouteFog(null)
   }
 
   function handleTabChange(tab) {
@@ -2808,30 +2851,59 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Live journey: GPS-tracked countdown + auto radar re-sync */}
+              {/* Fog along the route (Open-Meteo visibility) */}
+              {!result._pending && fogSummary && (
+                <div className="fog-banner" role="note">
+                  <span className="fog-banner__icon" aria-hidden>🌫</span>
+                  <span>
+                    {t(
+                      `Fog likely on ~${Math.round(fogSummary.km)} km of your route — visibility down to ${fmtVisibility(fogSummary.minVis)}.`,
+                      `आपके रास्ते के ~${Math.round(fogSummary.km)} किमी पर कोहरे की संभावना — दृश्यता ${fmtVisibility(fogSummary.minVis)} तक।`,
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {/* Navigation: full-screen turn-by-turn + live rain/fog countdown */}
               {!result._pending && routeCoords.length >= 2 && (
-                liveActive ? (
-                  <Suspense fallback={null}>
+                <button
+                  type="button"
+                  className="live-start-btn"
+                  onClick={() => setLiveActive(true)}
+                >
+                  <span className="live-start-btn__dot" aria-hidden />
+                  {t('Start navigation', 'नेविगेशन शुरू करें')}
+                </button>
+              )}
+
+              {liveActive && !result._pending && routeCoords.length >= 2 && createPortal(
+                <div className="nav-screen" role="dialog" aria-label={t('Navigation', 'नेविगेशन')}>
+                  <Suspense fallback={<div className="nav-loading">{t('Loading map…', 'नक्शा लोड हो रहा है…')}</div>}>
+                    <RouteMap
+                      navMode
+                      routeCoords={routeCoords}
+                      routeSegments={routeSegments}
+                      waypoints={result.waypoints || []}
+                      activeSeg={activeSeg}
+                      setActiveSeg={setActiveSeg}
+                      openSegmentPopup={openSegmentPopup}
+                      livePos={livePos}
+                      fog={routeFog}
+                    />
                     <LiveJourneyPanel
                       apiBase={API_BASE}
                       routeCoords={routeCoords}
                       waypoints={result.waypoints || []}
                       plannedSpeedKmh={liveSpeedRef.current}
+                      steps={routeSteps}
+                      fog={routeFog}
                       onLivePos={setLivePos}
                       onWaypointsUpdated={applyLivePrediction}
                       onEnd={endLiveJourney}
                     />
                   </Suspense>
-                ) : (
-                  <button
-                    type="button"
-                    className="live-start-btn"
-                    onClick={() => setLiveActive(true)}
-                  >
-                    <span className="live-start-btn__dot" aria-hidden />
-                    {t('Start Live Journey', 'लाइव सफ़र शुरू करें')}
-                  </button>
-                )
+                </div>,
+                document.body,
               )}
 
               {/* Map */}
@@ -2853,7 +2925,8 @@ export default function App() {
                     setActiveSeg={setActiveSeg}
                     openSegmentPopup={openSegmentPopup}
                     onStopDetails={(stop) => setJourneyStop({ ...stop, requestId: Date.now() })}
-                    livePos={liveActive ? livePos : null}
+                    livePos={null}
+                    fog={routeFog}
                   />
                 </Suspense>
                 {scanning && (
@@ -2893,6 +2966,10 @@ export default function App() {
                       <span className="legend__text">{label}</span>
                     </div>
                   ))}
+                  <div className="legend__chip">
+                    <span className="legend__swatch legend__swatch--fog" aria-hidden />
+                    <span className="legend__text">{t('Fog (< 1 km visibility)', 'कोहरा (< 1 किमी दृश्यता)')}</span>
+                  </div>
                 </div>
               </div>
             </div>
