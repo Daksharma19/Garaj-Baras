@@ -418,12 +418,12 @@ export default function RouteMap({
         <TileLayer {...baseTiles(navMode ? 'nav' : 'route')} />
 
         {Array.isArray(routeCoords) && routeCoords.length > 0 && (
-          <Polyline
-            positions={routeCoords}
-            color={navMode ? '#3B82F6' : '#0EA5E9'}
-            weight={navMode ? 9 : 5}
-            opacity={navMode ? 0.9 : 0.35}
-          />
+          <>
+            {/* Focus: soft glow + bright casing so the route pops off the muted base map */}
+            <Polyline positions={routeCoords} color="#60A5FA" weight={navMode ? 26 : 18} opacity={0.16} interactive={false} />
+            <Polyline positions={routeCoords} color="#F8FAFC" weight={navMode ? 14 : 10} opacity={0.95} interactive={false} />
+            <Polyline positions={routeCoords} color="#2563EB" weight={navMode ? 9 : 6} opacity={1} interactive={false} />
+          </>
         )}
 
         {showRain && Array.isArray(routeSegments) &&
@@ -432,7 +432,7 @@ export default function RouteMap({
               key={`seg-${idx}`}
               positions={seg.positions}
               color={seg.color}
-              weight={7}
+              weight={navMode ? 9 : 6}
               opacity={0.92}
               eventHandlers={{ click: () => openSegmentPopup(seg) }}
             />

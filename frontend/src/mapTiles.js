@@ -21,7 +21,7 @@ function mapboxLayer(styleId) {
 /** kind: 'route' (dark results map) | 'nav' (turn-by-turn) | 'light' (India radar) */
 export function baseTiles(kind) {
   if (MAPBOX_TOKEN) {
-    if (kind === 'nav') return mapboxLayer('navigation-night-v1')
+    if (kind === 'nav') return mapboxLayer('dark-v11') // muted; route is the only bright thing
     if (kind === 'light') return mapboxLayer('light-v11')
     return mapboxLayer('dark-v11')
   }

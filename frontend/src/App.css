@@ -3546,3 +3546,11 @@ button.nav-chip { cursor: pointer; }
   .nav-speed { bottom: 24px; left: 420px; }
   .recenterBtn--nav { left: 500px; bottom: 34px; }
 }
+
+/* ── Route focus: mute the base map so only the user's path stands out ── */
+.map-container .leaflet-tile-pane {
+  filter: grayscale(0.85) brightness(0.72) contrast(0.85);
+}
+.map-container--nav .leaflet-tile-pane {
+  filter: grayscale(1) brightness(0.65) contrast(0.85);
+}
